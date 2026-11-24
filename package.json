@@ -1,0 +1,16 @@
+{
+  "name": "mapledr",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Down the Stack: an idle side-scrolling dungeon for herdr where every coding agent is a hero.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test test/",
+    "check": "node --import ./tools/mock/register.mjs tools/check.mjs",
+    "preview": "node --import ./tools/mock/register.mjs tools/preview/shoot.mjs",
+    "art": "node tools/gen-art.mjs",
+    "pacing": "node tools/pacing-sim.mjs"
+  },
+  "engines": { "node": ">=22" }
+}

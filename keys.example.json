@@ -1,0 +1,8 @@
+{
+  "layout:mapledr": {
+    "ctrl-shift-g": "layout.toggle:stage",
+    "ctrl-shift-s": "mapledr.sheet",
+    "ctrl-shift-a": "mapledr.herd",
+    "ctrl-shift-d": "mapledr.calm"
+  }
+}

@@ -1,0 +1,242 @@
+{
+  "id": "root",
+  "type": "row",
+  "titlebar": "none",
+  "traffic_lights": [
+    12,
+    16
+  ],
+  "background": "canvas",
+  "terminal_padding": [
+    14,
+    12
+  ],
+  "preview": "mods/mapledr/preview.svg",
+  "colors": {
+    "mdr_working": "#4CC38A",
+    "mdr_blocked": "#F2A93B",
+    "mdr_done": "#FFD447",
+    "mdr_idle": "#8A8F98",
+    "mdr_xp": "#7FE9F5",
+    "mdr_fresh_eyes": "#A9B8FF",
+    "mdr_hp": "#FF5A5F",
+    "mdr_heal": "#6BE38A",
+    "mdr_coin": "#C89B3C",
+    "mdr_bubble": "#FFFFFF",
+    "mdr_bubble_ink": "#1B1B1F",
+    "mdr_cream": "#FFF4D6",
+    "mdr_night_sky": "#151126",
+    "mdr_night_horizon": "#2E2545"
+  },
+  "divider": {
+    "width": 1,
+    "color": "border"
+  },
+  "children": [
+    {
+      "id": "sidebar",
+      "type": "column",
+      "size": {
+        "px": 268
+      },
+      "min": 44,
+      "max": 480,
+      "background": "chrome",
+      "resizable": false,
+      "children": [
+        {
+          "id": "brand",
+          "type": "block",
+          "size": {
+            "px": 46
+          },
+          "window_drag": true,
+          "content": {
+            "mod": "workspace-chrome"
+          }
+        },
+        {
+          "id": "sidebar-lists",
+          "type": "column",
+          "children": [
+            {
+              "id": "spaces",
+              "type": "block",
+              "size": {
+                "weight": 1
+              },
+              "min": 90,
+              "content": {
+                "mod": "spaces"
+              }
+            },
+            {
+              "id": "party",
+              "type": "block",
+              "size": {
+                "weight": 1.4
+              },
+              "min": 90,
+              "content": {
+                "mod": "mapledr",
+                "props": {
+                  "role": "party"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": "sidebar-footer",
+          "type": "block",
+          "size": {
+            "px": 69
+          },
+          "content": {
+            "mod": "workspace-chrome",
+            "props": {
+              "footer": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "work",
+      "type": "column",
+      "resizable": false,
+      "children": [
+        {
+          "id": "tabs",
+          "type": "block",
+          "size": {
+            "px": 42
+          },
+          "window_drag": true,
+          "content": {
+            "mod": "tabs"
+          }
+        },
+        {
+          "id": "work-body",
+          "type": "row",
+          "padding": 8,
+          "gap": 8,
+          "children": [
+            {
+              "id": "main",
+              "type": "block",
+              "content": {
+                "tab": "active",
+                "pane": {
+                  "gap": 8,
+                  "radius": 10,
+                  "background": "background",
+                  "lone": true,
+                  "border": {
+                    "width": 1,
+                    "color": "border"
+                  },
+                  "focus": {
+                    "width": 1,
+                    "color": "accent"
+                  },
+                  "header": {
+                    "content": {
+                      "mod": "mapledr",
+                      "props": {
+                        "role": "nameplate"
+                      }
+                    },
+                    "height": 34,
+                    "position": "top",
+                    "reveal": "always"
+                  }
+                }
+              }
+            },
+            {
+              "id": "panel",
+              "type": "column",
+              "hidden": true,
+              "size": {
+                "px": 368
+              },
+              "min": 280,
+              "max": 900,
+              "children": [
+                {
+                  "id": "panel-body",
+                  "type": "stack",
+                  "active": "files",
+                  "children": [
+                    {
+                      "id": "files",
+                      "type": "block",
+                      "content": {
+                        "mod": "files"
+                      }
+                    },
+                    {
+                      "id": "changes",
+                      "type": "block",
+                      "content": {
+                        "mod": "changes"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "stage",
+          "type": "block",
+          "size": {
+            "px": 200
+          },
+          "min": 64,
+          "max": 420,
+          "background": {
+            "gradient": [
+              "mdr_night_sky",
+              "mdr_night_horizon"
+            ],
+            "angle": 180
+          },
+          "content": {
+            "mod": "mapledr",
+            "props": {
+              "role": "stage"
+            }
+          }
+        },
+        {
+          "id": "hud",
+          "type": "block",
+          "hidden": true,
+          "size": {
+            "px": 26
+          },
+          "content": {
+            "mod": "mapledr",
+            "props": {
+              "role": "hud"
+            }
+          }
+        },
+        {
+          "id": "status",
+          "type": "block",
+          "size": {
+            "px": 28
+          },
+          "content": {
+            "mod": "workspace-status"
+          }
+        }
+      ]
+    }
+  ]
+}

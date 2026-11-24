@@ -54,7 +54,7 @@ tools/
   gen-art.mjs                   SVG generator for mods/mapledr/art
   pacing-sim.mjs                headless persona simulator (D§12) using the real engine
   reference-sim/                the Python model that produced the design's numbers
-test/                           node:test unit tests (`node --test test/`)
+test/                           node:test unit tests (`node --test "test/*.test.mjs"`)
 docs/                           DESIGN.md, ARCHITECTURE.md, herdr-notes/
 README.md, RECIPE.md, preview.png
 package.json                    "type": "module"; scripts: test, check, preview, art, pacing

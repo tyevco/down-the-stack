@@ -6,7 +6,7 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "test": "node --test test/",
+    "test": "node --test \"test/*.test.mjs\"",
     "check": "node --import ./tools/mock/register.mjs tools/check.mjs",
     "preview": "node --import ./tools/mock/register.mjs tools/preview/shoot.mjs",
     "art": "node tools/gen-art.mjs",

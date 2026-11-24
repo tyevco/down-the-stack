@@ -1,0 +1,115 @@
+# tools/mock — a Node stand-in for herdr's mod runtime
+
+We cannot run herdr-app here, so this folder fakes the parts a mod touches, **strictly**: where herdr
+throws, the mock throws (same wording); where herdr silently misbehaves (a `false` child, an unsized
+image, a missing file), the mock records an error. Built from herdr's source; see
+`docs/herdr-notes/gpui-api.md` and `runtime.md`. ARCHITECTURE §7 is the contract.
+
+## Commands
+
+```sh
+npm run check                 # = node --import ./tools/mock/register.mjs tools/check.mjs
+npm run preview               # = ... tools/preview/shoot.mjs   → out/*.png (+ .html)
+node --test test/mock.test.mjs
+```
+
+`check.mjs` lints the mod, runs the real `herdr-app check` path (checking, `props()` null, empty
+lists), then every role in `tools/fixtures.mjs` at widths 360/960/1600 × zoom 1/2 with 3 s of timers
+(widths/heights are logical block sizes; `on_size_change` gets them × zoom, as herdr reports window px).
+The lint also refuses top-level `await`. With a layout in the fixture, its root `colors` (`mdr_*`)
+join `theme()`, as in herdr.
+Flags: `--role stage`, `--widths 960`, `--zooms 1`, `--json`, `--quiet`, `--main`, `--fixtures`.
+Exit 0 = pass, 1 = errors, 2 = `main.js` or the fixtures module is missing.
+
+## Fixtures (`tools/fixtures.mjs`, owned by integration)
+
+```js
+import { sampleFixture } from "./mock/samples.mjs";      // herdr's exact data shapes
+export const roles = [
+  { name: "stage-midgame", props: { role: "stage" }, fixture: sampleFixture(6),
+    world: async ({ nowMs, host, mod }) => (await mod.import("./game/demo.js")).demoWorld("mid", nowMs) },
+    // put on getHost().world before render; mod.import() loads from the mod's own module graph
+  { name: "nameplate-agent", props: { role: "nameplate", pane: "p1", terminal: "t1" }, fixture: sampleFixture(3) },
+  { name: "sheet", props: { role: "sheet", overlay: "o1", heroId: 1 }, height: 500 },
+];
+```
+
+Role fields: `name`, `props`, `fixture` (live data, below), `world` (object or function),
+`setup({ mod, host, mock })`, `height`, `widths`, `zooms`, `nowMs`, `preview: {width, height}`.
+Fixture fields: `agents panes terminals spaces focused layout window placement machines theme
+settings fonts keys knownAgents props nowMs`, `files: { "/mock/home/data/mapledr/save.json": text }`
+(seeds the in-memory FS), `shared: {key: value}`, `exec: (cmd, args, opts) => result`.
+`theme` may be a preset name or a partial map over graphite; `settings` merges over herdr's defaults.
+
+## Using it in tests
+
+Mod files import bare `"gpui-kit"`, `"herdr"`, … so register the hooks first, then load mod code
+with **dynamic** `import()` (static imports resolve before `register` runs):
+
+```js
+import "../tools/mock/register.mjs";
+const M = await import("../tools/mock/index.mjs");
+const { div } = await import("gpui-kit");
+
+M.resetState();                                         // fixture, copies, FS, clock, calls
+const mod = await M.mountMod("mods/mapledr/main.js", { props: { role: "stage" }, fixture: M.sampleFixture(3), nowMs: 0 });
+const tree = mod.render();            // serialisable tree, or null if render threw (see mod.errors)
+mod.size(960, 210);                   // on_size_change on the root (window px; mods divide by zoom)
+await mod.tick(1000);                 // run due timers on the manual clock; re-renders if notified
+mod.fire("hero-1");                   // on_click on .id("hero-1"), bubbling; (e, cx) like herdr
+mod.fire("x", { button: "left" }, "mouse_down"); mod.hover("x"); await mod.command("sheet");
+M.calls().run;                        // recorded run()/openOverlay()/notify()/setAgentOrder()/...
+mod.errors; mod.warnings; mod.stats;  // [{level, code, message, phase, copy}], render ms, nodes
+```
+
+- `mountView(Class, opts)` mounts a View class without a file (handy for renderer unit tests).
+- Copies share module scope only when mounted with the same `graph` key (herdr has one VM; the
+  default gives each mount a fresh module graph, like a VM restart). `mod.import("./host.js")`
+  loads another file from the same graph. `mod.reload()` = hot reload (no `close()`), `mod.close()`.
+- `setFixture()` replaces live data, `updateFixture()` merges (marks copies that read those keys
+  dirty), `setChecking(true)` = `herdr-app check` behaviour, `setClock(ms)` freezes `Date.now()`.
+  `Date.now()` follows the mock clock (`tick` advances it); `new Date()` stays real time.
+- `appHome()` is `/mock/home`, `home()` is `/mock/user`; `readTextFile`/`writeTextFile` and
+  `fs/promises` (for files under `mods/`) share an in-memory FS (`M.memfs`). Reads under
+  `/mock/home/mods/mapledr/...` fall through to the repo, read-only.
+- Asset paths (`image()`/`svg()`) resolve like herdr's (relative to the app home):
+  `mods/mapledr/...` → this repo, `icons/...` → herdr's shipped icons; `setAssetRoot()` adds more.
+
+## What is enforced
+
+Thrown, as herdr does (error `code` in parentheses): unknown element method (`unknown-method`, with
+"did you mean"); bad color (`bad-color`: only `#rgb|#rrggbb|#rrggbbaa`) on `bg text_color text_bg
+border_color` and in state styles; bad length (`bad-length`: `auto` refused by `p* gap*`, `%`/`auto`
+by `border* rounded* text_size`); non-string `.id()` / `.tooltip()`; objects as arguments;
+`.child(null|undefined)` (`null-child`); one element under two parents (`reused-element`); an element
+from a previous render (`expired-element`); motion policy (`bad-motion`: property in opacity|width|
+height|left|top, loop period ≥ 100, frames ≥ 16 ms, spin ≥ 100, easing names); `when()` returning
+nothing; `cx.notify()` / `focus_handle()` / `cx.new()` during render (`notify-in-render`,
+`not-in-render`); a kept call-scoped cx (`stale-cx`); `run()` with unknown or mistyped arguments;
+`setTimeout`/`setInterval`/`structuredClone` called from mod code (`forbidden-global`); `fs/promises`
+outside granted roots (`fs-denied`, narrowed during check); imports herdr lacks (`node:*`, JSON).
+
+Recorded as errors (herdr would not throw, but it is a bug): `.child(true|false)` (`boolean-child`),
+`image()`/`svg()` without both w and h (`image-size`), missing/unmapped/`..`/URL asset
+(`missing-image`), NaN/Infinity lengths (`non-finite`), `spin()` on a non-svg (`spin-not-svg`),
+unknown command name or missing required argument in `run()` (`bad-command`), any host call at
+module top level (`top-level-herdr`), handlers on `image()`/`svg()` (`handler-on-image`: herdr drops them), `writeTextFile` while checking (`write-in-check`) or under
+`mods/` (`write-under-mods`), `setShared` in render, throwing handlers/timers/tasks, budgets (render
+50 ms, init/event/timer 500 ms, module 5 s, close 250 ms).
+
+Warnings: duplicate `.id()` in one render, transition without `.id()`, `frames()` with children,
+non-style calls in `hover()`, args to nullary styles, a second loop on one property, `playSound`,
+SVG files using `<text>`, render > 10 ms under V8 (QuickJS is slower), > 400 elements per render.
+
+Not modelled: layout/paint, real QuickJS speed, frozen built-in prototypes (check.mjs lints for
+writes to them), private `#fields`/static blocks (linted).
+
+## Files
+
+`register.mjs`/`hooks.mjs` (module mapping) · `herdr.mjs` · `gpui-kit.mjs`, `gpui.mjs`,
+`gpui-base.mjs`, `gpui-fps.mjs`, `gpui-shell.mjs`, `gpui-component.mjs` · `elements.mjs` (builder +
+validator + tree) · `validate.mjs` (argument grammar) · `view.mjs` (View, cx, timers) ·
+`harness.mjs` (mount/render/tick/fire) · `state.mjs` (fixture, clock, sink) · `memfs.mjs`,
+`fs-promises.mjs` · `theme.mjs` (herdr presets) · `samples.mjs` (sample live data) ·
+`index.mjs` (public API) · `sample/mods/mockdemo` (a tiny valid mod). Preview: `tools/preview/`
+(`render.mjs` tree → HTML, `window.mjs` mock herdr window, `shoot.mjs` Playwright PNGs).

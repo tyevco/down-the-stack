@@ -4,7 +4,8 @@
 //
 // Item = { uid, base, ilvl, rar, pol, aff: [[affixIdx, roll 0..99], ...], flags, prop }
 //   rar 0..5 (4 LTS: prop = LTS property idx; 5 Keepsake: prop = keepsake idx; else prop = -1)
-//   flags: 1 locked, 2 new. uid comes from state.herd.nextUid.
+//   flags: 1 locked, 2 new, 4 starter (a new hero's Training Stick: grows with its Intern, heroes.js).
+//   uid comes from state.herd.nextUid.
 //   base, ilvl, rar and prop never change after creation; pol changes by polish; `aff` is
 //   replaced as a whole on reroll (never edited in place: heroes.stats caches compare identity).
 //
@@ -23,6 +24,7 @@ import { stats, computeStats } from "./heroes.js";
 
 export const FLAG_LOCKED = 1;
 export const FLAG_NEW = 2;
+export const FLAG_STARTER = 4;
 const R_LTS = 4;
 const R_KEEPSAKE = 5;
 const EQUIP_THRESHOLD = 0.02; // D§8.7: equip if score >= +2%

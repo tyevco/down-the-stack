@@ -60,7 +60,7 @@ function populated(nHeroes = 4, { stash = 12, log = 8, full = false } = {}) {
     h.lastTab = "api";
     h.st = { kills: 51234, tasks: 312, seals: 288.4, wh: 41.5, dodges: 12, healed: 300 };
     h.cd.unblockedUntil = 120;
-    h.cd.boss = { 1: 1794990000000 };
+    h.cd.boss = { 1: 149400 }; // working seconds at the last kill (boss.js: hero.st.wh)
     for (let t = 0; t < (full ? 20 : 5); t++) H.recordTask(h, { minutes: 4 + t * 3, blocks: t % 2, spawned: t % 7 === 0 });
     h.pend = [{ min: 24, fmin: 1.5, title: "Fix flaky auth test", at: 1794999000000, sealFactor: 1 }];
     for (let s = 0; s < 6; s++) {
@@ -111,6 +111,21 @@ describe("round trip", () => {
     assert.equal(obj.heroes[0].eq[0][5].length, 2 * state.heroes[0].eq[0].aff.length); // flat affix pairs
     assert.deepEqual(obj.str, ["herdr-app/claude", "spc_19", "main", "api"]); // shared strings table
     assert.equal(obj.heroes[0].s, 0);
+  });
+
+  test("boss repeat cooldowns: beaten bosses and seconds left survive (bitmask + pairs)", () => {
+    const state = populated(1);
+    const h = state.heroes[0];
+    const now = Math.round(h.st.wh * 3600);
+    const cd = D.TUNING.boss.repeatCooldownWorkingSec;
+    h.cd.boss = { 0: now - 5 * cd, 3: now - 1200, 8: now - cd };
+    const t1 = encodeState(state);
+    assert.deepEqual(JSON.parse(t1).heroes[0].cd.b, [(1 << 0) | (1 << 3) | (1 << 8), 3, cd - 1200]);
+    const back = decodeState(t1).state.heroes[0].cd.boss;
+    assert.deepEqual(Object.keys(back).sort(), ["0", "3", "8"]);
+    assert.equal(back[3], now - 1200); //                  still cooling: exact
+    for (const k of [0, 8]) assert.ok(now - back[k] >= cd); // ready again: "beaten", cooldown over
+    assert.equal(encodeState(decodeState(t1).state), t1);
   });
 
   test("a fresh state and an empty herd round-trip", () => {
@@ -230,6 +245,10 @@ describe("size budget (D§13.3)", () => {
     for (const h of s.heroes) {
       h.pend = [{ min: 37.25, fmin: 0.75, title: "Refactor the session store adapter (#2)", at: 1795000012345, sealFactor: 0.75 }];
       h.cd.unblockedCdUntil = 8812000;
+      // every boss beaten, three still on their repeat cooldown (marks in working seconds,
+      // boss.js: hero.st.wh x 3600 at the kill)
+      h.cd.boss = {};
+      for (let b = 0; b < 9; b++) h.cd.boss[b] = Math.round(h.st.wh * 3600) - 4000 * b;
       h.spFree = 1;
       for (const it of h.eq) assert.ok(it.aff.length >= 3);
     }

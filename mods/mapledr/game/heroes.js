@@ -10,7 +10,7 @@ import {
 } from "./data.js";
 import { g, DR, need, bareHandDmg, powerLevel, trackerTier } from "./formulas.js";
 import { fnv1a32, rngNext, seedOf } from "./rng.js";
-import { itemStats, newItem, canEquip } from "./items.js";
+import { itemStats, newItem, canEquip, FLAG_STARTER } from "./items.js";
 
 const N_SLOTS = 6;
 const N_SKILLS = SKILL_SLOTS.length; // 7
@@ -34,7 +34,8 @@ export function heroName(seat, ord) {
 
 /**
  * A new Lv 1 Intern for a seat (ARCHITECTURE §3.2 Hero shape). Allocates state.herd.nextHeroId and
- * an item uid for the starter Training Stick (design gap: the starter is item level 1, Prototype).
+ * an item uid for the starter Training Stick (design gap: a Prototype at item level 1 that grows
+ * with its Intern, see growStarter).
  * The hero's RNG is seeded from its seat/ordinal/id mixed with one draw of the herd RNG.
  */
 export function newHero(state, { seat = "nospace/agent", sid = null, ord = 0, nowMs = 0 } = {}) {
@@ -54,8 +55,23 @@ export function newHero(state, { seat = "nospace/agent", sid = null, ord = 0, no
     rng: seedOf((fnv1a32(`${seat}#${ord}#${id}`) ^ mix) >>> 0),
     bornDay: herd.day || 0, pref: null,
   };
-  hero.eq[0] = newItem(state, { base: 0, ilvl: 1, rar: 0 });
+  hero.eq[0] = newItem(state, { base: 0, ilvl: 1, rar: 0, flags: FLAG_STARTER });
   return hero;
+}
+
+/**
+ * The starter Training Stick grows with its Intern (design gap, found by tools/pacing-sim.mjs):
+ * while the hero is an Intern and still holds it, its item level follows the reference kit,
+ * iRef(L) = max(1, L - 2) (D§5.2). Without this an Intern's Power Level sinks to L - 5 by Lv 8
+ * (weapons are 14% of early drops), autopilot keeps it on map 1-1 and the first day runs far behind
+ * D§12.1 (three Lv 9 Interns at map 1-3 by minute 36). From Lv 10 it is an ordinary item. The item
+ * object is replaced (same uid), never mutated, so stats caches see the change.
+ */
+function growStarter(hero) {
+  const it = hero.eq && hero.eq[0];
+  if (!it || !(it.flags & FLAG_STARTER) || it.base !== 0) return;
+  const i = Math.max(1, Math.min(hero.L, CAREERS[1].from) - 2);
+  if (i > it.ilvl) hero.eq[0] = Object.assign({}, it, { ilvl: i, aff: it.aff.slice() });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -690,8 +706,9 @@ function dryRun(hero, st) {
       ready.buff = t + cdOf(buff);
     }
     const sig = sv[4];
-    let extra = (t <= buffUntil ? buffDmg : 0) + (t <= retroUntil ? retroDmg : 0);
-    if (use(sig) && sig.type === "stacks") extra += (sig.perStack.dmg || 0) * Math.min(t, sig.maxStacks || 0);
+    const extra = (t <= buffUntil ? buffDmg : 0) + (t <= retroUntil ? retroDmg : 0);
+    // Bisect stacks add to Main hits only (combat.js F_MAIN), as in combat4.py
+    const mainExtra = extra + (use(sig) && sig.type === "stacks" ? (sig.perStack.dmg || 0) * Math.min(t, sig.maxStacks || 0) : 0);
     const crit = t <= buffUntil && buffCrit;
     actions++;
     const mult = tenx && actions % tenx === 0 ? tenxMult : 1;
@@ -711,14 +728,14 @@ function dryRun(hero, st) {
       ready.area = t + cdOf(sv[1]);
       add((sv[1].coef || 0) * (sv[1].hits || 1) * mult, false, crit, extra);
     } else {
-      add((mainCoef * ((main && main.hits) || 1) + ((main && main.bonusHit) || 0)) * mult, false, crit, extra);
+      add((mainCoef * ((main && main.hits) || 1) + ((main && main.bonusHit) || 0)) * mult, false, crit, mainExtra);
     }
     // the Async extra action repeats Main at the end of the tick (scaled by extraAct later)
     const eb = E[crit ? 1 : 0];
     eb[0] += mainCoef * ((main && main.hits) || 1);
-    eb[1] += mainCoef * ((main && main.hits) || 1) * extra;
+    eb[1] += mainCoef * ((main && main.hits) || 1) * mainExtra;
     // passive procs and summons
-    if (use(sv[2]) && sv[2].perRank && sv[2].perRank.freeMainChance) add(mainCoef * sv[2].perRank.freeMainChance, false, crit, extra);
+    if (use(sv[2]) && sv[2].perRank && sv[2].perRank.freeMainChance) add(mainCoef * sv[2].perRank.freeMainChance, false, crit, mainExtra);
     if (use(buff) && buff.type === "summon") add(mainCoef * (buff.pctOfMain || 0), false, crit, extra);
     if (use(sig) && sig.type === "summon") add(mainCoef * (sig.pctOfMain || 0) * (sig.count || 1), false, crit, extra);
   }
@@ -775,6 +792,7 @@ export function grantXP(state, hero, amount, ev) {
     hero.L++;
     hero.spFree = (hero.spFree || 0) + 1;
     res.levels++;
+    if (hero.cls === 0) growStarter(hero);
     if (hero.L === CAREERS[1].from && hero.cls === 0) assignClass(hero);
     if (ev && typeof ev.fx === "function") ev.fx("levelup", { heroId: hero.id, value: hero.L, text: "LEVEL UP" });
     const after = careerOf(hero);

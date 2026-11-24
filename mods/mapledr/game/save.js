@@ -139,6 +139,9 @@ export function defaultHerd({ nowMs = 0, seed = 1 } = {}) {
     lessons: {}, bt: zeros(ZONES.length), badges: [], stash: [], fame: [], backlog: { floor: 0, kills: 0 },
     digestAt: 0, cfg: defaultCfg(), log: [], nextUid: 1, nextHeroId: 1, rng: seedOf(seed), day: 0,
     lastMs: nowMs, tick: 0,
+    // agents.js / herd.js: heroes hired today [day, n] (D§3.4), Pair Programmer seconds and Holo
+    // Rubber Duck kills (D§10.6)
+    hired: [0, 0], pairSec: 0, ducks: 0,
   };
 }
 
@@ -525,6 +528,9 @@ const HERD_FIELDS = [
   ["nextUid", "uid", C.num(1)],
   ["nextHeroId", "hid", C.num(1)],
   ["rng", "rng", C.num(seedOf(1))],
+  ["hired", "hi", C.ints(2)],
+  ["pairSec", "pp", C.num(0)],
+  ["ducks", "dk", C.num(0)],
 ];
 // lastMs, tick and day live at the top level of the file (D§13.2).
 const HERD_TOP = ["lastMs", "tick", "day"];
@@ -587,19 +593,33 @@ const sigCodec = {
   def: () => ({ tm: [], tb: [], ts: [], blocks: 0, workMin: 0, subTasks: 0, n: 0 }),
 };
 
-// {key: time} with every time relative to lastMs (per-boss repeat cooldowns)
-const timeMapCodec = {
-  dyn: true,
+// Per-boss repeat cooldowns. boss.js keeps hero.cd.boss = {bossIdx: the hero's working seconds
+// (hero.st.wh x 3600) at its last kill}; only "beaten" and "cooldown seconds left" matter, so the
+// save stores a bitmask of beaten bosses, followed by [idx, secondsLeft] pairs for the bosses still
+// cooling down: 511 (all nine beaten, none cooling) or [511, 3, 9000]. Decoding rebuilds the
+// working-second marks from the hero's saved st.wh, so a round trip is byte-identical.
+// (Absolute working seconds for 9 bosses x 30 heroes would not fit the 30 KB budget, D§13.3.)
+const BOSS_CD_SEC = T.boss.repeatCooldownWorkingSec;
+const bossCdCodec = {
   enc(v, ctx) {
-    const base = (ctx && ctx.base) || 0;
-    const o = {};
-    for (const k of Object.keys(isObj(v) ? v : {})) o[k] = typeof v[k] === "number" ? q(v[k] - base) : qDeep(v[k]);
-    return o;
+    const now = (ctx && ctx.workSec) || 0;
+    let mask = 0;
+    const pairs = [];
+    for (const k of Object.keys(isObj(v) ? v : {})) {
+      const i = Number(k);
+      if (!(Number.isInteger(i) && i >= 0 && i < 30) || typeof v[k] !== "number") continue;
+      mask |= 1 << i;
+      const left = Math.round(BOSS_CD_SEC - (now - numOr(v[k], 0)));
+      if (left > 0) pairs.push(i, Math.min(left, BOSS_CD_SEC));
+    }
+    return pairs.length ? [mask].concat(pairs) : mask;
   },
   dec(c, ctx) {
-    const base = (ctx && ctx.base) || 0;
+    const now = (ctx && ctx.workSec) || 0;
     const o = {};
-    for (const k of Object.keys(isObj(c) ? c : {})) o[k] = typeof c[k] === "number" ? c[k] + base : c[k];
+    const mask = Array.isArray(c) ? numOr(c[0], 0) : numOr(c, 0);
+    for (let i = 0; i < 30; i++) if (mask & (1 << i)) o[i] = now - BOSS_CD_SEC;
+    if (Array.isArray(c)) for (let j = 1; j + 1 < c.length; j += 2) if ((mask >> c[j]) & 1) o[c[j]] = now - (BOSS_CD_SEC - numOr(c[j + 1], 0));
     return o;
   },
   def: () => ({}),
@@ -608,7 +628,7 @@ const timeMapCodec = {
 const CD_FIELDS = [
   ["unblockedUntil", "unb", C.num(0)],
   ["unblockedCdUntil", "unbCd", C.num(0)],
-  ["boss", "boss", timeMapCodec],
+  ["boss", "b", bossCdCodec],
   ["respecAt", "rs", C.json(() => null)],
 ];
 const cdCodec = {
@@ -752,10 +772,18 @@ const HERO_FIELDS = [
   ["pref", "pf", C.json(() => null)],
 ];
 
+// A hero's working seconds as boss.js counts them (Math.round(st.wh x 3600)).
+function heroWorkSec(st) {
+  return Math.round(numOr(st && st.wh, 0) * 3600);
+}
+
 function decHero(o, ctx) {
   const L = numOr(isObj(o) ? o.L : 1, 1);
   const cls = numOr(isObj(o) ? o.c : 0, 0);
-  const sub = { fallbacks: 0, level: L, weaponType: (CLASSES[cls] || CLASSES[L >= 10 ? 3 : 0]).weapon, table: ctx.table, base: ctx.base };
+  const sub = {
+    fallbacks: 0, level: L, weaponType: (CLASSES[cls] || CLASSES[L >= 10 ? 3 : 0]).weapon, table: ctx.table, base: ctx.base,
+    workSec: heroWorkSec(statCodec.dec(isObj(o) ? o.st : null)),
+  };
   const h = decFields(o, HERO_FIELDS, sub);
   ctx.fallbacks += sub.fallbacks;
   return h;
@@ -791,7 +819,7 @@ export function encodeState(state) {
   for (const [str, n] of counts) if (n > 1) { strIdx.set(str, table.length); table.push(str); }
   const ctx = { strIdx, base: top.lastMs };
   top.herd = encFields(herdSrc, HERD_FIELDS, ctx);
-  top.heroes = heroes.map((h) => encFields(h, HERO_FIELDS, ctx));
+  top.heroes = heroes.map((h) => encFields(h, HERO_FIELDS, Object.assign({}, ctx, { workSec: heroWorkSec(h.st) })));
   if (table.length) top.str = table;
   const x = {};
   let any = false;

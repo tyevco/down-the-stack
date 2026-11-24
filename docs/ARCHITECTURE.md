@@ -315,13 +315,14 @@ export function command(world, name, args, nowMs) -> {ok:boolean, error?:string,
 | `respec` | `{heroId}` | D§7.1 |
 | `setClass` | `{heroId, cls}` | D§4.2 override / career change |
 | `pinMap` | `{heroId, mapId\|null}` | stay here / auto |
-| `challenge` | `{kind:"boss"\|"review", idx, heroId?}` | manual challenge |
+| `challenge` | `{kind:"boss"\|"review"\|"backlog", idx, heroId?}` | manual challenge (`backlog`: idx = floor) |
 | `retreat` | `{}` | end the current fight as a Postmortem |
 | `rename` | `{heroId, name}` or `{herd:true, name}` | rename |
 | `retire` | `{heroId}` | Lv 30+ to Hall of Fame |
 | `rebind` | `{heroId, address}` | move a live agent onto a benched hero |
 | `buy` | `{building}` | buy a building level |
 | `setting` | `{key, value}` | herd.cfg.* (calm, nums, stageH, auto.*, notify.*) |
+| `digestSeen` | `{}` | clears the Herd button's "since you last looked" dot (D§10.7) |
 
 ---
 
@@ -452,7 +453,7 @@ PlateVM= { heroId, name, level, careerTitle, clsName, programIcon, hpFrac, xpFra
 export function hudView(world, { nowMs }) -> HudVM
 HudVM  = { gold, snippets, release, sprint, working:int, blocked:int, shipped:int, digestDot }
 export function sheetView(world, { heroId, tab, filter }) -> SheetVM   // D§11.13 (tabs gear/skills/stats/career/journal)
-export function herdView(world, { tab }) -> HerdVM                    // D§11.14 (upgrades/stash/tracker/bosses/roster/digest/settings)
+export function herdView(world, { tab, filter }) -> HerdVM                    // D§11.14 (upgrades/stash/tracker/bosses/roster/digest/settings)
 ```
 
 `sheetView`/`herdView` shapes are owned jointly by the engine-world author and the sheet/herd
@@ -616,3 +617,7 @@ Palette per zone from D§9.2; rarity colours D§8.2; reserved colours D§11.1.
    additionally disables loops.
 7. D§3.4 Contractors are created in memory and never saved (as designed); Rebind is in the sheet.
 8. The stage height setting maps to `layout.resize {id:"stage", px}`.
+9. D§5.7 map choice: Power Level is class-biased with the reference kit (Refactorer/Forkbinder
+   3–4 below level, Hotfixer 3–6 above), so autopilot picks maps by hero level, moved down at most
+   2 levels when the weapon lags the reference kit, and after a recent crash by min(PL, L).
+10. `game/view.js` is a barrel over `game/view/{stage,chrome,panels}.js`.

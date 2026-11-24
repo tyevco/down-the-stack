@@ -139,7 +139,7 @@ describe("waypoints and the boss door (D§9.1)", () => {
 
 describe("Localhost buildings (D§10.2)", () => {
   test("cost base x 3^(n-1); max level; not enough gold", () => {
-    const { state } = mkWorld({ gold: 100000 });
+    const { state } = mkWorld({ gold: 100000, born: 100, day: 120 }); // the herd's day 21: Campfire 3 open
     assert.equal(H.nextBuildingCost(state, "campfire"), 800);
     let r = H.buy(state, "campfire");
     assert.deepEqual([r.ok, r.cost, r.level], [true, 800, 1]);
@@ -179,7 +179,7 @@ describe("Localhost buildings (D§10.2)", () => {
   });
 
   test("autoBuyPick: the cheapest level with gold >= 3x its cost", () => {
-    const { state } = mkWorld({ gold: 2399 });
+    const { state } = mkWorld({ gold: 2399, born: 100, day: 120 });
     assert.equal(H.autoBuyPick(state), -1, "800 x 3 = 2400 needed");
     state.herd.gold = 2400;
     assert.equal(H.autoBuyPick(state), 0, "Campfire and Coffee Machine tie at 800: the first wins");
@@ -187,6 +187,23 @@ describe("Localhost buildings (D§10.2)", () => {
     state.herd.bld[1] = 1;
     state.herd.gold = 3000;
     assert.equal(H.autoBuyPick(state), 3, "vendor/ at 1,000 is now the cheapest");
+  });
+});
+
+describe("the Campfire grows with the herd (balance: one level per 6 days, docs/BALANCE.md)", () => {
+  test("herdAgeDays counts from herd.born (else the oldest hero); buildingGate names the day", () => {
+    const { state } = mkWorld({ gold: 1e9, born: 0, day: 500 });
+    assert.equal(H.herdAgeDays(state), 1, "no birth day yet: day 1");
+    state.heroes.push({ id: 1, bornDay: 490 });
+    assert.equal(H.herdAgeDays(state), 11);
+    state.herd.born = 495;
+    assert.equal(H.herdAgeDays(state), 6);
+    assert.equal(H.buildingGate(state, "campfire"), null, "level 1 opens on day 6");
+    assert.equal(H.buy(state, "campfire").ok, true);
+    assert.deepEqual(H.buildingGate(state, "campfire"), { level: 2, day: 12 });
+    assert.equal(H.buy(state, "campfire").ok, false);
+    assert.equal(H.buildingGate(state, "coffee_machine"), null, "only the Campfire waits");
+    assert.equal(H.autoBuyPick(state), 1);
   });
 });
 
@@ -364,6 +381,49 @@ describe("digest (D§10.7)", () => {
     assert.equal(d.empty, false);
     assert.equal(H.digest(state, T0 + 1000).levels.length, 0);
     assert.equal(H.digestDot({ rt: { digestDot: true } }), true);
+  });
+
+  test("snapshot-based: counts survive a journal that has rolled over (digestMark diffs)", () => {
+    const { state } = mkWorld();
+    const a = addHero(state, 10);
+    const b = addHero(state, 20);
+    H.digestMark(state, T0 + 100);
+    assert.deepEqual(state.herd.digestSnap.lv, { [a.id]: 10, [b.id]: 20 });
+    assert.equal(state.herd.digestAt, T0 + 100);
+    assert.equal(H.digest(state).empty, true);
+    // a long night: two heroes level, a boss falls twice, 9 Release drops, Seals, a badge; then 60+
+    // journal lines of noise push all of it out of the 60-line journal
+    a.L = 14;
+    b.L = 21;
+    const c = addHero(state, 3); // hired since: counts from Lv 1
+    state.herd.bossKills[0] = 2;
+    state.herd.boss[0] = 1;
+    state.herd.drops = 9;
+    state.herd.seals = 12.5;
+    state.herd.badges.push("hello_world");
+    H.journal(state, "drop", a.id, "Linted Pipe", 3, T0 + 300);
+    for (let i = 0; i < 70; i++) H.journal(state, "deprecate", null, "noise", 1, T0 + 400 + i);
+    const d = H.digest(state);
+    assert.deepEqual(d.levels.map((l) => [l.heroId, l.from, l.level]).sort((x, y) => x[0] - y[0]),
+      [[a.id, 10, 14], [b.id, 20, 21], [c.id, 1, 3]]);
+    assert.equal(d.bosses.length, 2);
+    assert.deepEqual(d.bosses.map((x) => x.text).sort(), ["The Ignored Warning FIXED", "The Ignored Warning fixed again"]);
+    assert.equal(d.drops.length, 0, "the journal lost the names");
+    assert.equal(d.dropsMore, 9);
+    assert.equal(d.sealsShipped, 12.5);
+    assert.equal(d.shippedMore, 12.5);
+    assert.deepEqual(d.badges.map((x) => x.text), ["Hello, World"]);
+    assert.equal(d.empty, false);
+    // marking it read starts the next digest from here
+    H.digestMark(state, T0 + 9000);
+    assert.equal(H.digest(state).empty, true);
+  });
+
+  test("a fresh herd's digest counts from the start", () => {
+    const { state } = mkWorld({ digestAt: 0 });
+    const a = addHero(state, 4);
+    const d = H.digest(state);
+    assert.deepEqual(d.levels.map((l) => [l.heroId, l.from, l.level]), [[a.id, 1, 4]]);
   });
 
   test("logDrop: Release+ only; LTS raises a pillar", () => {

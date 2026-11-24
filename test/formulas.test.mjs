@@ -26,9 +26,86 @@ function designBlocks() {
   return out;
 }
 
-// Every value in the design is present, unchanged, in data (data may add derived fields).
-function assertSubset(design, data, path) {
+// docs/BALANCE.md: every D§14 value data.js deliberately changes, as path -> [design value, data
+// value]. The design side is checked against docs/DESIGN.md too, so this list, the "// balance:"
+// comments in data.js and BALANCE.md cannot drift apart silently.
+export const BALANCE_DEVIATIONS = {
+  "bosses.5.bk": [32, 29],
+  "bosses.6.bk": [32, 28],
+  "tuning.gap.floor": [0.1, 0.03],
+  "tuning.boss.autoAt": [1, 0.9],
+  "traits.thorns.reflect": [0.08, 0.03],
+  "mobs.0.atk": [1, 0.7],
+  "mobs.0.xp": [1, 0.88],
+  "mobs.1.atk": [1.4, 0.8],
+  "mobs.1.xp": [1.2, 0.86],
+  "mobs.2.atk": [0.8, 0.5],
+  "mobs.2.xp": [1.4, 1.47],
+  "mobs.3.xp": [0.9, 0.81],
+  "mobs.4.xp": [1.1, 1.16],
+  "mobs.5.xp": [1.1, 0.96],
+  "mobs.6.xp": [0.6, 0.66],
+  "mobs.7.xp": [1, 1.07],
+  "mobs.8.xp": [1.3, 1.11],
+  "mobs.9.xp": [0.9, 0.86],
+  "mobs.10.xp": [1.2, 1.01],
+  "mobs.11.xp": [1.6, 1.33],
+  "mobs.12.xp": [0.5, 0.56],
+  "mobs.13.atk": [1, 0.9],
+  "mobs.13.xp": [1.2, 1.11],
+  "mobs.14.thorns": [0.08, 0.03],
+  "mobs.14.xp": [1.3, 1.1],
+  "mobs.15.xp": [0.6, 0.64],
+  "mobs.16.xp": [1, 1.02],
+  "mobs.17.atk": [1.8, 1.55],
+  "mobs.17.xp": [1.2, 0.92],
+  "mobs.18.xp": [0.9, 0.88],
+  "mobs.19.atk": [1.1, 1],
+  "mobs.19.xp": [1, 0.82],
+  "mobs.20.xp": [1.5, 1.24],
+  "mobs.21.xp": [1.1, 1.08],
+  "mobs.22.xp": [1.2, 1.09],
+  "mobs.23.xp": [1.1, 0.84],
+  "mobs.24.xp": [0.45, 0.54],
+  "mobs.25.xp": [1, 0.97],
+  "mobs.26.xp": [1.4, 1.05],
+  "affixes.0.lo": [0.02, 0.01],
+  "affixes.0.hi": [0.04, 0.02],
+  "affixes.1.lo": [0.01, 0.005],
+  "affixes.1.hi": [0.02, 0.01],
+  "affixes.2.lo": [0.05, 0.025],
+  "affixes.2.hi": [0.1, 0.05],
+  "affixes.3.lo": [0.005, 0.0025],
+  "affixes.3.hi": [0.01, 0.005],
+  "affixes.6.lo": [0.01, 0.005],
+  "affixes.6.hi": [0.02, 0.01],
+  "affixes.7.lo": [0.03, 0.015],
+  "affixes.7.hi": [0.06, 0.03],
+  "affixes.8.lo": [0.03, 0.015],
+  "affixes.8.hi": [0.06, 0.03],
+  "affixes.9.lo": [0.01, 0.005],
+  "affixes.9.hi": [0.02, 0.01],
+  "affixes.10.lo": [0.03, 0.015],
+  "affixes.10.hi": [0.06, 0.03],
+  "affixes.11.lo": [0.02, 0.01],
+  "affixes.11.hi": [0.04, 0.02],
+  "affixes.14.lo": [0.02, 0.01],
+  "affixes.14.hi": [0.04, 0.02],
+  "affixes.15.lo": [0.04, 0.02],
+  "affixes.15.hi": [0.08, 0.04],
+};
+
+// Every value in the design is present, unchanged, in data (data may add derived fields), except
+// the documented balance deviations.
+function assertSubset(design, data, path, seen) {
   if (design === null || typeof design !== "object") {
+    const dev = BALANCE_DEVIATIONS[path];
+    if (dev) {
+      if (seen) seen.add(path);
+      assert.deepEqual(design, dev[0], `${path}: the design value changed (update BALANCE_DEVIATIONS / docs/BALANCE.md)`);
+      assert.deepEqual(data, dev[1], `${path}: data drifted from the documented balance value`);
+      return;
+    }
     assert.deepEqual(data, design, path);
     return;
   }
@@ -36,7 +113,7 @@ function assertSubset(design, data, path) {
   if (Array.isArray(design)) assert.equal(data.length, design.length, `${path}: length`);
   for (const k of Object.keys(design)) {
     assert.ok(data != null && k in data, `${path}.${k} missing`);
-    assertSubset(design[k], data[k], `${path}.${k}`);
+    assertSubset(design[k], data[k], `${path}.${k}`, seen);
   }
 }
 
@@ -54,7 +131,17 @@ describe("data.js: D§14 transcription", () => {
     ["14.8", "bugTracker", D.BUG_TRACKER], ["14.8", "trophy", D.TROPHY], ["14.8", "badges", D.BADGES],
     ["14.8", "names", D.NAMES], ["14.8", "palette", D.PALETTE], ["14.8", "chestTiers", D.CHEST_TIERS],
   ];
-  for (const [blk, key, val] of pairs) test(`${blk} ${key}`, () => assertSubset(B[blk][key], val, key));
+  const seen = new Set();
+  for (const [blk, key, val] of pairs) test(`${blk} ${key}`, () => assertSubset(B[blk][key], val, key, seen));
+  test("every documented balance deviation is used, and data.js marks it with a balance: comment", () => {
+    const src = fs.readFileSync(new URL("../mods/mapledr/game/data.js", import.meta.url), "utf8");
+    for (const p of Object.keys(BALANCE_DEVIATIONS)) assert.ok(seen.has(p), `${p} is not a D§14 value any more`);
+    assert.ok((src.match(/\/\/ balance:/g) || []).length >= 30, "data.js marks its balance changes");
+    const doc = fs.readFileSync(new URL("../docs/BALANCE.md", import.meta.url), "utf8");
+    for (const k of ["Gap floor", "thorns", "firstSwingDelay", "ilvlOffset", "campfireDaysPerLevel", "xpFirst", "autoAt", "Affix ranges"]) {
+      assert.ok(doc.includes(k), `docs/BALANCE.md explains ${k}`);
+    }
+  });
   test("14.3 zones", () => assertSubset(B["14.3"], D.ZONES, "zones"));
   test("14.7 item bases", () => assertSubset(B["14.7"], D.ITEM_BASES, "itemBases"));
 });
@@ -240,8 +327,11 @@ describe("formulas: bosses and reviews (D§9.6, D§4.5)", () => {
     const want = [[1024, 2560, 7], [6356, 15890, 25], [23200, 58000, 80], [52392, 130980, 203], [189780, 474450, 509],
       [569536, 1423840, null], [1565888, 3914720, 3120], [4224896, 10562240, 7651], [14025760, 35064400, 18656]];
     D.BOSSES.forEach((b, i) => {
-      assert.equal(F.bossHP(b.bk, b.level, 1), want[i][0], `${b.id} solo`);
-      assert.equal(F.bossHP(b.bk, b.level, 3), want[i][1], `${b.id} trio`);
+      const dev = BALANCE_DEVIATIONS[`bosses.${i}.bk`];
+      const bk = dev ? dev[0] : b.bk; // D§9.6's HP numbers are the design Bk's
+      assert.equal(F.bossHP(bk, b.level, 1), want[i][0], `${b.id} solo`);
+      assert.equal(F.bossHP(bk, b.level, 3), want[i][1], `${b.id} trio`);
+      if (dev) assert.equal(F.bossHP(b.bk, b.level, 1), Math.round(want[i][0] * dev[1] / dev[0]), `${b.id} balance Bk`);
       if (want[i][2] != null) assert.equal(F.bossSwing(b.ak, b.level), want[i][2], `${b.id} swing`);
     });
     // Hydra bites: 0.6 x swing = 758 per head
@@ -272,12 +362,22 @@ describe("formulas: mobs per zone (D§5.9)", () => {
     ["flaky_test_phantom", 80, 52818, 2296, 9222], ["memory_leak_slime", 84, 84265, 3183, 13306], ["pager_wyvern", 87, 99329, 2845, 15023],
     ["off_by_one_twins", 90, 64969, 3112, 7561], ["bitflip_moth", 94, 185571, 7893, 22114], ["undefined_behavior", 98, 352681, 10911, 40681],
   ];
+  // a documented balance change of a multiplier scales the D§5.9 number by the same ratio
+  const ratio = (id, field) => {
+    const i = D.MOBS.findIndex((x) => x.id === id);
+    const dev = BALANCE_DEVIATIONS[`mobs.${i}.${field}`];
+    return dev ? dev[1] / dev[0] : 1;
+  };
   for (const [id, m, hp, atk, xp] of ROWS) {
     test(id, () => {
-      const s = F.mobStats(D.MOB_BY_ID[id], m);
+      const def = D.MOB_BY_ID[id];
+      const s = F.mobStats(def, m);
       close(s.hp, hp, "HP");
-      close(s.atk, atk, "swing");
-      close(s.xp, xp, "XP");
+      // the table at the design multiplier; a documented balance multiplier through the same formula
+      close(ratio(id, "atk") === 1 ? s.atk : F.mobATK(m, def.atk / ratio(id, "atk")), atk, "swing");
+      close(ratio(id, "xp") === 1 ? s.xp : F.mobXP(m, def.xp / ratio(id, "xp")), xp, "XP");
+      assert.equal(s.atk, F.mobATK(m, def.atk));
+      assert.equal(s.xp, F.mobXP(m, def.xp));
     });
   }
   test("elite and Backlog floor multipliers", () => {
@@ -303,7 +403,8 @@ describe("formulas: curves", () => {
     assert.ok(Math.abs(F.gap(3) - 0.9) < 1e-12);
     assert.ok(Math.abs(F.gap(-3) - 1.15) < 1e-12);
     assert.ok(Math.abs(F.gap(-9) - 1.25) < 1e-12);
-    assert.ok(Math.abs(F.gap(50) - 0.1) < 1e-12);
+    assert.ok(Math.abs(F.gap(11) - 0.1) < 1e-12);
+    assert.ok(Math.abs(F.gap(50) - 0.03) < 1e-12, "balance: the floor is 0.03 (design 0.1), docs/BALANCE.md");
     assert.equal(F.DR(1e9, 1), 0.75);
     assert.equal(F.DR(10, 1, 0.9), 0.75);
     assert.equal(F.DR(0, 50), 0);
@@ -358,7 +459,10 @@ describe("formulas: curves", () => {
     assert.ok(Math.abs(F.partyXp(2) - 0.12) < 1e-12);
     assert.equal(F.killXP({ m: 10, L: 10 }), F.mobXP(10));
     assert.equal(F.killXP({ m: 10, L: 10, elite: true, freshEyes: true }), F.mobXP(10) * 4 * 1.5);
-    assert.equal(F.bossXP(20, true), 0.5 * F.need(20));
+    // balance: first kill / review 0.1 Need(L), repeat 0.02 (design 0.5 / 0.1), docs/BALANCE.md
+    assert.equal(F.bossXP(20, true), D.TUNING.boss.xpFirst * F.need(20));
+    assert.equal(F.bossXP(20, false), D.TUNING.boss.xpRepeat * F.need(20));
+    assert.ok(D.TUNING.boss.xpFirst <= 0.5 && D.TUNING.boss.xpRepeat < D.TUNING.boss.xpFirst);
   });
   test("power level clamps to L-5..L+8", () => {
     assert.equal(F.powerLevel(30, F.refDPS(30)), 30);

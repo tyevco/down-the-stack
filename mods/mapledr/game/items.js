@@ -290,12 +290,35 @@ export function rollKeepsake(holder, { bossIdx, ilvl, classId, state } = {}) {
   return { uid: allocUid(uidSrc), base: baseIdFor(k.slot, t, type), ilvl: lvl, rar: R_KEEPSAKE, pol: 0, aff, flags: FLAG_NEW, prop: kIdx };
 }
 
-/** Item level for a drop source (D§8.6): kill/elite m + U{0,1}; chest map top + U{0,1,2}; duck m + 2; boss/review as given. */
+/**
+ * The balance offset on drop item levels (T.loot): ilvlOffset at and under level `taperFrom`,
+ * shrinking linearly to 0 at level 100. Under Lv ~50 a Release +5 already matches the reference
+ * kit's rarity x polish (D§5.2), so drops must land under iRef; from there R_ref x P_ref outgrows
+ * what a Beta or Release can be polished to (Release +9 < P_ref(100) = +10), and the offset
+ * fades so worn gear keeps up with the reference kit.
+ */
+export function lootOffset(level) {
+  const L = T.loot || {};
+  const off = L.ilvlOffset || 0;
+  const from = L.taperFrom ?? 100;
+  if (!off || !(level > from)) return off;
+  return Math.round(off * Math.max(0, (100 - level) / (100 - from)));
+}
+
+/**
+ * Item level for a drop source (D§8.6): kill/elite m + U{0,1}; chest map top + U{0,1,2}; duck m + 2;
+ * boss/review as given; each lowered by T.loot.ilvlOffset (at least 1). balance: D§8.6 drops land
+ * 4-5 levels above the reference kit's iRef(L) = L - 2, and autopilot keeps the best of many
+ * (Release by Lv 25), so worn gear ran 1.4-2x the reference kit; the offset brings it back
+ * (docs/BALANCE.md). Keepsakes keep the boss level (rollKeepsake).
+ */
 export function dropIlvl(holder, source, level) {
-  if (source === "kill" || source === "elite") return level + rngInt(holder, 0, 1);
-  if (source === "chest") return level + rngInt(holder, 0, 2);
-  if (source === "duck") return level + 2;
-  return level;
+  const off = lootOffset(level);
+  let i = level;
+  if (source === "kill" || source === "elite") i = level + rngInt(holder, 0, 1);
+  else if (source === "chest") i = level + rngInt(holder, 0, 2);
+  else if (source === "duck") i = level + 2;
+  return Math.max(1, i + off);
 }
 
 /**
@@ -400,7 +423,8 @@ export function equipItem(state, hero, item) {
   }
   item.flags &= ~FLAG_NEW;
   hero.eq[si] = item;
-  if (old) stashPut(state, old);
+  // a replaced starter Training Stick is not worth a stash slot (as herd.retire skips it)
+  if (old && !(old.base === 0 && old.rar === 0)) stashPut(state, old);
   return { ok: true, replaced: old || null, ported };
 }
 

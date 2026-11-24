@@ -401,18 +401,18 @@ describe("integration fixes", async () => {
     }
   });
 
-  test("a lagging weapon moves a hero at most two levels down", () => {
+  test("a lagging weapon does not move the map choice (balance: drops land at iRef; the crash rule steps down)", () => {
     const w = makeWorld({ heroes: [{ cls: "shellmancer", L: 42 }] });
     w.state.herd.zone = 3;
     for (const z of [0, 1, 2]) w.state.herd.boss[z] = 1;
     for (const id of ["4-1", "4-2"]) w.state.herd.quota[id] = 40;
     const h = w.state.heroes[0];
+    const live = w.rt.live.get(h.id);
     h.eq[0] = weapon(w.state, "shellmancer", 20, 0);
-    const st = Hr.stats(h, { herd: w.state.herd });
-    assert.equal(AP.gearLag(h, st), 5);
-    const m = D.MAP_BY_ID[AP.chooseMap(w, h, w.rt.live.get(h.id))];
-    assert.ok(m.mid <= h.L - 2 + 1, m.id);
-    assert.ok(m.mid >= h.L - 6, m.id);
+    assert.equal(AP.gearLag(h, Hr.stats(h, { herd: w.state.herd })), 5);
+    assert.equal(AP.chooseMap(w, h, live), "4-3", "mid 43 <= Lv 42 + 1");
+    live.crashes = [w.rt.tick];
+    assert.equal(AP.chooseMap(w, h, live), "4-2", "after a crash: at most its level");
   });
 
   test("convergence never pulls a hero to a map far under its level (a lagging mate cannot stall the guild)", () => {
@@ -427,7 +427,7 @@ describe("integration fixes", async () => {
     assert.equal(AP.chooseMap(w, a, w.rt.live.get(a.id)), "6-1");
   });
 
-  test("a new hero's Training Stick grows with its Intern (iRef = L - 2) until Lv 10", () => {
+  test("a new hero's Training Stick grows with its hero (iRef = L - 2) until a class weapon replaces it", () => {
     const w = makeWorld({ heroes: [{ cls: "intern", L: 1, kit: "none" }] });
     const h = w.state.heroes[0];
     const stick = h.eq[0];
@@ -435,13 +435,14 @@ describe("integration fixes", async () => {
     Hr.grantXP(w.state, h, 1e5, makeEv());
     assert.ok(h.L >= 10, `Lv ${h.L}`);
     assert.equal(h.eq[0].uid, stick.uid, "same item");
-    assert.equal(h.eq[0].ilvl, 8, "iRef(10)");
+    assert.equal(h.eq[0].ilvl, h.L - 2, "iRef(L)");
     Hr.grantXP(w.state, h, 1e7, makeEv());
-    if (h.eq[0] && h.eq[0].uid === stick.uid) assert.equal(h.eq[0].ilvl, 8, "an ordinary item after Lv 10");
+    assert.equal(h.eq[0].uid, stick.uid);
+    assert.equal(h.eq[0].ilvl, h.L - 2, "still growing past Lv 10 while it is held (drops land at iRef: docs/BALANCE.md)");
   });
 
-  test("boss XP follows the level gap: a long-beaten boss gives a tenth", () => {
-    assert.equal(F.gap(60 - 12), 0.1);
+  test("boss XP follows the level gap: a long-beaten boss gives the gap floor", () => {
+    assert.equal(F.gap(60 - 12), 0.03); // balance: floor 0.03 (design 0.1)
     assert.equal(F.gap(12 - 12), 1);
   });
 
@@ -485,6 +486,41 @@ describe("integration fixes", async () => {
 });
 
 describe("tick cost (V8; QuickJS is 20-50x slower)", () => {
+  test("30 heroes and a 240-item merged chest: one item offered a tick, the tick stays cheap", () => {
+    const specs = Array.from({ length: 30 }, (_, k) => ({ address: `t${k + 1}`, plan: [["working", 1e9]], space: `spc_${1 + (k % 3)}` }));
+    const w = W.createWorld({ nowMs: T0, seed: 3 });
+    const c = Dm.makeCast(specs);
+    Dm.runCast(w, c, T0 + 1200 * 1000);
+    const h = w.state.heroes[0];
+    h.pend = [{ min: 2400, fmin: 0, title: "a day of work", at: w.rt.nowMs, sealFactor: 1 }];
+    const t0 = performance.now();
+    assert.equal(W.command(w, "claimChest", { heroId: h.id }, w.rt.nowMs).ok, true);
+    const claimMs = performance.now() - t0;
+    assert.equal(w.state.herd.inbox.length, 240, "rolled at once, offered later");
+    const times = [];
+    let t = w.state.herd.lastMs;
+    for (let i = 0; i < 240; i++) {
+      t += 1000;
+      Dm.advanceCast(c, 1);
+      const before = w.state.herd.inbox ? w.state.herd.inbox.length : 0;
+      const s = Dm.castSnapshot(c, t);
+      const a = performance.now();
+      W.tick(w, s);
+      times.push(performance.now() - a);
+      const after = w.state.herd.inbox ? w.state.herd.inbox.length : 0;
+      assert.ok(before - after <= 1, "one offer a tick");
+    }
+    assert.equal(w.state.herd.inbox, undefined, "drained");
+    times.sort((x, y) => x - y);
+    const p99 = times[Math.floor(times.length * 0.99)];
+    // generous bounds: other test files run in parallel (quiet machine: claim ~3 ms, median ~0.4,
+    // p99 ~2-3 ms)
+    assert.ok(claimMs < 100, `claim ${claimMs.toFixed(1)} ms`);
+    assert.ok(times[times.length >> 1] < 3, `median ${times[times.length >> 1].toFixed(2)} ms`);
+    assert.ok(p99 < 15, `p99 ${p99.toFixed(2)} ms`);
+    assertClean(w);
+  });
+
   test("8 questing heroes: median under 2 ms per tick and per 5-tick catch-up", () => {
     const specs = Array.from({ length: 8 }, (_, k) => ({ address: `t${k + 1}`, plan: [["working", 1e9]], space: `spc_${1 + (k % 2)}` }));
     const w = W.createWorld({ nowMs: T0, seed: 3 });

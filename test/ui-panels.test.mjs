@@ -171,7 +171,7 @@ test("sheet: asks host.view('sheet', {heroId, tab, filter}) and opens on props.t
   assert.deepEqual(Object.keys(args).sort(), ["filter", "heroId", "tab"]);
   assert.equal(args.heroId, 1);
   assert.equal(args.tab, "skills");
-  assert.deepEqual(Object.keys(args.filter).sort(), ["focus", "minRar", "slot", "sort", "squash", "usable"]);
+  assert.deepEqual(Object.keys(args.filter).sort(), ["focus", "hover", "minRar", "selected", "slot", "sort", "squash", "usable"]);
 });
 
 test("sheet: tabs switch by click, by number key and by arrow; the VM for the new tab is asked for", async () => {

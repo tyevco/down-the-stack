@@ -35,6 +35,8 @@
  * @property {boolean} usable       sheet: only items this hero can wear; herd: anyone on the roster
  * @property {"score"|"ip"|"new"} sort
  * @property {number|null} focus    uid whose card (with compare) to show: hovered, else selected
+ * @property {number|null} [hover]  the hovered uid and the selected uid, sent apart so view.js can
+ * @property {number|null} [selected]  fall back to the selection when the hovered item is gone
  * @property {number[]} squash      uids picked for Squash Merge ([] when not picking)
  *
  * ── Shared building blocks (ui/herdpanel.js uses them too) ──
@@ -206,7 +208,8 @@
  *            maps:Array<ActionVM & {on:boolean}>}>}} map   cmd "pinMap" (auto: mapId null)
  * @property {null|{name:string, zone:string, status:string, estimate:null|{text:string, color:string},
  *            challenge:ActionVM|null}} boss   the boss card of the hero's zone
- * @property {{name:string, hint:string}} identity   rename: act("rename", {heroId, name: typed})
+ * @property {{name:string, hint:string, canRename?:boolean}} identity   rename: act("rename", {heroId, name: typed});
+ *                              canRename false (Contractors) disables the button
  * @property {ActionVM|null} retire     null for contractors; disabled below Lv 30 (tooltip says so)
  * @property {null|{title:string, hint:string, options:ActionVM[]}} rebind   benched heroes only
  *
@@ -275,12 +278,16 @@ export function newUi(tab) {
   };
 }
 
-/** The filter the role sends with host.view: hover wins over the selection for the card. */
+/**
+ * The filter the role sends with host.view: hover wins over the selection for the card (`focus`);
+ * hover and selection also go apart, so view.js falls back to the selection when the hovered item
+ * vanished (deprecated, squashed) before the pointer left it.
+ */
 export function filterArgs(ui) {
   const f = ui.filter;
   return {
     slot: f.slot, minRar: f.minRar, usable: f.usable, sort: f.sort,
-    focus: ui.hover ?? ui.selected ?? null,
+    focus: ui.hover ?? ui.selected ?? null, hover: ui.hover ?? null, selected: ui.selected ?? null,
     squash: ui.squashMode ? f.squash.slice() : [],
   };
 }
@@ -319,9 +326,10 @@ export function actionButton(id, a, env, ui, t, o = {}) {
   const danger = a.tone === "danger" || armed;
   const fg = primary ? t.solid_fg : danger ? t.bad : t.fg;
   const showCost = Boolean(a.cost) && !armed && o.cost !== false;
-  const costEl = () => div().min_w(0).truncate().text_size(o.stack ? 10 : 10.5).when(!o.stack, (e) => e.font_family(MONO))
+  const costColor = primary ? t.solid_fg : t.muted;
+  const costEl = () => (o.stack && costIcons(a.cost, costColor, t)) || div().min_w(0).truncate().text_size(o.stack ? 10 : 10.5).when(!o.stack, (e) => e.font_family(MONO))
     .when(Boolean(o.stack), (e) => e.max_w_full())
-    .text_color(primary ? t.solid_fg : t.muted).opacity(primary ? 0.8 : 1).child(String(a.cost));
+    .text_color(costColor).opacity(primary ? 0.8 : 1).child(String(a.cost));
   const label = div().min_w(0).truncate().when(Boolean(o.stack), (e) => e.max_w_full()).child(armed ? a.confirm : a.label);
   const el = (o.stack ? v_flex().justify_center().items_center().gap(0).line_height(1.2) : h_flex().gap(6).items_center().justify_center())
     .id(id).flex_none().h(o.h ?? 26).px(o.px ?? 10).rounded(6).overflow_hidden()
@@ -337,6 +345,24 @@ export function actionButton(id, a, env, ui, t, o = {}) {
   return el.cursor_pointer()
     .hover((s) => (primary ? s.opacity(0.88) : s.bg(t.btnHover)))
     .on_click((_e, cx) => { cx.stop_propagation(); runAction(a, env, ui, cx); });
+}
+
+/**
+ * "1.3k gold · 4 Snippets" as coin / snippet icons with their numbers (the card's narrow buttons
+ * cut the words off); null when the text has any other shape (then it is drawn as text).
+ */
+function costIcons(cost, color, t) {
+  const parts = String(cost ?? "").split(" · ");
+  const out = [];
+  for (const p of parts) {
+    const m = /^([0-9][0-9.,]*[kMBT]?) (gold|Snippets?)$/.exec(p);
+    if (!m) return null;
+    const gold = m[2] === "gold";
+    out.push(h_flex().flex_none().gap(2).items_center()
+      .child(svg(art(gold ? "ui/gold.svg" : "ui/snippet.svg")).w(10).h(10).flex_none().text_color(gold ? tone(C.coin, t) : color))
+      .child(div().font_family(MONO).text_size(10).text_color(color).child(m[1])));
+  }
+  return out.length ? h_flex().gap(7).items_center().justify_center().children(out) : null;
 }
 
 /** A plain button that runs `onClick(cx)` (UI-only: toggles, rename, focus). */
@@ -547,6 +573,9 @@ export function itemCard(prefix, card, env, ui, t, o = {}) {
     .child(h_flex().gap(8).items_center()
       .child(div().flex_none().text_size(12).font_medium().text_color(t.fg).whitespace_nowrap().child(card.stat ?? ""))
       .child(div().flex_1().min_w(0).truncate().text_right().text_size(10.5).text_color(t.dim).child(card.polish ?? "")))
+    // The compare block (green / red deltas) comes before the affixes: in a 256 px card it is the
+    // part that decides, so it stays visible without scrolling.
+    .when(Boolean(card.vs) || (card.deltas ?? []).length > 0, (e) => e.child(compareBlock(prefix, card, t)))
     .children((card.affixes ?? []).map((a) => h_flex().id(`${prefix}-aff-${a.key}`).min_h(18).gap(6).items_center()
       .child(div().size(4).flex_none().rounded_full().bg(col))
       .child(div().flex_1().min_w(0).text_size(11.5).line_height(1.3).text_color(t.muted).child(a.text))
@@ -555,7 +584,6 @@ export function itemCard(prefix, card, env, ui, t, o = {}) {
       .child(div().text_size(11.5).font_semibold().text_color(text).child(card.prop.name))
       .child(div().text_size(11).text_color(t.muted).child(card.prop.text))))
     .when(Boolean(card.flavor), (e) => e.child(div().text_size(11).italic().text_color(t.dim).child(card.flavor)))
-    .when(Boolean(card.vs) || (card.deltas ?? []).length > 0, (e) => e.child(compareBlock(prefix, card, t)))
     .when(Boolean(card.owner), (e) => e.child(div().text_size(11).text_color(t.dim).child(card.owner)));
   const actions = card.actions ?? [];
   // Two buttons per row; each shows its cost under the label.
@@ -570,7 +598,7 @@ export function itemCard(prefix, card, env, ui, t, o = {}) {
 }
 
 function compareBlock(prefix, card, t) {
-  return v_flex().id(`${prefix}-cmp`).gap(4).pt(6).border_t(1).border_color(t.border)
+  return v_flex().id(`${prefix}-cmp`).gap(4).pb(6).border_b(1).border_color(t.border)
     .when(Boolean(card.vs), (e) => e.child(div().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(card.vs)))
     .child(h_flex().flex_wrap().gap(4).children((card.deltas ?? []).map((d) => h_flex().id(`${prefix}-d-${d.key}`).flex_none().h(18).px(5).gap(4)
       .items_center().rounded(4).bg(t.well)
@@ -772,7 +800,9 @@ function gearTab(vm, env, ui, t, width) {
 
 function doll(vm, env, ui, t) {
   const g = vm.gear;
-  const W = 216, H = 226, S = 52;
+  // A note band (a fight, off duty) takes 30 px: the doll tightens its rows so it still fits.
+  const tight = Boolean(vm.note);
+  const W = 216, H = tight ? 206 : 226, S = 52, STEP = tight ? 70 : 78;
   const bySlot = {};
   for (const s of g.slots ?? []) bySlot[s.slot] = s;
   const box = div().id("sh-doll").relative().w(W).h(H).flex_none();
@@ -788,16 +818,20 @@ function doll(vm, env, ui, t) {
     const s = bySlot[slot];
     if (!s) return;
     const x = i < 3 ? 0 : W - S;
-    const y = (i % 3) * 78;
+    const y = (i % 3) * STEP;
     box.child(slotBox(s, S, t, ui).absolute().left(x).top(y));
   });
-  return v_flex().flex_none().w(W).gap(10)
+  const col = v_flex().w(W).gap(tight ? 8 : 10)
     .child(box)
     .child(h_flex().w(W).flex_wrap().gap(6).children((g.summary ?? []).map((m) =>
       v_flex().id(`sh-sum-${m.key}`).w((W - 6) / 2).h(36).px(8).justify_center().rounded(7).bg(t.card).border(1).border_color(t.border)
         .tooltip(m.tooltip)
         .child(div().text_size(10).text_color(t.dim).child(m.label))
         .child(div().font_family(MONO).text_size(12.5).font_semibold().text_color(t.fg).child(m.value)))));
+  // Scrolls like the stash column: with a note band (a fight, off duty) the doll and its summary
+  // are taller than the body and would otherwise spill over the footer.
+  return div().relative().flex_none().w(W).h_full()
+    .child(v_flex().id("sh-doll-col").absolute().left(0).top(0).size_full().overflow_y_scroll().child(col));
 }
 
 function slotBox(s, S, t, ui) {
@@ -947,10 +981,14 @@ function statsTab(vm, t) {
 
 function careerTab(vm, env, ui, t) {
   const c = vm.career;
-  const left = v_flex().flex_none().w(318).h_full().gap(8)
-    .child(sectionTitle("Career ladder", t))
-    .child(v_flex().gap(4).children((c.ladder ?? []).map((l) => ladderRow(l, env, ui, t))))
-    .when(Boolean(c.boss), (e) => e.child(bossCard(c.boss, env, ui, t)));
+  // Scrolls like the right column: a review line, a note band (a fight, off duty) and the boss card
+  // together are taller than the body and would otherwise spill over the footer.
+  const left = div().relative().flex_none().w(318).h_full()
+    .child(v_flex().id("sh-career-l").absolute().left(0).top(0).size_full().overflow_y_scroll()
+      .child(v_flex().gap(8).pr(4)
+        .child(sectionTitle("Career ladder", t))
+        .child(v_flex().gap(4).children((c.ladder ?? []).map((l) => ladderRow(l, env, ui, t))))
+        .when(Boolean(c.boss), (e) => e.child(bossCard(c.boss, env, ui, t)))));
   const right = div().relative().flex_1().min_w(0).h_full()
     .child(v_flex().id("sh-career-r").absolute().left(0).top(0).size_full().overflow_y_scroll()
       .child(v_flex().gap(10).pr(4).children(kids([
@@ -1088,7 +1126,7 @@ function identity(vm, env, ui, t) {
         cx.timer?.after?.(100, () => input.focus?.());
         ui.renaming = true;
         cx.notify();
-      }, { h: 24, px: 8, size: 11, disabled: !input }))
+      }, { h: 24, px: 8, size: 11, disabled: !input || c.identity.canRename === false }))
       .when(Boolean(c.retire), (e) => e.child(actionButton("sh-retire", c.retire, env, ui, t, { h: 24, px: 8, size: 11, cost: false })));
   return v_flex().id("sh-identity").flex_none().gap(6).px(12).py(10).rounded(10).bg(t.card).border(1).border_color(t.border)
     .child(div().text_size(11).font_semibold().text_color(t.dim).child("Name"))

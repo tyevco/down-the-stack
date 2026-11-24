@@ -8,7 +8,8 @@
  * @typedef {Object} HudAdditions
  * gold, snippets and release are display strings ("48.2k", "133", "v2.3"; numbers are shown with
  * String()). sprint: null | { label, have, need } (as PartyVM.footer.sprint). working, blocked,
- * shipped: integers (shipped = done, not yet seen). digestDot: boolean.
+ * shipped: integers (shipped = done, not yet seen). digestDot: boolean. calm: boolean (calm mode;
+ * the strip ignores it, but key commands read it from here: the cheapest view, see chromeCommand).
  *
  * env (renderHud): { width, height, zoom, theme: T(), host, act, ui?: { size:{w,h}|null } }.
  */
@@ -20,6 +21,27 @@ import { tone, track, thinBar, openHerd, chromeCommand } from "./party.js";
 
 /** Width tiers (logical px): the words go first, then the sprint label, then the sprint. */
 export const HUD_TIERS = { words: 720, sprintLabel: 560, sprint: 420 };
+
+/**
+ * What fits in a strip of width W: the tiers above, and the sprint (label first) only when the
+ * fixed parts leave it room. Its bar and "have/need" never shrink, so without this a long gold /
+ * Snippets / release text pushed the sprint over the counts (seen at 420 px with "41.3M").
+ * Widths are estimated: JetBrains Mono 11 px = 6.6 px a character, icon 12 + gap 4, counts dot 7 +
+ * gap 5 (+ word), Herd button 62, gaps 14, padding 24.
+ */
+export function hudFit(vm, W) {
+  const est = (v) => String(v ?? "").length * 6.6;
+  const words = W >= HUD_TIERS.words;
+  const count = (n, label) => 12 + est(n ?? 0) + (words ? 5 + label.length * 6 : 0);
+  const fixed = [16 + est(vm.gold), 16 + est(vm.snippets), vm.release ? est(vm.release) : null,
+    count(vm.working, "working"), count(vm.blocked, "blocked"), count(vm.shipped, "shipped"), 62].filter((w) => w !== null);
+  const used = 24 + fixed.reduce((a, w) => a + w, 0) + 14 * fixed.length; // + one gap for the spacer
+  const sp = vm.sprint;
+  const core = sp ? 38 + 6 + 56 + 6 + est(`${sp.have}/${sp.need}`) + 14 : 0;
+  const sprint = !!sp && W >= HUD_TIERS.sprint && W - used >= core;
+  const sprintLabel = sprint && W >= HUD_TIERS.sprintLabel && W - used >= core + 6 + 48;
+  return { words, sprint, sprintLabel };
+}
 
 function count(id, n, label, color, t, words) {
   const zero = !n;
@@ -57,16 +79,17 @@ export function renderHud(vm, env) {
   if (!vm) return root.child(div().text_color(t.dim).child("Down the Stack · loading…"));
 
   const sp = vm.sprint;
-  const words = W >= HUD_TIERS.words;
+  const fit = hudFit(vm, W);
+  const words = fit.words;
   const dot = !!vm.digestDot;
   return root.children(kids([
     stat("ui/gold.svg", tone(C.coin, t), vm.gold, t, "Gold"),
     stat("ui/snippet.svg", t.muted, vm.snippets, t, "Snippets"),
     vm.release ? div().flex_none().font_family(MONO).text_color(t.dim).tooltip("Release Train: the herd's version").child(String(vm.release)) : null,
-    sp && W >= HUD_TIERS.sprint
-      ? h_flex().flex_shrink_1().min_w(0).gap(6).items_center().tooltip(`Sprint: ${sp.label} ${sp.have}/${sp.need}`)
+    sp && fit.sprint
+      ? h_flex().flex_shrink_1().min_w(0).overflow_hidden().gap(6).items_center().tooltip(`Sprint: ${sp.label} ${sp.have}/${sp.need}`)
         .child(div().flex_none().text_color(t.dim).child("Sprint"))
-        .when(W >= HUD_TIERS.sprintLabel, (el) => el.child(div().min_w(0).truncate().text_color(t.muted).child(sp.label)))
+        .when(fit.sprintLabel, (el) => el.child(div().min_w(0).truncate().text_color(t.muted).child(String(sp.label ?? ""))))
         .child(thinBar(56, 4, sp.need > 0 ? sp.have / sp.need : 0, t.accent, track(t)))
         .child(div().flex_none().font_family(MONO).text_color(t.dim).child(`${sp.have}/${sp.need}`))
       : null,

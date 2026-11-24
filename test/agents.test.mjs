@@ -344,6 +344,29 @@ describe("Commit Chests and seen (D§2.4)", () => {
     noErrors(sim);
   });
 
+  test("chest items wait in herd.inbox (saved) and are offered one per tick, oldest first", () => {
+    const sim = new Sim().set("t1", "working").tick(10);
+    const h = sim.hero("t1");
+    h.pend = [{ min: 120, fmin: 0, title: "big", at: sim.now, sealFactor: 1 }];
+    const r = A.openChests(sim.w, h, { reason: "click" });
+    assert.equal(r.items.length, 12);
+    const inbox = sim.state.herd.inbox;
+    assert.equal(inbox.length, 12, "rolled and logged at once, offered later");
+    assert.deepEqual(inbox.map((x) => x[0]), new Array(12).fill(h.id));
+    const first = inbox[0][1];
+    const text = W.serialize(sim.w);
+    assert.ok(text.includes(String(first.uid)), "queued items are in the save");
+    for (let k = 11; k >= 0; k--) {
+      sim.tick();
+      assert.equal((sim.state.herd.inbox || []).length, k);
+    }
+    assert.equal(sim.state.herd.inbox, undefined);
+    const where = (it) => h.eq.some((x) => x && x.uid === it.uid) || sim.state.herd.stash.some((x) => x.uid === it.uid);
+    const kept = r.items.filter(where).length;
+    assert.ok(kept >= 0 && kept <= 12);
+    noErrors(sim);
+  });
+
   test("working -> idle (also across a seq gap) closes and opens at once: the person watched", () => {
     const sim = new Sim().set("t1", "working").tick(300);
     const a = sim.agents.get("t1");

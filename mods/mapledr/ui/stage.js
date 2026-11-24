@@ -82,6 +82,7 @@ import { div, svg, image } from "gpui-kit";
 import { run, openOverlay, focused, theme as herdrTheme } from "herdr";
 import { art, C, MONO, T, zoom, alpha, jitter, kids, clamp01 } from "./kit.js";
 import { renderTermling, renderForkling, programIcon } from "./termling.js";
+import { openSheet } from "./party.js";
 
 const REF_H = 200;           // the reference composition height (D§11.2)
 const GROUND = 160;          // ground line in the reference composition
@@ -152,9 +153,10 @@ export default class Stage {
     if (name === "herd") { openOverlay(HERD()); return true; }
     const vm = this.viewModel(width, height);
     if (name === "sheet") {
+      // the focused agent's hero only: with no focused hero the key does nothing (no guessing)
       const term = focused()?.terminal ?? null;
       const heroes = vm?.heroes ?? [];
-      const hero = heroes.find((h) => term && h.address === term) ?? heroes.find((h) => h.focused) ?? heroes[0];
+      const hero = heroes.find((h) => term && h.address === term) ?? heroes.find((h) => h.focused) ?? null;
       if (hero) openOverlay(SHEET(hero.heroId));
       return Boolean(hero);
     }
@@ -244,7 +246,8 @@ export function renderStage(model, env = {}) {
     for (const f of fxOrder(vm.fx, ctx.fxCap)) scene.children(fx(f, ctx));
     if (vm.boss) scene.children(bossOverlays(vm.boss, ctx));
   }
-  if (vm.headerNote && !ctx.compact) scene.child(headerNote(vm.headerNote, ctx));
+  const note = vm.headerNote && !ctx.compact ? headerNote(vm.headerNote, ctx, rooms) : null;
+  if (note) scene.child(note);
   if (vm.herdBanner && !calm && !ctx.compact) scene.children(herdBanner(vm.herdBanner, ctx));
   if (vm.overflow) scene.child(overflowChip(vm.overflow, ctx));
   return root.child(scene);
@@ -278,7 +281,7 @@ function detail(vm, rooms, heroes, ctx) {
     est += 5 + g + f + 1 + p + (r.door ? 2 : 0) + (r.quota ? 2 : 0) + (r.stats || r.quota ? 1 : 0) + (r.dusk ? 1 : 0) + (r.dividerLeft ? 1 : 0);
   }
   for (const h of heroes) {
-    est += 13 + (h.programIcon ? 0 : -1) + (h.hat ? 0 : -1) + (h.weapon?.edge ? 1 : 0) + (h.tag?.text ? 1 : 0)
+    est += 13 + (h.programIcon ? 0 : -1) + (h.hat ? 0 : -1) + (h.weapon?.edge ? 1 : 0) + (h.pinned ? 1 : 0) + (h.tag?.text ? 1 : 0)
       + (h.bubble ? 2 : 0) + (h.campfire ? 2 : 0) + (h.crate ? 1 : 0) + (h.zzz ? 1 : 0) + (h.focused ? 1 : 0)
       + (h.state === "waiting" && h.slot ? 1 : 0) + (h.state === "crashed" && Number.isFinite(h.rebootFrac) ? 2 : 0)
       + (h.forklings ?? []).reduce((a, f) => a + forkCost(f), 0) + (h.forklingExtra > 0 ? 1 : 0);
@@ -403,8 +406,11 @@ function room(r, ctx) {
 }
 
 /** Header band (y 0–18): map title, quota bar, stats, boss-door icon. Pinned to the top. */
-function roomHeader(r, w, ctx) {
-  // Fit: full title, else the short one ("CC 2-2"), else drop the Sprint part of the stats.
+/**
+ * What a room header shows at width w: full title, else the short one ("CC 2-2"), else the stats
+ * without their Sprint part; `used` is the px the header's contents take from its left edge.
+ */
+function headerFit(r, w) {
   const hasQuota = Boolean(r.quota && num(r.quota.need, 0) > 0);
   let stats = typeof r.stats === "string" ? r.stats : hasQuota ? `${r.quota.have}/${r.quota.need}` : "";
   const bw = w < 220 ? 24 : 36;
@@ -413,6 +419,12 @@ function roomHeader(r, w, ctx) {
   let title = r.title ?? "";
   if (textW(title) > space(stats)) title = r.shortTitle ?? title;
   if (textW(title) > space(stats) && stats.includes(" · ")) stats = stats.slice(0, stats.indexOf(" · "));
+  const used = (r.dividerLeft ? 7 : 6) + textW(title) + (hasQuota ? bw + 5 : 0) + (stats ? monoW(stats, 9.5) + 5 : 0) + (r.door ? 16 : 0) + 5;
+  return { hasQuota, stats, bw, title, used: Math.min(w, used) };
+}
+
+function roomHeader(r, w, ctx) {
+  const { hasQuota, bw, title, stats } = headerFit(r, w);
   const strip = div().id(`${r.key}/hdr`).absolute().left(0).top(0).w(w).h(18).flex().items_center().gap(5).pl(r.dividerLeft ? 7 : 6).pr(5)
     .overflow_hidden().whitespace_nowrap().text_size(10.5).font_weight(600).text_color(CREAM)
     .bg(r.review ? "#5A1620D9" : "#0D0B1AA6");
@@ -564,7 +576,7 @@ function hero(h, ctx) {
     lean: ctx.leanRig,
   }).cursor_pointer().on_click((e, cx) => {
     cx.stop_propagation();
-    if (num(e?.click_count, 1) >= 2) { openOverlay(SHEET(h.heroId)); return; }
+    if (num(e?.click_count, 1) >= 2) { openSheet(h.heroId); return; }
     if (h.address) run("agent.focus", { terminal: h.address });
     ctx.act("markSeen", { heroId: h.heroId });
   });
@@ -607,6 +619,8 @@ function bubble(h, ctx) {
   } else {
     left = h.x - 16;
     top = ctx.oy + h.y - (h.crate ? 12 : 0) - 76;
+    // short stages: no room above the head without covering the room header, so beside it
+    if (top < 13) { top = 13; left = h.x + 12; }
   }
   left = r2(clampX(left, 32, ctx)); top = r2(Math.max(0, top));
   const el = div().id(`${h.key}/bubble`).absolute().left(left).top(top).w(32).h(32).cursor_pointer()
@@ -641,7 +655,7 @@ function plate(h, ctx) {
       .flex().items_center().justify_center().px(3).pb(3).truncate()
       .text_size(9.5).line_height(1).font_family(MONO).font_weight(h.focused ? 700 : 500).text_color(CREAM)
       .cursor_pointer().transition("left", { duration: 900, easing: "ease-out" })
-      .on_click((_e, cx) => { cx.stop_propagation(); openOverlay(SHEET(h.heroId)); })
+      .on_click((_e, cx) => { cx.stop_propagation(); openSheet(h.heroId); })
       .child(String(p.text ?? h.name ?? ""))
       .child(div().id(`${h.key}/hp`).absolute().left(3).top(11).h(2).rounded(1)
         .w(Math.max(0, Math.round((pw - 8) * clamp01(p.hpFrac ?? h.hpFrac)))).bg(C.hp)
@@ -663,7 +677,8 @@ function plate(h, ctx) {
 function boss(b, ctx) {
   const { oy } = ctx;
   const age = num(b.age, 9);
-  const w = num(b.w, 112), h = num(b.h, 96);
+  const k = bossScale(b, ctx);
+  const w = r2(num(b.w, 112) * k), h = r2(num(b.h, 96) * k);
   const out = [];
   // Sprite: hidden 40 px low at age 0, rises at age 1 (D§11.8 entrance).
   const rise = age === 0 ? 40 : 0;
@@ -674,8 +689,47 @@ function boss(b, ctx) {
   if (b.tooltip) sprite.tooltip(b.tooltip);
   out.push(sprite);
   for (const p of b.parts ?? []) out.push(part(b, p, ctx));
-  if (!b.stamp && b.arena) out.push(bossHud(b, ctx));
+  if (!b.stamp && b.arena) out.push(ctx.H < SLIM_HUD_H ? bossHudSlim(b, ctx) : bossHud(b, ctx));
   return out;
+}
+
+/** Below this stage height the boss HUD moves into the arena's header band (one 16 px row). */
+const SLIM_HUD_H = 160;
+
+/** The boss sprite shrinks (to 0.55 at most) to fit between the header band and the ground. */
+function bossScale(b, ctx) {
+  const h = num(b.h, 96);
+  const room = GROUND + ctx.oy - 20;
+  return h > room ? Math.max(0.55, room / h) : 1;
+}
+
+/** Short stages: name, HP bar and mechanic text in one row over the arena's header band. */
+function bossHudSlim(b, ctx) {
+  const a = b.arena;
+  const age = num(b.age, 9);
+  const w = Math.max(80, num(a.w, 240) - 8);
+  const nameW = Math.min(150, Math.round(w * 0.36));
+  const mech = String(b.mechText ?? b.phaseLabel ?? "");
+  let mechW = mech ? Math.min(monoW(mech, 9) + 2, Math.round(w * 0.3)) : 0;
+  let barW = w - 12 - nameW - 12 - (mechW ? mechW + 6 : 0);
+  if (barW < 40 && mechW) { barW += mechW + 6; mechW = 0; }
+  barW = Math.max(20, barW);
+  const fill = age <= 1 ? 0 : Math.round(barW * clamp01(b.hpFrac));
+  const segs = Math.max(1, Math.min(12, Math.round(num(b.segments, 1))));
+  const bar = div().relative().flex_none().w(barW).h(5).rounded(2).bg("#FFFFFF24").overflow_hidden()
+    .child(div().id(`${b.key}/hpfill`).absolute().left(0).top(0).h(5).w(fill).bg(b.invuln ? "#9AA3AD" : C.hp)
+      .transition("width", { duration: age <= 2 ? 800 : 400, easing: "ease-out" }));
+  for (let i = 1; i < segs; i++) bar.child(div().absolute().left(Math.round((i * barW) / segs)).top(0).w(1).h(5).bg(INK));
+  const el = div().id(`${b.key}/hud`).absolute().left(r2(num(a.x, 0) + 4)).top(1).w(w).h(16).rounded(3).bg("#17142A")
+    .flex().items_center().gap(6).px(6)
+    .child(div().flex_none().w(nameW).truncate().text_size(10).line_height(1).font_weight(700)
+      .text_color(b.enraged ? "#FF8A8D" : CREAM).child(String(b.name ?? "")))
+    .child(bar);
+  if (mechW) {
+    el.child(div().flex_none().w(mechW).truncate().text_size(9).line_height(1).font_family(MONO)
+      .text_color(b.enraged ? C.hp : alpha(CREAM, 0.85)).child(mech));
+  }
+  return el;
 }
 
 function part(b, p, ctx) {
@@ -720,7 +774,10 @@ function bossHud(b, ctx) {
     if (b.phaseLabel) tag.child(String(b.phaseLabel));
     row.child(tag);
   }
-  const el = div().id(`${b.key}/hud`).absolute().left(left).top(top).w(hw).flex().flex_col().gap(2).child(row).child(hp);
+  // A dark plate behind the HUD keeps the name and mechanic readable on pale skies and over the
+  // sprite on short stages.
+  const el = div().id(`${b.key}/hud`).absolute().left(r2(left - 6)).top(r2(top - 3)).w(hw + 12).px(6).py(3).rounded(4)
+    .bg("#0B0A12B8").flex().flex_col().gap(2).child(row).child(hp);
   if (Number.isFinite(b.timerFrac)) {
     el.child(div().relative().w(hw).h(2).bg("#0B0A1299")
       .child(div().id(`${b.key}/timer`).absolute().left(0).top(0).h(2).w(Math.round(hw * clamp01(b.timerFrac)))
@@ -763,7 +820,7 @@ function bossOverlays(b, ctx) {
   if (st) {
     const down = num(st.age, 1) >= 1;
     const sw = down ? 80 : 160, sh = down ? 28 : 56;
-    const cx = b.x, cy = ctx.oy + b.y - num(b.h, 96) / 2;
+    const cx = b.x, cy = ctx.oy + b.y - (num(b.h, 96) * bossScale(b, ctx)) / 2;
     const el = st.sprite === null
       ? div().id(st.key).absolute().border(3).border_color(C.hp).rounded(3).flex().items_center().justify_center()
         .text_size(down ? 16 : 30).font_weight(900).text_color(C.hp).whitespace_nowrap().child(String(st.text ?? ""))
@@ -822,12 +879,14 @@ function fx(f, ctx) {
   const text = String(f.text ?? "");
   const tw = monoW(text, size) + 8;
   const th = Math.ceil(size + 5);
+  // short stages lift the scene into the header band: floats stay below it (they still fade)
+  const yy = Math.max(y, 20 + th / 2);
   const out = [];
   if (k === "crit") {
-    out.push(move(svg(art("fx/starburst.svg")).id(`${f.key}/burst`).absolute().left(r2(x - tw / 2 - 11)).top(r2(y - 9)).w(18).h(18).text_color("#FFB347")));
+    out.push(move(svg(art("fx/starburst.svg")).id(`${f.key}/burst`).absolute().left(r2(x - tw / 2 - 11)).top(r2(yy - 9)).w(18).h(18).text_color("#FFB347")));
   }
   const color = f.color ?? (k === "heal" ? "#6BE38A" : k === "incoming" ? C.hp : k === "num" ? "#FFFFFFD9" : CREAM);
-  out.push(move(div().id(f.key).absolute().left(r2(x - tw / 2)).top(r2(y - th / 2)).w(tw).h(th).rounded(3)
+  out.push(move(div().id(f.key).absolute().left(r2(x - tw / 2)).top(r2(yy - th / 2)).w(tw).h(th).rounded(3)
     .bg(alpha(INK, k === "crit" ? 0.7 : 0.55)).flex().items_center().justify_center()
     .text_size(size).line_height(1).font_family(MONO).font_weight(k === "num" ? 600 : 800).text_color(color)
     .whitespace_nowrap().child(text)));
@@ -865,10 +924,38 @@ function lootPillar(f, ctx) {
 // ---------------------------------------------------------------------------------------------
 // Header band messages, overflow chip, empty states
 
-function headerNote(n, ctx) {
+/**
+ * The ≤ 3 s header note (D§11.15). It never covers a room title: it sits right-aligned in the
+ * header band of the room with the most free header space, or, when no header has room for it,
+ * just under the header band, centred on the widest room that is not the boss arena.
+ */
+function headerNote(n, ctx, rooms) {
   const text = String(n.text ?? "");
-  const bw = Math.min(ctx.W - 16, monoW(text, 10) + 24);
-  return div().id(n.key).absolute().left(r2(ctx.W / 2 - bw / 2)).top(1).w(bw).h(16).rounded(8)
+  const want = Math.min(ctx.W - 16, monoW(text, 10) + 24);
+  let best = null;
+  for (const r of rooms) {
+    const w = num(r.w, 0);
+    const free = w - headerFit(r, w).used - 8;
+    if (!best || free > best.free) best = { free, right: num(r.x, 0) + w - 4 };
+  }
+  let left;
+  let top = 1;
+  if (best && best.free >= want) {
+    left = best.right - want;
+  } else {
+    // under the header band, never over the boss arena (its HUD lives there): left of it, or
+    // nowhere on a strip too narrow for both (the note is a 3 s nicety)
+    const arena = ctx.vm.boss?.arena ?? null;
+    const limit = arena ? num(arena.x, ctx.W) : ctx.W;
+    if (limit < want + 8) return null;
+    let wide = null;
+    for (const r of rooms) if (num(r.x, 0) < limit - 1 && (!wide || num(r.w, 0) > num(wide.w, 0))) wide = r;
+    left = wide ? num(wide.x, 0) + num(wide.w, 0) / 2 - want / 2 : limit / 2 - want / 2;
+    left = Math.max(1, Math.min(limit - want - 4, left));
+    top = 21;
+  }
+  const bw = want;
+  return div().id(n.key).absolute().left(r2(clampX(left, bw, ctx))).top(top).w(bw).h(16).rounded(8)
     .bg("#0B0A12EB").border(1).border_color(alpha(n.color ?? CREAM, 0.55))
     .flex().items_center().justify_center().px(8).truncate()
     .text_size(10).line_height(1).font_weight(700).text_color(n.color ?? CREAM).child(text);
@@ -907,7 +994,7 @@ function overflowChip(o, ctx) {
   el.child(div().absolute().left(r2(w / 2 - lw / 2)).top(r2(ctx.compact ? Math.max(2, gy - 22) : oy + 88)).w(lw).h(20).rounded(10)
     .bg("#0B0A12CC").border(1).border_color(alpha(CREAM, 0.3)).flex().items_center().justify_center()
     .text_size(13).line_height(1).font_family(MONO).font_weight(800).text_color(CREAM).child(label));
-  const dots = (o.dots ?? []).slice(0, 10);
+  const dots = (o.dots ?? []).slice(0, Math.max(1, Math.min(10, Math.floor((w - 12) / 9))));
   const dy = ctx.compact ? gy + 6 : oy + 116;
   dots.forEach((c, i) => {
     const dx = w / 2 + (i - (dots.length - 1) / 2) * 9 - 3;

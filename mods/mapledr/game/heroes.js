@@ -60,17 +60,19 @@ export function newHero(state, { seat = "nospace/agent", sid = null, ord = 0, no
 }
 
 /**
- * The starter Training Stick grows with its Intern (design gap, found by tools/pacing-sim.mjs):
- * while the hero is an Intern and still holds it, its item level follows the reference kit,
- * iRef(L) = max(1, L - 2) (D§5.2). Without this an Intern's Power Level sinks to L - 5 by Lv 8
- * (weapons are 14% of early drops), autopilot keeps it on map 1-1 and the first day runs far behind
- * D§12.1 (three Lv 9 Interns at map 1-3 by minute 36). From Lv 10 it is an ordinary item. The item
- * object is replaced (same uid), never mutated, so stats caches see the change.
+ * The starter Training Stick grows with its hero (design gap, found by tools/pacing-sim.mjs): while
+ * the hero still holds it, its item level follows the reference kit, iRef(L) = max(1, L - 2)
+ * (D§5.2). Without this an Intern's Power Level sinks to L - 5 by Lv 8 (weapons are 14% of early
+ * drops), autopilot keeps it on map 1-1 and the first day runs far behind D§12.1 (three Lv 9
+ * Interns at map 1-3 by minute 36). It keeps growing after Lv 10 until the first class weapon
+ * replaces it (drops land at iRef since balance's T.loot.ilvlOffset, so a Junior with a frozen
+ * iLvl-8 stick lagged its level by 3-5 and stayed in Lint Meadows past Lv 14). The item object is
+ * replaced (same uid), never mutated, so stats caches see the change.
  */
 function growStarter(hero) {
   const it = hero.eq && hero.eq[0];
   if (!it || !(it.flags & FLAG_STARTER) || it.base !== 0) return;
-  const i = Math.max(1, Math.min(hero.L, CAREERS[1].from) - 2);
+  const i = Math.max(1, hero.L - 2);
   if (i > it.ilvl) hero.eq[0] = Object.assign({}, it, { ilvl: i, aff: it.aff.slice() });
 }
 
@@ -792,7 +794,7 @@ export function grantXP(state, hero, amount, ev) {
     hero.L++;
     hero.spFree = (hero.spFree || 0) + 1;
     res.levels++;
-    if (hero.cls === 0) growStarter(hero);
+    growStarter(hero);
     if (hero.L === CAREERS[1].from && hero.cls === 0) assignClass(hero);
     if (ev && typeof ev.fx === "function") ev.fx("levelup", { heroId: hero.id, value: hero.L, text: "LEVEL UP" });
     const after = careerOf(hero);

@@ -186,7 +186,7 @@ function heroHeader(vm, env, t, ui) {
 
   const hero = h_flex().id(`np-hero-${p.pane}`).flex_none().h(26).px(4).ml(-4).gap(6).items_center().rounded(6).cursor_pointer()
     .hover((s) => s.bg(t.hover))
-    .tooltip(vm.tooltip ?? vm.name)
+    .tooltip(String(vm.tooltip ?? vm.name ?? ""))
     // A header click still focuses its pane (first, so the sheet opens over the focused pane).
     .on_click((_e, cx) => {
       cx.stop_propagation();
@@ -197,15 +197,17 @@ function heroHeader(vm, env, t, ui) {
       fit.tiny ? null : pic,
       faceScreen(vm, t),
       fit.tiny ? null : div().min_w(0).max_w(fit.nameMax).truncate().text_color(t.fg)
-        .when(!!p.focused, (el) => el.font_semibold()).when(!p.focused, (el) => el.font_medium()).child(vm.name),
+        .when(!!p.focused, (el) => el.font_semibold()).when(!p.focused, (el) => el.font_medium()).child(String(vm.name ?? "")),
       div().flex_none().font_family(MONO).text_size(11).text_color(t.muted).child(`Lv ${vm.level}`),
-      fit.career ? div().flex_none().text_size(11.5).text_color(t.dim).child(vm.careerTitle) : null,
+      fit.career ? div().flex_none().text_size(11.5).text_color(t.dim).child(String(vm.careerTitle)) : null,
       fit.contractor ? div().flex_none().text_size(11).italic().text_color(t.dim).child("(contractor)") : null,
     ]));
 
   const centre = fit.tiny
     ? div().flex_1()
-    : h_flex().flex_1().min_w(0).gap(8).items_center()
+    // overflow_hidden: until on_size_change reports the real width the plan may be for a wider
+    // header; the centre then clips its title and folder instead of painting over the chip
+    : h_flex().flex_1().min_w(0).gap(8).items_center().overflow_hidden()
       .child(div().flex_none().w(1).h(14).bg(t.border))
       .child(div().min_w(0).truncate().text_color(t.muted).child(title))
       .when(fit.folder, (el) => el.child(div().flex_none().max_w(220).truncate().text_color(t.dim).child(folder(p.cwd, env.home))))

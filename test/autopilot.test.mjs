@@ -8,6 +8,7 @@ import * as F from "../mods/mapledr/game/formulas.js";
 import * as Hr from "../mods/mapledr/game/heroes.js";
 import * as I from "../mods/mapledr/game/items.js";
 import * as AP from "../mods/mapledr/game/autopilot.js";
+import * as H from "../mods/mapledr/game/herd.js";
 import { makeWorld, addHero, makeEv, T0 } from "./helpers/engine.mjs";
 
 function item(state, slot, ilvl, rar = 0, extra = {}) {
@@ -228,12 +229,29 @@ describe("gear (D§8.7, D§8.8)", () => {
   test("autoBuild buys the cheapest affordable building", () => {
     const w = makeWorld({ heroes: [] });
     w.state.herd.gold = 2500;
+    w.state.herd.born = 100;
+    w.state.herd.day = 105; // the herd's day 6: Campfire 1 is open (balance: one level per 6 days)
     const ev = makeEv();
     assert.equal(AP.autoBuild(w, ev), 0);
     assert.equal(w.state.herd.bld[0], 1);
     assert.equal(w.state.herd.gold, 1700);
     assert.equal(ev.notes[0], "Localhost: Campfire 1");
     assert.equal(AP.autoBuild(w, ev), null);
+  });
+
+  test("the Campfire waits for the herd's age (balance: one level per 6 days, the D§12.1 Fresh Eyes cap)", () => {
+    const w = makeWorld({ heroes: [] });
+    w.state.herd.gold = 1e9;
+    w.state.herd.born = 100;
+    w.state.herd.day = 100; // day 1: no Campfire yet, the Coffee Machine (same price) goes first
+    assert.equal(AP.autoBuild(w, makeEv()), 1);
+    assert.equal(w.state.herd.bld[0], 0);
+    assert.match(H.buy(w.state, 0).error, /day 6/);
+    w.state.herd.day = 111; // day 12: two levels
+    assert.equal(H.buy(w.state, 0).ok, true);
+    assert.equal(H.buy(w.state, 0).ok, true);
+    assert.equal(H.buy(w.state, 0).ok, false);
+    assert.equal(H.freshEyesCapMin(w.state), 90);
   });
 });
 
@@ -300,12 +318,13 @@ describe("bosses and reviews (D§9.5, D§4.5)", () => {
     assert.ok(helper);
   });
 
-  test("auto-boss challenges the frontier boss when the door is open and E >= 1.0", () => {
+  test("auto-boss challenges the frontier boss when the door is open and E >= autoAt (balance: 0.9, design 1.0)", () => {
     const w = makeWorld({ heroes: [{ cls: "shellmancer", L: 11, mapId: "1-3" }] });
-    w.rt.bossApi = fakeBoss({ est: 0.99 });
+    const at = D.TUNING.boss.autoAt;
+    w.rt.bossApi = fakeBoss({ est: at - 0.01 });
     zoneOneReady(w);
     assert.deepEqual(AP.autoChallenge(w, makeEv()), []);
-    w.rt.bossApi = fakeBoss({ est: 1.0 });
+    w.rt.bossApi = fakeBoss({ est: at });
     const started = AP.autoChallenge(w, makeEv());
     assert.equal(started.length, 1);
     assert.equal(w.rt.fights.length, 1);

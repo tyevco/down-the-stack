@@ -9,12 +9,16 @@
 // CLI (screenshots of every scenario through the mock + tools/preview, deviceScaleFactor 2):
 //   node --import ./tools/mock/register.mjs tools/vm-samples/stage.mjs --shoot [--only name]
 //   → out/ui-stage-<scenario>.png (+ "-light" variants in herdr's paper theme)
+//   node --import ./tools/mock/register.mjs tools/vm-samples/stage.mjs --views [--only kind] [--widths 1200,360]
+//   → out/view-stage-<kind>.png: the real demo worlds through game/view.js stageView
 //
 // Layout follows D§11.2/11.3 exactly as view.js should: slot w = clamp(W / N, 150, 320) with the
 // spare width split at both ends; overflow when N·150 > W (C − 1 slots + a 150 px camp chip);
-// a boss fight appends a 2w arena at the right end. Inside a slot of width w: hero at 0.24w,
-// forklings 0.10–0.18w, chest 0.36w, campfire 0.10w (resting hero 0.18w), lane mobs at
-// 0.52/0.70/0.88w (0.58/0.84w when w < 180). Ground line y = 160, nameplates y = 164.
+// a boss fight appends a 2w arena at the right end (fighters ≥ 56 px apart, no BOSS tag inside
+// it). Inside a slot of width w: hero at 0.24w (resting 0.22w with the campfire at 0.08w;
+// supervising 0.16w with Forklings from 0.30w), a shipped hero's chest at ≥ 0.42w (the SHIPPED
+// ribbon clear of the face), lane mobs at 0.52/0.70/0.88w (0.58/0.84w when w < 180).
+// Ground line y = 160, nameplates y = 164.
 // Sprites: x = centre, y = feet. Boxes: x = left edge.
 
 import fs from "node:fs";
@@ -130,7 +134,7 @@ function build(spec, { width, height, tick = 0 } = {}) {
     const map = mapOf(h.map);
     const zone = zoneOf(h.map);
     const tag = h.state === "waiting" && h.blockedFor ? { text: `! ${h.blockedFor}`, color: COL.blocked }
-      : inArena ? { text: `BOSS ${spec.boss.pct}%`, color: COL.hp }
+      : inArena ? null // the arena itself says BOSS (stage review)
         : h.fresh ? { text: `Fresh Eyes ${h.fresh}`, color: "#A9B8FF" }
           : h.state === "crashed" ? { text: "rebooting", color: COL.idle }
             : null;
@@ -185,7 +189,7 @@ function build(spec, { width, height, tick = 0 } = {}) {
     }
     if (h.chest) {
       chests.push({
-        key: `chest:${h.id}`, heroId: h.id, address: `t${h.id}`, x: round(sx + 0.36 * w), y: 160,
+        key: `chest:${h.id}`, heroId: h.id, address: `t${h.id}`, x: round(Math.max(sx + 0.42 * w, hx + 34)), y: 160,
         tier: h.chest.tier, count: h.chest.count ?? 1, open: Boolean(h.chest.open),
         tooltip: `Shipped: ${h.quest ?? "a task"} · ${h.chest.seals ?? "2.4"} Seals · ${h.chest.tier[0].toUpperCase()}${h.chest.tier.slice(1)} chest\nClick to open it`,
       });
@@ -234,8 +238,8 @@ function build(spec, { width, height, tick = 0 } = {}) {
       review: false, dividerLeft: prevZone !== null && prevZone !== zone.id, props,
       tooltip: `${zone.name} · ${r.mapId === "backlog" ? map.name : `${r.mapId} ${map.name}`} (Lv ${zone.levels ? `${map.levels?.[0] ?? zone.levels[0]}–${map.levels?.[1] ?? zone.levels[1]}` : "100+"})` +
         (quota ? `\nQuota ${quota.have}/${quota.need} kills to open the next map` : "") + (sprint ? `\nSprint ${sprint.have}/${sprint.need} toward the boss door` : ""),
-      stats: stats || undefined,
     };
+    if (stats) vm.stats = stats; // optional: absent (not undefined) when there is nothing to count
     prevZone = zone.id;
     return vm;
   });
@@ -281,7 +285,7 @@ function build(spec, { width, height, tick = 0 } = {}) {
       timerFrac: b.timer, enraged: Boolean(b.enraged), invuln: Boolean(b.invuln), parts,
       partSprite: labels.length && b.id !== "pyramid_of_doom" ? `boss/${b.id}-part.svg` : null,
       banner: b.banner && age <= 3 ? { key: `banner:${b.id}:${TICK0 - (b.age ?? 0)}`, text: def.name, sub: def.flavor, age, kind: "entrance" } : null,
-      stamp: b.stamp ? { key: `stamp:${b.id}`, text: "FIXED", age: (b.stampAge ?? 0) + tick } : null,
+      stamp: b.stamp ? { key: `stamp:${b.id}`, text: "FIXED", age: (b.stampAge ?? 0) + tick, sprite: "fx/stamp-fixed.svg" } : null,
       arena: { x: round(a.x), w: round(a.w) }, age,
       tooltip: `${def.name} · Lv ${def.level}\n${b.tip ?? "Shield of 8 branches: break 5 to expose the body"}\nWin estimate: ${b.estimate ?? "Even (1.08)"}`,
     };
@@ -561,6 +565,60 @@ async function shootAll(argv) {
   for (const f of files) console.log(`wrote ${path.relative(process.cwd(), f.file)}`);
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url) && process.argv.includes("--shoot")) {
-  shootAll(process.argv.slice(2)).catch((e) => { console.error(e); process.exit(1); });
+/**
+ * Real demo worlds (game/demo.js) through game/view.js stageView and the renderer:
+ * out/view-stage-<kind>[-<width>].png. `--only kind`, `--widths 1200,360`, `--ticks n` (advance the
+ * world n ticks with demoSnapshot first, so remembered mob spots and fade-outs are exercised).
+ */
+async function shootViews(argv) {
+  const arg = (k, d) => (argv.includes(k) ? argv[argv.indexOf(k) + 1] : d);
+  const only = arg("--only", null);
+  const widths = String(arg("--widths", "1200")).split(",").map(Number);
+  const ticks = Number(arg("--ticks", "2"));
+  const height = Number(arg("--height", "200"));
+  const M = await import("../mock/index.mjs");
+  const { View } = await import("gpui-kit");
+  const { shoot } = await import("../preview/shoot.mjs");
+  const { demoWorld, demoSnapshot, DEMO_KINDS } = await import("../../mods/mapledr/game/demo.js");
+  const { tick } = await import("../../mods/mapledr/game/world.js");
+  const { stageView } = await import("../../mods/mapledr/game/view.js");
+  const Stage = (await import("../../mods/mapledr/ui/stage.js")).default;
+  const now0 = Date.UTC(2026, 10, 24, 9, 30, 0);
+  const shots = [];
+  for (const kind of DEMO_KINDS) {
+    if (only && kind !== only) continue;
+    for (const width of widths) {
+      const { world } = demoWorld(kind, now0);
+      let now = now0;
+      stageView(world, { width, height, nowMs: now });
+      for (let k = 0; k < ticks; k++) {
+        now += 1000;
+        tick(world, demoSnapshot(world, now));
+        stageView(world, { width, height, nowMs: now });
+      }
+      const vm = stageView(world, { width, height, nowMs: now });
+      M.resetState();
+      M.setFixture({ theme: "graphite", layout: M.readLayout() });
+      const host = { world, version: 1, view: () => vm, command: () => ({ ok: true }), claim: () => true };
+      class Wrap extends View {
+        init(p, cx) { this.s = new Stage(); this.s.init({ role: "stage" }, cx, host); }
+        render(cx) { return this.s.render(cx); }
+      }
+      const mod = await M.mountView(Wrap, { props: { role: "stage" } });
+      mod.render();
+      mod.size(width, height);
+      mod.render();
+      for (const e of mod.errors) console.warn(`  ! ${kind}@${width}: [${e.code}] ${e.message}`);
+      const name = `view-stage-${kind}${widths.length > 1 || width !== 1200 ? `-${width}` : ""}${height !== 200 ? `-h${height}` : ""}`;
+      console.log(`${name}: ${mod.stats.elements} elements, ${mod.stats.lastRenderMs.toFixed(1)} ms`);
+      shots.push({ name, tree: mod.tree, width, height, userFacing: true, theme: M.resolveTheme("graphite") });
+    }
+  }
+  const files = await shoot(shots);
+  for (const f of files) console.log(`wrote ${path.relative(process.cwd(), f.file)}`);
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  if (process.argv.includes("--shoot")) shootAll(process.argv.slice(2)).catch((e) => { console.error(e); process.exit(1); });
+  else if (process.argv.includes("--views")) shootViews(process.argv.slice(2)).catch((e) => { console.error(e); process.exit(1); });
 }

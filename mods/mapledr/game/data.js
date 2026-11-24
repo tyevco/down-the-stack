@@ -31,8 +31,8 @@ export const TUNING = {
   itemFindCap: 1.5, regen: { engaged: 0.005, advance: 0.02, resting: 0.05 },
   coffee: { threshold: 0.45, cooldown: 5, heal: 0.35, carry: 20, refillTicks: 30, priceGoldMult: 2 },
   crash: { downTicks: 5, returnHp: 0.5, dropMapAfter: [3, 600], dropMapForSec: 1800 },
-  lane: { size: 3, advanceScrollPx: 48, eliteOneIn: 80, duckOneIn: 20000 },
-  gap: { freeAbove: 2, lossPerLevel: 0.1, floor: 0.1, bonusPerLevelBelow: 0.05, bonusCapLevels: 5 },
+  lane: { size: 3, advanceScrollPx: 48, eliteOneIn: 80, duckOneIn: 20000, firstSwingDelay: 1 }, // balance: firstSwingDelay new (design 0: swings on the first hit)
+  gap: { freeAbove: 2, lossPerLevel: 0.1, floor: 0.03, bonusPerLevelBelow: 0.05, bonusCapLevels: 5 }, // balance: floor (design 0.1)
   seals: {
     minMinutes: 1.5, perMinute: 0.1, capMinutes: 120, chestGoldPerSeal: 20, chestXpPerSeal: 45,
     mergeWindowSec: 300, unreviewedAfterSec: 86400, forklingMinuteCredit: 0.25
@@ -47,12 +47,15 @@ export const TUNING = {
   boss: {
     partyHpPerExtra: 0.75, swingEvery: 2, timer: 180, enrageAt: 0.8, enrageDmg: 0.5, warRoomTicks: 6,
     maxParticipants: 6, woundsKeep: 0.5, woundsSec: 172800, lessonsPerFail: 0.1, lessonsCap: 0.5,
-    retryWorkingSec: 600, suspendAfterSec: 600, estimateMargin: 0.85, autoAt: 1, farmAt: 1.5,
-    repeatCooldownWorkingSec: 10800, helperCapLevels: 3, crashRejoinTicks: 10
+    retryWorkingSec: 600, suspendAfterSec: 600, estimateMargin: 0.85, autoAt: 0.9, farmAt: 1.5, // balance: autoAt (design 1.0)
+    repeatCooldownWorkingSec: 10800, helperCapLevels: 3, crashRejoinTicks: 10,
+    xpFirst: 0.1, xpRepeat: 0.02 // balance: Need(L) per first / repeat kill (design 0.5 / 0.1, D§6.2)
   },
   release: { seals: [8, 1.35], bonusPer: 0.005, maxRelease: 60 },
   sprint: [6, 10, 25, 45, 70, 105, 160, 215, 300], quotaPerMap: 40, buildingCostGrowth: 3,
   buildingAutoBuyAt: 3, goldReserve: 0.2,
+  loot: { ilvlOffset: -6, taperFrom: 50 }, // balance: new (D§8.6 item levels -6, fading to 0 at Lv 100)
+  campfireDaysPerLevel: 6, // balance: new (D§10.2 has no gate; the D§12.1 model's Fresh Eyes cap grows by day / 6)
   polish: { goldBase: 100, exp: 1.6, forgeDiscount: 0.04, perLevel: 0.05, portShare: 0.5 },
   skills: {
     rankGate: 1, respecSnippetsPerLevel: 5, careerChangeSnippetsPerLevel: 25, classFreeUntilLevel: 20,
@@ -493,7 +496,7 @@ export const TRAITS = {
   phaser: { missChance: 0.2 }, clumsy: { selfMissChance: 0.2, healsHero: false },
   pending: { invulnTicks: 2 }, leech: { healPct: 0.15 }, reviver: { chance: 0.25, hp: 0.4 },
   splitter: { halves: 2, hpPct: 0.3, xpPct: 0.3 }, grower: { perTick: 0.03, cap: 0.6 },
-  thorns: { reflect: 0.08, meleeOnly: true }, ranged: { fromSlot: 2, swingEvery: 3 },
+  thorns: { reflect: 0.03, meleeOnly: true, capPerTick: 0.004 }, ranged: { fromSlot: 2, swingEvery: 3 }, // balance: thorns reflect (design 0.08), capPerTick new
   shapeshifter: { everyTicks: 5, exclude: ["swarm", "splitter"] }
 };
 
@@ -508,139 +511,139 @@ export const HOLO_DUCK = {
 
 export const MOBS = [
   {
-    id: "typo_sprout", zone: 0, map: 1, name: "Typo Sprout", size: "S", traits: [], hp: 1, atk: 1,
-    xp: 1, gold: 1, sprite: "Seedling whose leaf says teh",
+    id: "typo_sprout", zone: 0, map: 1, name: "Typo Sprout", size: "S", traits: [], hp: 1, atk: 0.7,
+    xp: 0.88, gold: 1, sprite: "Seedling whose leaf says teh", // balance: atk (design 1), xp (design 1)
     flavor: "Sprouts wherever fingers outrun eyes."
   },
   {
     id: "semicolon_snail", zone: 0, map: 2, name: "Semicolon Snail", size: "S", traits: ["slow"],
-    hp: 1.3, atk: 1.4, xp: 1.2, gold: 1, sprite: "A ; shell leaving a dotted trail",
+    hp: 1.3, atk: 0.8, xp: 0.86, gold: 1, sprite: "A ; shell leaving a dotted trail", // balance: atk (design 1.4), xp (design 1.2)
     flavor: "Optional in some regions."
   },
   {
     id: "unused_import", zone: 0, map: 3, name: "Unused Import", size: "M", traits: ["tanky"], hp: 1.6,
-    atk: 0.8, xp: 1.4, gold: 1.5, sprite: "Sleeping imp hugging a crate it never opens",
+    atk: 0.5, xp: 1.47, gold: 1.5, sprite: "Sleeping imp hugging a crate it never opens", // balance: atk (design 0.8), xp (design 1.4)
     flavor: "Imported years ago. Never called."
   },
   {
     id: "callback_bat", zone: 1, map: 1, name: "Callback Bat", size: "S", traits: ["fast"], hp: 0.8,
-    atk: 0.6, xp: 0.9, gold: 1, sprite: "Boomerang-shaped wings",
+    atk: 0.6, xp: 0.81, gold: 1, sprite: "Boomerang-shaped wings", // balance: xp (design 0.9)
     flavor: "Will call you back. Eventually. Possibly twice."
   },
   {
     id: "promise_wisp", zone: 1, map: 2, name: "Promise Wisp", size: "S", traits: ["pending"], hp: 1.1,
-    atk: 1, xp: 1.1, gold: 1, sprite: "Cocoon with a loading spinner",
+    atk: 1, xp: 1.16, gold: 1, sprite: "Cocoon with a loading spinner", // balance: xp (design 1.1)
     flavor: "Pending... pending... resolved."
   },
   {
     id: "null_pointer_frog", zone: 1, map: 3, name: "Null Pointer Frog", size: "M", traits: ["clumsy"],
-    hp: 1, atk: 1.2, xp: 1.1, gold: 1, sprite: "Frog with an arrow-to-nothing belly",
+    hp: 1, atk: 1.2, xp: 0.96, gold: 1, sprite: "Frog with an arrow-to-nothing belly", // balance: xp (design 1.1)
     flavor: "Points confidently at nothing."
   },
   {
     id: "capture_group_goblins", zone: 2, map: 1, name: "Capture Group Goblins", size: "S",
-    traits: ["swarm"], swarm: 2, hp: 0.6, atk: 0.7, xp: 0.6, gold: 0.6,
+    traits: ["swarm"], swarm: 2, hp: 0.6, atk: 0.7, xp: 0.66, gold: 0.6, // balance: xp (design 0.6)
     sprite: "Two goblins holding ( and )", flavor: "They travel in (pairs)."
   },
   {
     id: "backslash_bandit", zone: 2, map: 2, name: "Backslash Bandit", size: "M", traits: ["phaser"],
-    phaser: 0.2, hp: 0.9, atk: 1.1, xp: 1, gold: 1.2, sprite: "Masked thief with a slash-shaped cape",
+    phaser: 0.2, hp: 0.9, atk: 1.1, xp: 1.07, gold: 1.2, sprite: "Masked thief with a slash-shaped cape", // balance: xp (design 1)
     flavor: "Always escaping."
   },
   {
     id: "greedy_glob", zone: 2, map: 3, name: "Greedy Glob", size: "M", traits: ["leech"], leech: 0.15,
-    hp: 1.3, atk: 1, xp: 1.3, gold: 2, sprite: "Blob stamped .* swallowing pebbles",
+    hp: 1.3, atk: 1, xp: 1.11, gold: 2, sprite: "Blob stamped .* swallowing pebbles", // balance: xp (design 1.3)
     flavor: "Matches everything. Including your lunch."
   },
   {
     id: "diff_leech", zone: 3, map: 1, name: "Diff Leech", size: "S", traits: ["leech"], leech: 0.2,
-    hp: 0.9, atk: 1, xp: 0.9, gold: 1, sprite: "Red-and-green striped leech",
+    hp: 0.9, atk: 1, xp: 0.86, gold: 1, sprite: "Red-and-green striped leech", // balance: xp (design 0.9)
     flavor: "+3 -3. Mostly -."
   },
   {
     id: "rebase_wraith", zone: 3, map: 2, name: "Rebase Wraith", size: "M", traits: ["reviver"],
-    reviver: 0.25, hp: 1, atk: 1.2, xp: 1.2, gold: 1, sprite: "Ghost trailing afterimages",
+    reviver: 0.25, hp: 1, atk: 1.2, xp: 1.01, gold: 1, sprite: "Ghost trailing afterimages", // balance: xp (design 1.2)
     flavor: "Rewrites history. Says it's cleaner."
   },
   {
     id: "merge_conflict_golem", zone: 3, map: 3, name: "Merge Conflict Golem", size: "L",
-    traits: ["tanky", "splitter"], hp: 1.6, atk: 0.9, xp: 1.6, gold: 1.5,
+    traits: ["tanky", "splitter"], hp: 1.6, atk: 0.9, xp: 1.33, gold: 1.5, // balance: xp (design 1.6)
     sprite: "Golem whose chest reads <<<<<<< ======= >>>>>>>; splits into HEAD and incoming halves",
     flavor: "Two halves, both convinced they're right."
   },
   {
     id: "left_pad_mites", zone: 4, map: 1, name: "Left-Pad Mites", size: "S", traits: ["swarm"],
-    swarm: 2, hp: 0.5, atk: 0.6, xp: 0.5, gold: 0.5, sprite: "Tiny mites carrying a whole vine",
+    swarm: 2, hp: 0.5, atk: 0.6, xp: 0.56, gold: 0.5, sprite: "Tiny mites carrying a whole vine", // balance: xp (design 0.5)
     flavor: "Tiny. Load-bearing."
   },
   {
     id: "transitive_vine", zone: 4, map: 2, name: "Transitive Vine", size: "M", traits: ["grower"],
-    hp: 1, atk: 1, xp: 1.2, gold: 1, sprite: "Vine dragging crates nobody ordered",
+    hp: 1, atk: 0.9, xp: 1.11, gold: 1, sprite: "Vine dragging crates nobody ordered", // balance: atk (design 1), xp (design 1.2)
     flavor: "You didn't plant it. Something you planted did."
   },
   {
     id: "version_pin_porcupine", zone: 4, map: 3, name: "Version Pin Porcupine", size: "M",
-    traits: ["thorns"], thorns: 0.08, hp: 1.3, atk: 1, xp: 1.3, gold: 1.2,
+    traits: ["thorns"], thorns: 0.03, hp: 1.3, atk: 1, xp: 1.1, gold: 1.2, // balance: thorns (design 0.08), xp (design 1.3)
     sprite: "Quills tipped with ^ and ~", flavor: "Pinned to 0.3.1 forever."
   },
   {
     id: "race_condition_rats", zone: 5, map: 1, name: "Race Condition Rats", size: "S",
-    traits: ["swarm", "fast"], swarm: 2, hp: 0.55, atk: 0.5, xp: 0.6, gold: 0.6,
+    traits: ["swarm", "fast"], swarm: 2, hp: 0.55, atk: 0.5, xp: 0.64, gold: 0.6, // balance: xp (design 0.6)
     sprite: "Twin rats that never arrive in the same order", flavor: "The winner changes every run."
   },
   {
     id: "spinlock_top", zone: 5, map: 2, name: "Spinlock Top", size: "M", traits: ["phaser"],
-    phaser: 0.25, hp: 0.9, atk: 0.9, xp: 1, gold: 1, sprite: "A top that never stops spinning",
+    phaser: 0.25, hp: 0.9, atk: 0.9, xp: 1.02, gold: 1, sprite: "A top that never stops spinning", // balance: xp (design 1)
     flavor: "Very busy. Accomplishes nothing."
   },
   {
     id: "starved_thread", zone: 5, map: 3, name: "Starved Thread", size: "M", traits: ["slow"], hp: 1.1,
-    atk: 1.8, xp: 1.2, gold: 1, sprite: "Thin ghost holding a ticket number",
+    atk: 1.55, xp: 0.92, gold: 1, sprite: "Thin ghost holding a ticket number", // balance: atk (design 1.8), xp (design 1.2)
     flavor: "Hasn't been scheduled since Tuesday."
   },
   {
     id: "todo_ghost", zone: 6, map: 1, name: "TODO Ghost", size: "S", traits: ["phaser"], phaser: 0.15,
-    hp: 0.9, atk: 0.9, xp: 0.9, gold: 1, sprite: "Ghost wearing a // TODO (2011) tag",
+    hp: 0.9, atk: 0.9, xp: 0.88, gold: 1, sprite: "Ghost wearing a // TODO (2011) tag", // balance: xp (design 0.9)
     flavor: "Will be removed before launch."
   },
   {
     id: "anonymous_author", zone: 6, map: 2, name: "Anonymous Author", size: "M", traits: ["ranged"],
-    hp: 0.9, atk: 1.1, xp: 1, gold: 1, sprite: "Hooded quill with a name tag reading unknown",
+    hp: 0.9, atk: 1, xp: 0.82, gold: 1, sprite: "Hooded quill with a name tag reading unknown", // balance: atk (design 1.1), xp (design 1)
     flavor: "git blame shrugs."
   },
   {
     id: "spaghetti_mummy", zone: 6, map: 3, name: "Spaghetti Mummy", size: "L", traits: ["tanky"],
-    hp: 1.6, atk: 0.8, xp: 1.5, gold: 1.5, sprite: "Wrapped in 4,000 lines of pasta",
+    hp: 1.6, atk: 0.8, xp: 1.24, gold: 1.5, sprite: "Wrapped in 4,000 lines of pasta", // balance: xp (design 1.5)
     flavor: "No tests. No regrets."
   },
   {
     id: "flaky_test_phantom", zone: 7, map: 1, name: "Flaky Test Phantom", size: "M",
-    traits: ["phaser", "reviver"], phaser: 0.2, reviver: 0.2, hp: 0.9, atk: 1, xp: 1.1, gold: 1,
+    traits: ["phaser", "reviver"], phaser: 0.2, reviver: 0.2, hp: 0.9, atk: 1, xp: 1.08, gold: 1, // balance: xp (design 1.1)
     sprite: "Flickers in and out", flavor: "Passes on retry. Fails in CI."
   },
   {
     id: "memory_leak_slime", zone: 7, map: 2, name: "Memory Leak Slime", size: "M", traits: ["grower"],
-    hp: 1, atk: 1, xp: 1.2, gold: 1, sprite: "A slime that keeps swelling",
+    hp: 1, atk: 1, xp: 1.09, gold: 1, sprite: "A slime that keeps swelling", // balance: xp (design 1.2)
     flavor: "A little bigger every tick. Nobody restarts it."
   },
   {
     id: "pager_wyvern", zone: 7, map: 3, name: "Pager Wyvern", size: "M", traits: ["ranged", "fast"],
-    hp: 0.9, atk: 0.7, xp: 1.1, gold: 1, sprite: "Small wyvern with a buzzing beeper",
+    hp: 0.9, atk: 0.7, xp: 0.84, gold: 1, sprite: "Small wyvern with a buzzing beeper", // balance: xp (design 1.1)
     flavor: "Beeps at 3 AM. Every time."
   },
   {
     id: "off_by_one_twins", zone: 8, map: 1, name: "Off-By-One Twins", size: "S", traits: ["swarm"],
-    swarm: 3, hp: 0.45, atk: 0.6, xp: 0.45, gold: 0.45, sprite: "Twins. There are three of them.",
+    swarm: 3, hp: 0.45, atk: 0.6, xp: 0.54, gold: 0.45, sprite: "Twins. There are three of them.", // balance: xp (design 0.45)
     flavor: "There's always one more."
   },
   {
     id: "bitflip_moth", zone: 8, map: 2, name: "Bitflip Moth", size: "S", traits: ["phaser", "clumsy"],
-    phaser: 0.25, clumsy: 0.1, clumsyHealsHero: true, hp: 0.9, atk: 1.1, xp: 1, gold: 1,
+    phaser: 0.25, clumsy: 0.1, clumsyHealsHero: true, hp: 0.9, atk: 1.1, xp: 0.97, gold: 1, // balance: xp (design 1)
     sprite: "Moth drawn to tiny cosmic-ray sparks", flavor: "Sometimes it flips the wrong bit."
   },
   {
     id: "undefined_behavior", zone: 8, map: 3, name: "Undefined Behavior", size: "L",
-    traits: ["shapeshifter"], hp: 1.2, atk: 1.1, xp: 1.4, gold: 1.2,
+    traits: ["shapeshifter"], hp: 1.2, atk: 1.1, xp: 1.05, gold: 1.2, // balance: xp (design 1.4)
     sprite: "Blob that renders differently every few seconds",
     flavor: "Legally allowed to do anything."
   }
@@ -728,7 +731,7 @@ export const BOSSES = [
     flavor: "Pulled in by a one-line helper. Now outweighs the sun."
   },
   {
-    n: 5, id: "deadlock_hydra", name: "The Deadlock Hydra", zone: 5, level: 67, bk: 32, ak: 1.6,
+    n: 5, id: "deadlock_hydra", name: "The Deadlock Hydra", zone: 5, level: 67, bk: 29, ak: 1.6, // balance: bk (design 32)
     timer: 180, mech: 0.85, look: "Two-headed copper hydra; each head clutches the key the other wants",
     mechanics: [
       {
@@ -745,7 +748,7 @@ export const BOSSES = [
     flavor: "Each head is waiting for the other to let go."
   },
   {
-    n: 6, id: "monolith", name: "The Monolith", zone: 6, level: 78, bk: 32, ak: 1.6, timer: 180,
+    n: 6, id: "monolith", name: "The Monolith", zone: 6, level: 78, bk: 28, ak: 1.6, timer: 180, // balance: bk (design 32)
     mech: 0.75, look: "Towering grey slab with blinking LEDs that cracks into glowing cubes",
     mechanics: [
       {
@@ -857,22 +860,26 @@ export const DROP_WEIGHTS = {
   killItemChance: 0.004, killSnippetChance: 0.03
 };
 
+// balance: the damage, crit, speed, XP, gold and item-find affix ranges are halved (design values
+// on each line): with 3-4 affixes on most worn items, autopilot gear carried 2-3x the reference
+// kit's D_ref = 0.003 L (D§5.2). The defensive ones (Typed, Robust, Uptime, Idempotence, Rate
+// Limiting) keep the design ranges. docs/BALANCE.md.
 export const AFFIXES = [
   {
-    n: 0, id: "memo", name: "Memoized", kind: "prefix", stat: "dmg", lo: 0.02, hi: 0.04,
-    slots: ["weapon", "hat", "mug", "sticker"]
+    n: 0, id: "memo", name: "Memoized", kind: "prefix", stat: "dmg", lo: 0.01, hi: 0.02,
+    slots: ["weapon", "hat", "mug", "sticker"] // balance: lo/hi (design 0.02 / 0.04)
   },
   {
-    n: 1, id: "lint", name: "Linted", kind: "prefix", stat: "crit", lo: 0.01, hi: 0.02,
-    slots: ["weapon", "hat", "sticker"]
+    n: 1, id: "lint", name: "Linted", kind: "prefix", stat: "crit", lo: 0.005, hi: 0.01,
+    slots: ["weapon", "hat", "sticker"] // balance: lo/hi (design 0.01 / 0.02)
   },
   {
-    n: 2, id: "opt", name: "Optimized", kind: "prefix", stat: "critDmg", lo: 0.05, hi: 0.1,
-    slots: ["weapon", "sticker"]
+    n: 2, id: "opt", name: "Optimized", kind: "prefix", stat: "critDmg", lo: 0.025, hi: 0.05,
+    slots: ["weapon", "sticker"] // balance: lo/hi (design 0.05 / 0.1)
   },
   {
-    n: 3, id: "async", name: "Async", kind: "prefix", stat: "extraAct", lo: 0.005, hi: 0.01,
-    slots: ["weapon", "boots", "sticker"]
+    n: 3, id: "async", name: "Async", kind: "prefix", stat: "extraAct", lo: 0.0025, hi: 0.005,
+    slots: ["weapon", "boots", "sticker"] // balance: lo/hi (design 0.005 / 0.01)
   },
   {
     n: 4, id: "typed", name: "Typed", kind: "prefix", stat: "armorPct", lo: 0.04, hi: 0.08,
@@ -883,28 +890,28 @@ export const AFFIXES = [
     slots: ["hat", "hoodie", "mug", "sticker"]
   },
   {
-    n: 6, id: "recur", name: "Recursive", kind: "prefix", stat: "repeatHit", lo: 0.01, hi: 0.02,
-    slots: ["weapon"]
+    n: 6, id: "recur", name: "Recursive", kind: "prefix", stat: "repeatHit", lo: 0.005, hi: 0.01,
+    slots: ["weapon"] // balance: lo/hi (design 0.01 / 0.02)
   },
   {
-    n: 7, id: "vec", name: "Vectorized", kind: "prefix", stat: "areaDmg", lo: 0.03, hi: 0.06,
-    slots: ["weapon", "hat", "sticker"]
+    n: 7, id: "vec", name: "Vectorized", kind: "prefix", stat: "areaDmg", lo: 0.015, hi: 0.03,
+    slots: ["weapon", "hat", "sticker"] // balance: lo/hi (design 0.03 / 0.06)
   },
   {
-    n: 8, id: "blame", name: "Blameless", kind: "prefix", stat: "bossDmg", lo: 0.03, hi: 0.06,
-    slots: ["weapon", "sticker"]
+    n: 8, id: "blame", name: "Blameless", kind: "prefix", stat: "bossDmg", lo: 0.015, hi: 0.03,
+    slots: ["weapon", "sticker"] // balance: lo/hi (design 0.03 / 0.06)
   },
   {
-    n: 9, id: "green", name: "of the Green Build", kind: "suffix", stat: "xp", lo: 0.01, hi: 0.02,
-    slots: ["hat", "sticker"]
+    n: 9, id: "green", name: "of the Green Build", kind: "suffix", stat: "xp", lo: 0.005, hi: 0.01,
+    slots: ["hat", "sticker"] // balance: lo/hi (design 0.01 / 0.02)
   },
   {
-    n: 10, id: "cache", name: "of Caching", kind: "suffix", stat: "gold", lo: 0.03, hi: 0.06,
-    slots: ["boots", "mug", "sticker"]
+    n: 10, id: "cache", name: "of Caching", kind: "suffix", stat: "gold", lo: 0.015, hi: 0.03,
+    slots: ["boots", "mug", "sticker"] // balance: lo/hi (design 0.03 / 0.06)
   },
   {
-    n: 11, id: "tab", name: "of Tab Completion", kind: "suffix", stat: "itemFind", lo: 0.02, hi: 0.04,
-    slots: ["boots", "sticker"]
+    n: 11, id: "tab", name: "of Tab Completion", kind: "suffix", stat: "itemFind", lo: 0.01, hi: 0.02,
+    slots: ["boots", "sticker"] // balance: lo/hi (design 0.02 / 0.04)
   },
   {
     n: 12, id: "uptime", name: "of Uptime", kind: "suffix", stat: "regenPct", lo: 0.0005, hi: 0.001,
@@ -915,12 +922,12 @@ export const AFFIXES = [
     slots: ["hoodie", "boots"]
   },
   {
-    n: 14, id: "hot", name: "of Hot Reload", kind: "suffix", stat: "cdr", lo: 0.02, hi: 0.04,
-    slots: ["hat", "mug", "sticker"]
+    n: 14, id: "hot", name: "of Hot Reload", kind: "suffix", stat: "cdr", lo: 0.01, hi: 0.02,
+    slots: ["hat", "mug", "sticker"] // balance: lo/hi (design 0.02 / 0.04)
   },
   {
     n: 15, id: "grace", name: "of Graceful Degradation", kind: "suffix", stat: "dmgBelowHalfHp",
-    lo: 0.04, hi: 0.08, slots: ["weapon", "hoodie"]
+    lo: 0.02, hi: 0.04, slots: ["weapon", "hoodie"] // balance: lo/hi (design 0.04 / 0.08)
   },
   {
     n: 16, id: "rate", name: "of Rate Limiting", kind: "suffix", stat: "dodge", lo: 0.005, hi: 0.01,

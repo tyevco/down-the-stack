@@ -183,9 +183,13 @@ export function chestGold(seals, mapMid) {
   return seals * T.seals.chestGoldPerSeal * gold(mapMid);
 }
 
-/** Boss XP: 0.5 Need(L) on a hero's first kill of a boss (and per review won), 0.1 Need(L) on repeats. */
+/**
+ * Boss XP: T.boss.xpFirst x Need(L) on a hero's first kill of a boss (and per review won), T.boss.xpRepeat x
+ * Need(L) on repeats (balance: 0.1 / 0.02; D§6.2 says 0.5 / 0.1, docs/BALANCE.md).
+ */
 export function bossXP(L, first) {
-  return (first ? 0.5 : 0.1) * need(Math.min(L, T.levelCap - 1));
+  const B = T.boss;
+  return (first ? B.xpFirst ?? 0.5 : B.xpRepeat ?? 0.1) * need(Math.min(L, T.levelCap - 1));
 }
 
 /** Crowding multiplier on kill rewards: min(1, 12 / heroes Questing at once). */

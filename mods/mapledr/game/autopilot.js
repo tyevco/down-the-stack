@@ -18,12 +18,11 @@ import {
   autoPolishOk, FLAG_LOCKED,
 } from "./items.js";
 import { mapUnlocked, backlogOpen, doorOpen, autoBuyPick, buy, buildingLevel } from "./herd.js";
-import { polishMax, g, weaponDmg, iRef } from "./formulas.js";
+import { polishMax, g, weaponDmg, iRef, refHP, refDR } from "./formulas.js";
 import { heroCtx } from "./combat.js";
 import * as B from "./boss.js";
 
 const MAX_LAG = 5; //       gearLag() reports at most 5 levels
-const LAG_STEP_MAX = 2; //  gear lag moves a hero's map choice at most 2 levels under its level
 const CONVERGE_BELOW = 4; // convergence never takes a hero to a map whose mid is more than 4 under its level
 const PREFILTER = 0.8; //   items under 80% of the equipped item's gear scale are never scored
 const STASH_CHUNK = 12; //  stash items looked at per herd-wide pass
@@ -85,8 +84,14 @@ export function recentCrashes(live, tick) {
 export function backlogFloor(world, hero) {
   const st = stats(hero, heroCtx(world, hero));
   const lim = ((st.pl + 1 - BACKLOG.level) * Math.log(T.g)) / Math.log(BACKLOG.perFloor.hp);
+  // balance: and no deeper than the hero can stand: floor f hits 1.05^f harder, so its EHP over the
+  // reference hero's (D§5.2) buys ln(EHP / refEHP) / ln(1.05) floors, plus the on-level one. Power
+  // Level alone sent single-target classes (Hotfixer PL ~ L + 8, the least HP) to floor 10 to
+  // drink 20 cups an hour and crash (tools/pacing-sim.mjs --sweep)
+  const refEhp = refHP(BACKLOG.level) / (1 - refDR(BACKLOG.level));
+  const byEhp = 1 + Math.log(Math.max(1e-9, st.ehp) / refEhp) / Math.log(BACKLOG.perFloor.atk);
   const herdFloor = Math.max(1, (world.state.herd.backlog && world.state.herd.backlog.floor) || 1);
-  return Math.max(1, Math.min(herdFloor, Math.floor(lim + 1e-9)));
+  return Math.max(1, Math.min(herdFloor, Math.floor(Math.min(lim, byEhp) + 1e-9)));
 }
 
 /**
@@ -100,12 +105,14 @@ export function gearLag(hero, st) {
   const R = T.ref;
   const ref = weaponDmg(iRef(L), 1 + R.rarityPerL * L, (R.polishPerL * L) / T.polish.perLevel);
   const have = st.weaponDmg > 0 ? st.weaponDmg : 1e-9;
-  const lag = Math.round(Math.log(ref / have) / Math.log(T.g));
+  // whole levels only: a weapon a fraction of a level behind (an unpolished Prototype at iRef, the
+  // reference kit's rarity and polish being fractional) does not hold its hero back a map
+  const lag = Math.floor(Math.log(ref / have) / Math.log(T.g) + 1e-9);
   return Math.max(0, Math.min(MAX_LAG, lag));
 }
 
 // A hero's own map choice as a MAPS index (-1 = the Backlog): the pin, the Backlog at Lv 100, else
-// the deepest open map with mid <= eff + 1 where eff = L - min(2, gearLag) (L - 1 at most after a
+// the deepest open map with mid <= eff + 1 where eff = L (L - 1 at most after a
 // recent crash), and never deeper than combat's crash-rule map (live.dropMap) while it holds. No
 // guild convergence.
 //
@@ -114,21 +121,23 @@ export function gearLag(hero, st) {
 // Refactorer or Forkbinder and 3-6 over for a Hotfixer (gearLag's comment). By PL, tanks and
 // summoners farmed 3 levels low (gap penalty) and dragged their guild down through convergence,
 // while over-geared heroes climbed above their level and outpaced D§12.1 by 30-40%. The pacing
-// model behind D§12.1 fights on level; gear now shows as kill speed, and only a weapon that lags
-// the reference kit moves a hero (at most 2 levels) down. Power Level still sets Backlog floors,
-// boss estimates and the sheet's "fights like" line.
+// model behind D§12.1 fights on level; gear shows as kill speed. Power Level still sets Backlog
+// floors, boss estimates and the sheet's "fights like" line.
+// balance: a weapon lagging the reference kit no longer moves the hero down (it did, up to 2
+// levels): drops land at the reference item level now (items.dropIlvl), a lagging weapon is common,
+// and one-agent herds sat a map low for days, missing the quota on the zone's last map that opens
+// the boss door. An under-geared hero that crashes still steps down (the crash rule, D§5.6).
 function ownChoice(world, hero, live) {
   const { state } = world;
   const rt = world.rt || {};
   if (hero.pinMap && mapUnlocked(state, hero.pinMap)) return hero.pinMap === BACKLOG.id ? -1 : MAP_BY_ID[hero.pinMap].n;
   if (hero.L >= T.levelCap && backlogOpen(state)) return -1;
-  const st = stats(hero, heroCtx(world, hero));
-  let eff = hero.L - Math.min(LAG_STEP_MAX, gearLag(hero, st));
+  let eff = hero.L;
   if (live && recentCrashes(live, rt.tick || 0) > 0) eff = Math.min(eff, hero.L - 1);
   let idx = 0;
   for (const m of MAPS) if (m.mid <= eff + 1 && mapUnlocked(state, m)) idx = m.n;
   // hysteresis: a hero one map deeper than its choice stays while that map's mid <= eff + 2, so a
-  // gear lag hovering at a boundary does not move it back and forth (and reset its lane)
+  // crash hovering at a boundary does not move it back and forth (and reset its lane)
   const cur = live && MAP_BY_ID[live.mapId];
   if (cur && cur.n === idx + 1 && cur.mid <= eff + 2 && mapUnlocked(state, cur)) idx = cur.n;
   const drop = live && live.dropMap;
@@ -139,7 +148,7 @@ function ownChoice(world, hero, live) {
 /**
  * Autopilot map choice for a hero (D§5.7, see ownChoice for the level-based rule): its own choice
  * (the manual pin if open; Lv 100 heroes go to the Backlog once it is open; otherwise the deepest
- * open map whose mid level <= L - min(2, gear lag) + 1, at most L after a crash in the last 10
+ * open map whose mid level <= L + 1, at most L after a crash in the last 10
  * minutes; never deeper than the crash rule's map while combat's live.dropMap holds, D§5.6), then
  * guild convergence (D§2.8): the hero moves down to a guild-mate's map when that is exactly one
  * map below its own choice and its mid is at most 4 levels under the hero (a one-map step is 3-4
@@ -274,6 +283,7 @@ export function offerDrop(world, finder, item, ev) {
   const state = world.state;
   const auto = autoCfg(state);
   const ctx = ctxFn(world);
+  const declined = new Set(); // heroes whose score already said no (level aside, the score is the same)
   if (auto.equip) {
     for (const h of offerOrder(state, finder, item, false)) {
       const r = autoEquip(state, h, item, ctx);
@@ -281,9 +291,10 @@ export function offerDrop(world, finder, item, ev) {
         gearChanged(world, h);
         return { heroId: h.id, kept: true, deprecated: null, replaced: r.replaced };
       }
+      declined.add(h);
     }
   }
-  if (auto.deprecate && item.rar <= 1 && !(item.flags & FLAG_LOCKED) && !wantedByAnyone(state, item, ctx)) {
+  if (auto.deprecate && item.rar <= 1 && !(item.flags & FLAG_LOCKED) && !wantedByAnyone(state, item, ctx, declined)) {
     state.herd.stash.push(item);
     deprecate(state, item.uid);
     return { heroId: null, kept: false, deprecated: item, replaced: null };
@@ -292,8 +303,11 @@ export function offerDrop(world, finder, item, ev) {
   return { heroId: null, kept: s.kept, deprecated: s.deprecated, replaced: null };
 }
 
-function wantedByAnyone(state, item, ctx) {
-  for (const h of offerOrder(state, null, item, true)) if (isUpgrade(h, item, ctx(h), { ignoreLevel: true })) return true;
+function wantedByAnyone(state, item, ctx, declined) {
+  for (const h of offerOrder(state, null, item, true)) {
+    if (declined && declined.has(h)) continue;
+    if (isUpgrade(h, item, ctx(h), { ignoreLevel: true })) return true;
+  }
   return false;
 }
 
@@ -386,6 +400,16 @@ function rosterVersion(state) {
 }
 
 /**
+ * How far autopilot polishes an equipped item: the reference kit's polish for the wearer's level
+ * (D§5.2: P_ref = 1 + 0.005 L, p = L / 10, rounded up), at most the rarity's max. balance: D§8.8
+ * polishes everything to the rarity's max (gold is never short, so every worn item sat at +7..+10
+ * by Lv 25 and autopilot gear ran 1.4-2x the reference kit); see docs/BALANCE.md.
+ */
+export function polishTarget(hero, item) {
+  return Math.min(polishMax(item.rar), Math.ceil((hero.L || 1) / 10));
+}
+
+/**
  * Autopilot polish (D§8.8): one equipped item of one hero per pass, round-robin over the roster,
  * lowest polish first, when gold >= 5x and Snippets >= 2x its cost (never below a 20% reserve).
  */
@@ -399,7 +423,7 @@ export function autoPolish(world) {
     const hero = state.heroes[(start + k) % n];
     let pick = null;
     for (const it of hero.eq) {
-      if (!it || it.pol >= polishMax(it.rar)) continue;
+      if (!it || it.pol >= polishTarget(hero, it)) continue;
       if (!pick || it.pol < pick.pol) pick = it;
     }
     if (!pick) continue;

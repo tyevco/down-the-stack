@@ -13,25 +13,27 @@
 //   node tools/pacing-sim.mjs [--persona casual|solo|typical|heavy|bot|all] [--days N] [--long]
 //                             [--quick] [--json] [--no-ref] [--seed N]
 //
-// --quick: day 1 only for every persona (what test/pacing.test.mjs checks). Exit code 1 when a
-// milestone is more than 15% off the design (D§12.1 hours, or days for bosses past day 1).
+// --quick: day 1 only for every persona. Exit code 1 when a milestone is more than 15% off the
+// design (D§12.1 hours, or days for bosses past day 1; pacing4.py's unrounded hours, see DESIGN).
+//
+//   node tools/pacing-sim.mjs --sweep [--seed N] [--json]
+//
+// The sustain sweep (D§4.3, D§5.5, D§5.6): every real map x class at on-level for one working hour,
+// with the complete D§5.2 reference kit (fullRefKit) and with real autopilot gear (the typical
+// persona's, harvestGear / autoKit); kill pace in on-level kills a minute. Targets SWEEP_TARGET; exit
+// code 1 when a case misses.
 //
 // Engine fixes this simulator found (integration pass): Interns stuck on map 1-1 with an iLvl-1
-// Training Stick (Boss 1 at +190% on day 1: the starter stick now grows with its Intern);
-// autopilot's Item Power pre-filter kept late heroes in long-outgrown Keepsakes (Power Level fell
-// to L - 5, Boss 8/9 walls); repeat boss kills gave 0.1 Need(L) XP whatever the boss level (now
-// x gap); class-biased map choice by Power Level (tanks 3-4 levels low, Hotfixers above) and guild
-// convergence stalling the frontier for days.
+// Training Stick; autopilot's Item Power pre-filter keeping late heroes in outgrown Keepsakes;
+// repeat boss kills worth 0.1 Need(L) whatever the boss level (now x gap); class-biased map choice
+// by Power Level and guild convergence stalling the frontier for days.
 //
-// Known gap (a design calibration, not an engine bug): from Lv 30 on, every persona runs about
-// 25-35% ahead of D§12.1 (Lv 100 in ~165-180 working hours instead of 215-259); the bot reaches
-// Lv 36 instead of 28 by day 30. The model behind D§12.1 assumes 15.5 kills/min with the D§5.2
-// reference kit and no boss XP; the engine measures 19-27 kills/min because autopilot gear runs
-// 1.4-2x the reference kit's damage (chest loot at map top + 0-2 vs iRef = L - 2, damage affixes
-// ~2x D_ref, polish to the rarity's max vs L/10), the classes' own on-level pace is 15-18 (D§4.3),
-// Fresh Eyes stays on all session once the Campfire is bought (the model grows its cap by day/6),
-// boss first-kill / review / farm XP adds 10-25% a day, and an out-levelled bot one-shots three
-// mobs a tick (~50 kills/min at the 10% gap floor).
+// Balance pass (docs/BALANCE.md): every persona ran 25-35% ahead of D§12.1 after Lv 30 and the bot
+// reached Lv 36 by day 30 (design 28): autopilot gear dealt 1.4-2x the reference kit, Fresh Eyes
+// covered whole sessions once the Campfire was bought, boss and review XP added 10-25%, an
+// out-levelled bot one-shot three mobs a tick. Drop item levels, affix ranges, autopilot polish,
+// the Campfire's pace, boss XP and the gap floor were re-tuned, the mob XP multipliers re-fitted to
+// the measured pace; all milestones now land within the ±15%.
 
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
@@ -39,7 +41,12 @@ import path from "node:path";
 import fs from "node:fs";
 import * as W from "../mods/mapledr/game/world.js";
 import * as Dm from "../mods/mapledr/game/demo.js";
-import { TUNING as T, BOSSES } from "../mods/mapledr/game/data.js";
+import * as I from "../mods/mapledr/game/items.js";
+import * as AP from "../mods/mapledr/game/autopilot.js";
+import { stats as heroStats, computeStats } from "../mods/mapledr/game/heroes.js";
+import { mobXP, gap, refDPS, polishMax, itemTier } from "../mods/mapledr/game/formulas.js";
+import { TUNING as T, BOSSES, MAPS, MAP_BY_ID, SLOTS, BACKLOG, AFFIXES, AFFIX_IDX, CLASSES } from "../mods/mapledr/game/data.js";
+import * as H from "../test/helpers/engine.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const MIN = 60;
@@ -50,6 +57,10 @@ const EPOCH = Date.UTC(2026, 8, 21);
 const SESSION_START_H = 9;
 const DONE_SEC = 45; // a task's "done" stretch before the person looks (then idle = seen)
 const SEEN_SEC = 45; // idle after seeing the result, before the next task starts
+// agent k starts k x LEAD task lengths into the session (D§12.1's model runs a herd's heroes in
+// lockstep; 5% keeps their tasks from ending on the same tick without a 5-agent herd's first hero
+// waiting a quarter hour for its last guild-mate to catch up, guild convergence, D§2.8)
+const LEAD = 0.05;
 
 /** D§12.1 personas. */
 export const PERSONAS = {
@@ -62,14 +73,17 @@ export const PERSONAS = {
 const LEVELS = [5, 10, 20, 30, 50, 60, 90, 100];
 
 /**
- * D§12.1 targets: [day, working hours per hero] (hours null where the table gives none). Lv 5 and
- * Lv 10 are "12 min" / "42 min" (36 min heavy); Boss 1 "1.0 h" (casual, solo) or "36 min".
+ * D§12.1 targets: [day, working hours per hero] (hours null where the table gives none). D§12.1
+ * prints the hours of tools/reference-sim/pacing4.py rounded to 0.1 h (or whole minutes: "12 min"
+ * is 0.2 h); these are its unrounded values, so a 0.05 h rounding does not eat a third of the
+ * ±15% on the first milestones (typical Lv 5 is 11 min, not 12; Boss 1 for three or five agents
+ * 34 and 33 min, not "36 min"). Days are D§12.1's.
  */
 export const DESIGN = {
-  casual: { L5: [1, 0.2], L10: [1, 0.7], B1: [1, 1.0], L20: [2, 2.8], B2: [3], L30: [6, 7.9], B3: [7], B4: [14], L50: [21, 31], B5: [25], L60: [35, 52], B6: [42], B7: [67], B8: [100], L90: [116, 173], B9: [146], L100: [161, 241] },
-  solo: { L5: [1, 0.2], L10: [1, 0.7], B1: [1, 1.0], L20: [2, 3.1], B2: [2], L30: [3, 8.8], B3: [4], B4: [8], L50: [12, 36], B5: [15], L60: [20, 60], B6: [24], B7: [38], B8: [55], L90: [62, 185], B9: [77], L100: [85, 253] },
-  typical: { L5: [1, 0.2], L10: [1, 0.7], B1: [1, 0.6], L20: [2, 2.7], B2: [2], L30: [4, 7.6], B3: [5], B4: [10], L50: [16, 30], B5: [18], L60: [25, 49], B6: [29], B7: [46], B8: [67], L90: [77, 154], B9: [98], L100: [108, 215] },
-  heavy: { L5: [1, 0.2], L10: [1, 0.6], B1: [1, 0.6], L20: [1, 2.8], B2: [1], L30: [2, 8.3], B3: [2], B4: [5], L50: [7, 35], B5: [9], L60: [12, 57], B6: [14], B7: [22], B8: [33], L90: [38, 186], B9: [48], L100: [52, 259] },
+  casual: { L5: [1, 0.2], L10: [1, 0.733], B1: [1, 1.017], L20: [2, 2.8], B2: [3], L30: [6, 7.883], B3: [7], B4: [14], L50: [21, 30.983], B5: [25], L60: [35, 51.767], B6: [42], B7: [67], B8: [100], L90: [116, 172.55], B9: [146], L100: [161, 240.917] },
+  solo: { L5: [1, 0.2], L10: [1, 0.733], B1: [1, 1.017], L20: [2, 3.133], B2: [2], L30: [3, 8.783], B3: [4], B4: [8], L50: [12, 35.817], B5: [15], L60: [20, 59.533], B6: [24], B7: [38], B8: [55], L90: [62, 184.717], B9: [77], L100: [85, 252.667] },
+  typical: { L5: [1, 0.183], L10: [1, 0.667], B1: [1, 0.567], L20: [2, 2.667], B2: [2], L30: [4, 7.583], B3: [5], B4: [10], L50: [16, 30.133], B5: [18], L60: [25, 49.15], B6: [29], B7: [46], B8: [67], L90: [77, 153.6], B9: [98], L100: [108, 214.883] },
+  heavy: { L5: [1, 0.183], L10: [1, 0.633], B1: [1, 0.553], L20: [1, 2.767], B2: [1], L30: [2, 8.267], B3: [2], B4: [5], L50: [7, 34.817], B5: [9], L60: [12, 57.217], B6: [14], B7: [22], B8: [33], L90: [38, 186.05], B9: [48], L100: [52, 258.783] },
 };
 
 /** D§12.2: the always-working bot's level by day. */
@@ -85,7 +99,7 @@ const TOL = 0.15;
 // done (the last task is shorter), then idle for the rest of the session.
 function dayPlan(p, k) {
   const plan = [];
-  const lead = Math.round(k * 0.15 * p.taskMin * MIN); // agents of a herd do not start in lockstep
+  const lead = Math.round(k * LEAD * p.taskMin * MIN); // agents of a herd do not start in lockstep
   if (lead > 0) plan.push(["idle", lead]);
   let left = Math.round(p.hours * HOUR);
   while (left > 0) {
@@ -99,7 +113,7 @@ function dayPlan(p, k) {
 
 function sessionSec(p, k) {
   const tasks = Math.ceil((p.hours * HOUR) / (p.taskMin * MIN));
-  return Math.round(k * 0.15 * p.taskMin * MIN) + Math.round(p.hours * HOUR) + tasks * (DONE_SEC + SEEN_SEC);
+  return Math.round(k * LEAD * p.taskMin * MIN) + Math.round(p.hours * HOUR) + tasks * (DONE_SEC + SEEN_SEC);
 }
 
 function castFor(p, day, seqs) {
@@ -202,6 +216,255 @@ export function simBot(days, opts = {}) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Sustain sweep (D§4.3, D§5.5, D§5.6): every real map x every class at on-level
+// ---------------------------------------------------------------------------------------------
+
+export const SWEEP_CLASSES = ["refactorer", "hotfixer", "shellmancer", "forkbinder", "rubberducker"];
+
+/**
+ * The sweep's cases: every map at its mid level (L = map mid) for the five classes (maps whose mid
+ * is under Lv 10 for the Intern instead; map 1-3 for both: the Intern at Lv 9), plus the Backlog at
+ * Lv 100 on the floor autopilot picks for the hero's Power Level (floor 0; D§9.8) or on `floors`.
+ * With opts.classes / opts.maps the list is filtered.
+ * @returns {Array<{mapId:string, L:number, cls:string, floor:number}>}
+ */
+export function sweepCases(opts = {}) {
+  const out = [];
+  const classes = opts.classes || SWEEP_CLASSES;
+  for (const m of MAPS) {
+    if (opts.maps && !opts.maps.includes(m.id)) continue;
+    if (m.mid < 10 || m.id === "1-3") out.push({ mapId: m.id, L: Math.min(9, m.mid), cls: "intern", floor: 0 });
+    if (m.mid >= 10) for (const cls of classes) out.push({ mapId: m.id, L: m.mid, cls, floor: 0 });
+  }
+  if (!opts.maps || opts.maps.includes("backlog")) {
+    for (const f of opts.floors || [0]) for (const cls of classes) out.push({ mapId: "backlog", L: 100, cls, floor: f });
+  }
+  return out;
+}
+
+/**
+ * The D§5.2 reference kit, complete: test/helpers/engine.mjs refKit (every slot at iRef(L) with
+ * rarity x polish = R_ref x P_ref) with the reference damage (D_ref = 0.003 L), max HP (0.003 L),
+ * armor (0.002 L) and crit (0.0005 L) spread over Memoized / Robust / Typed / Linted affixes of
+ * several slots (a Sticker included): since the affix ranges were halved (docs/BALANCE.md) one
+ * affix can no longer carry a whole reference bonus. A fixture: rolls may be fractional.
+ */
+export function fullRefKit(state, hero) {
+  H.refKit(state, hero);
+  const L = hero.L;
+  const eq = hero.eq;
+  const R = T.ref;
+  if (!eq[5] && eq[1]) {
+    eq[5] = { uid: state.herd.nextUid++, base: I.baseIdFor("sticker", itemTier(eq[1].ilvl), "sticker"), ilvl: eq[1].ilvl, rar: eq[1].rar, pol: 0, aff: [], flags: 0, prop: -1 };
+  }
+  // tops an affix up to `want` in total over the given slots (one per item, never twice on one)
+  const topUp = (id, want, slots) => {
+    const k = AFFIX_IDX[id];
+    const a = AFFIXES[k];
+    let left = want;
+    for (const s of slots) {
+      const it = eq[s];
+      if (!it || !a.slots.includes(SLOTS[s])) continue;
+      const t = itemTier(it.ilvl);
+      const j = it.aff.findIndex((x) => x[0] === k);
+      if (j >= 0) { left -= I.affixValue(k, it.aff[j][1], t); continue; }
+      if (left <= 1e-9) continue;
+      const lo = a.lo * t;
+      const hi = a.hi * t;
+      const v = Math.min(hi, left);
+      it.aff = it.aff.concat([[k, ((v - lo) / (hi - lo)) * 99]]); // a fixture: the roll may fall under 0
+      left -= v;
+    }
+  };
+  topUp("memo", R.dmgPerL * L, [0, 3, 1, 5]);
+  topUp("robust", R.hpPerL * L, [2, 1, 3, 5]);
+  topUp("typed", R.armorPerL * L, [4, 1, 2, 3]);
+  topUp("lint", R.critPerL * L, [1, 0, 5]);
+  return eq;
+}
+
+/** The deepest real map an on-level hero of level L farms (autopilot: mid <= L + 1). */
+function mapForLevel(L) {
+  let m = MAPS[0];
+  for (const x of MAPS) if (x.mid <= L + 1) m = x;
+  return m;
+}
+
+/**
+ * Records real autopilot gear during a persona run: pass rec.onTick as simPersona's onTick (or call
+ * it from yours), then rec.done() prices every record against the complete reference kit of the
+ * same hero (fullRefKit) and returns [{L, cls, eq, dps, ehp}] (each hero's equipment when it first
+ * reached a level; dps / ehp over the reference kit).
+ */
+export function gearRecorder() {
+  const out = [];
+  const seen = new Set();
+  return {
+    onTick(w) {
+      for (const h of w.state.heroes) {
+        const k = `${h.id}:${h.L}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        out.push({ L: h.L, cls: h.cls, sp: h.sp.slice(), rev: (h.rev || [0, 0]).slice(), eq: JSON.parse(JSON.stringify(h.eq)) });
+      }
+    },
+    done() {
+      for (const g of out) {
+        if (g.dps != null) continue;
+        const w = H.makeWorld({ heroes: [{ cls: g.cls, L: g.L, kit: "none", ranks: g.sp, rev: g.rev }] });
+        const hero = w.state.heroes[0];
+        const ctx = { herd: w.state.herd };
+        hero.eq = g.eq.map((it) => it && Object.assign({}, it, { aff: it.aff.map((a) => a.slice()) }));
+        const real = computeStats(hero, ctx);
+        fullRefKit(w.state, hero);
+        const ref = computeStats(hero, ctx);
+        g.dps = real.dpsEst / ref.dpsEst;
+        g.ehp = real.ehp / ref.ehp;
+      }
+      return out;
+    },
+  };
+}
+
+/**
+ * Real autopilot gear by level (gearRecorder) from one persona (default: typical, three agents
+ * sharing one stash, the D§12.1 "typical user") played to Lv 100 with every autopilot default on.
+ * Cached per persona; about 20 s in V8.
+ * @returns {Array<{L:number, eq:Array, dps:number, ehp:number}>}
+ */
+const GEAR = new Map();
+export function harvestGear(id = "typical") {
+  if (GEAR.has(id)) return GEAR.get(id);
+  const rec = gearRecorder();
+  simPersona(PERSONAS[id], { seed: 1, until: ["L100"], onTick: rec.onTick });
+  const out = rec.done();
+  GEAR.set(id, out);
+  return out;
+}
+
+/**
+ * "Autopilot-like" gear for a hero (the sweep's second kit): of the gear real autopilot heroes wore
+ * within 2 levels of this hero's level (harvestGear), the kit with the median DPS over the
+ * reference kit, the weapon re-based to the hero's class weapon type at the same tier (the rest of
+ * a kit fits every class). Real loot spreads 0.5-2x the reference kit; the median is the
+ * "autopilot hero" of D§5.2.
+ */
+export function autoKit(world, hero, { persona = "typical", gear = null } = {}) {
+  const all = gear || harvestGear(persona);
+  let pool = [];
+  for (let d = 2; d <= 10 && !pool.length; d += 2) pool = all.filter((g) => Math.abs(g.L - hero.L) <= d && (hero.L >= 10) === (g.L >= 10));
+  pool.sort((a, b) => a.dps - b.dps);
+  const pick = pool[(pool.length - 1) >> 1];
+  const eq = (pick ? pick.eq : []).map((it) => (it ? Object.assign({}, it, { uid: world.state.herd.nextUid++, aff: it.aff.map((a) => a.slice()), flags: it.flags & ~2 }) : null));
+  while (eq.length < SLOTS.length) eq.push(null);
+  const w = eq[0];
+  if (w && w.base !== 0 && hero.cls > 0) {
+    const b = I.baseOf(w);
+    w.base = I.baseIdFor("weapon", b.tier || itemTier(w.ilvl), CLASSES[hero.cls].weapon);
+  }
+  if (hero.cls === 0) eq[0] = { uid: world.state.herd.nextUid++, base: 0, ilvl: Math.max(1, hero.L - 2), rar: 0, pol: 0, aff: [], flags: 4, prop: -1 };
+  hero.eq = eq;
+  return eq;
+}
+
+/**
+ * One sweep case: a lone hero of class `cls` at level L (ranks by auto-learn, reviews passed) in
+ * map `mapId` (Backlog floor `floor`), farming for `ticks` with its level and map pinned. The herd
+ * holds the trophies of the zones before this one; no buildings, no Fresh Eyes, no party.
+ * kit "ref" (D§5.2 reference kit) or "auto" (autoKit).
+ * @returns {{mapId, cls, L, floor, kit, kpm, xkpm, cupsH, crashesH, minHpFrac, dps}}
+ *   kpm kills per minute; xkpm on-level kill equivalents per minute (kill XP / (mobXP(mid) x gap));
+ *   cupsH / crashesH per working hour.
+ */
+export function sweepCase({ mapId, L, cls, floor = 0, kit = "ref", ticks = 3600, seed = 1, gear = null }) {
+  const map = MAP_BY_ID[mapId];
+  const zone = map ? map.zone : BOSSES.length;
+  const boss = BOSSES.map((_, i) => (i < zone ? 1 : 0));
+  const w = H.makeWorld({ seed, herd: { boss, bossKills: boss.slice(), zone }, heroes: [{ cls, L, mapId, kit: "none" }] });
+  const hero = w.state.heroes[0];
+  const live = w.rt.live.get(hero.id);
+  // the kit under test stays on: drops go to the stash, nothing is auto-equipped
+  w.state.herd.cfg.auto.equip = false;
+  if (mapId === "backlog") {
+    w.state.herd.backlog = { floor: floor > 0 ? floor : 999, kills: 0 };
+  }
+  if (kit === "ref") fullRefKit(w.state, hero);
+  else autoKit(w, hero, { gear });
+  if (mapId === "backlog") {
+    // on-level: the deepest floor whose effective level is <= PL + 1 (autopilot.backlogFloor)
+    if (!(floor > 0)) floor = AP.backlogFloor(w, hero);
+    w.state.herd.backlog.floor = floor;
+    live.floor = floor;
+  }
+  const st0 = heroStats(hero, { herd: w.state.herd });
+  live.maxHp = st0.maxHp;
+  live.hp = st0.maxHp;
+  let minHp = 1;
+  for (let t = 0; t < ticks; t++) {
+    H.stepWorld(w, null, 1);
+    hero.xp = 0;
+    if (live.mapId !== mapId) { live.mapId = mapId; live.dropMap = null; }
+    if (live.maxHp > 0 && !(live.crashedUntil > 0)) minHp = Math.min(minHp, live.hp / live.maxHp);
+  }
+  const tl = live.tally;
+  const min = ticks / 60;
+  const mid = map ? map.mid : BACKLOG.level;
+  const xpPct = live._act ? live._act.xpPct : 0;
+  const unit = mobXP(mid) * (mapId === "backlog" ? 1 : gap(L - mid)) * (1 + xpPct);
+  return {
+    mapId, cls, L, floor, kit, kpm: tl.kills / min, xkpm: tl.xp / unit / min,
+    cupsH: (tl.cups * 3600) / ticks, crashesH: (tl.crashes * 3600) / ticks, minHpFrac: minHp,
+    dps: heroStats(hero, { herd: w.state.herd }).dpsEst / refDPS(L),
+  };
+}
+
+/**
+ * Runs sweepCase over sweepCases(opts) for each kit in opts.kits (default ["ref", "auto"]);
+ * opts.gear: recorded gear for the "auto" kit (gearRecorder), else harvestGear("typical").
+ */
+export function sweep(opts = {}) {
+  const rows = [];
+  for (const kit of opts.kits || ["ref", "auto"]) {
+    for (const c of sweepCases(opts)) rows.push(sweepCase(Object.assign({}, c, { kit, ticks: opts.ticks || 3600, seed: opts.seed || 1, gear: opts.gear || null })));
+  }
+  return rows;
+}
+
+/** Sweep targets (D§4.3, D§5.5, D§5.6): per on-level hour 0 crashes, <= 3 cups; kills/min as below. */
+// With real autopilot gear the kill pace follows the gear's own swings (0.5-2x the reference kit:
+// a Keepsake or LTS weapon, a stretch without a class weapon), so its band is wider; its mean is
+// the reference kit's.
+export const SWEEP_TARGET = { crashes: 0, cups: 3, ref: [14, 19], auto: [10, 25] };
+
+/** The rows of a sweep that miss SWEEP_TARGET (kill pace by kit). */
+export function sweepMisses(rows) {
+  return rows.filter((r) => {
+    const [lo, hi] = SWEEP_TARGET[r.kit] || SWEEP_TARGET.ref;
+    return r.crashesH > SWEEP_TARGET.crashes || r.cupsH > SWEEP_TARGET.cups || r.xkpm < lo || r.xkpm > hi;
+  });
+}
+
+function printSweep(rows) {
+  const by = new Map();
+  for (const r of rows) {
+    const k = `${r.kit.padEnd(4)} ${r.mapId === "backlog" ? `BL f${r.floor}` : r.mapId.padEnd(5)} Lv ${String(r.L).padStart(3)}`;
+    if (!by.has(k)) by.set(k, []);
+    by.get(k).push(r);
+  }
+  console.log("\n== Sustain sweep: one on-level working hour per map x class (kills/min in on-level kills · cups/h · crashes/h)");
+  for (const [k, rs] of by) {
+    console.log(`${k}  ${rs.map((r) => `${r.cls.slice(0, 4)} ${r.xkpm.toFixed(1).padStart(4)} c${String(Math.round(r.cupsH)).padStart(2)} x${Math.round(r.crashesH)}`).join(" | ")}`);
+  }
+  for (const kit of [...new Set(rows.map((r) => r.kit))]) {
+    const rs = rows.filter((r) => r.kit === kit);
+    const mean = rs.reduce((a, r) => a + r.xkpm, 0) / rs.length;
+    const miss = sweepMisses(rs);
+    const [lo, hi] = SWEEP_TARGET[kit] || SWEEP_TARGET.ref;
+    console.log(`${kit}: ${rs.length} cases, mean ${mean.toFixed(1)} kills/min, ${rs.filter((r) => r.crashesH > 0).length} with crashes, ${rs.filter((r) => r.cupsH > 3).length} over 3 cups/h, ${miss.length} off target (kills ${lo}-${hi})`);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // The reference model (tools/reference-sim/pacing4.py)
 // ---------------------------------------------------------------------------------------------
 
@@ -293,7 +556,7 @@ function printTable(title, head, rows) {
 // ---------------------------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const o = { persona: "all", days: null, long: false, quick: false, json: false, ref: true, seed: 1 };
+  const o = { persona: "all", days: null, long: false, quick: false, json: false, ref: true, seed: 1, sweep: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--persona") o.persona = argv[++i];
@@ -303,12 +566,22 @@ function parseArgs(argv) {
     else if (a === "--json") o.json = true;
     else if (a === "--no-ref") o.ref = false;
     else if (a === "--seed") o.seed = Number(argv[++i]);
+    else if (a === "--sweep") o.sweep = true;
   }
   return o;
 }
 
 async function main() {
   const o = parseArgs(process.argv.slice(2));
+  if (o.sweep) {
+    // every real map x class at on-level for a full hour, the D§5.2 reference kit and real
+    // autopilot gear (the typical persona's, harvestGear)
+    const rows = sweep({ kits: ["ref", "auto"], ticks: 3600, seed: o.seed });
+    if (o.json) console.log(JSON.stringify(rows, null, 1));
+    else printSweep(rows);
+    process.exitCode = sweepMisses(rows).length ? 1 : 0;
+    return;
+  }
   const ids = o.persona === "all" ? Object.keys(PERSONAS) : o.persona === "bot" ? [] : [o.persona];
   for (const id of ids) if (!PERSONAS[id]) throw new Error(`unknown persona ${id}`);
   const ref = o.ref ? referenceModel() : null;

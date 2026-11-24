@@ -122,13 +122,14 @@ describe("stats (D§5.3)", () => {
   test("affix stats, caps and keepsakes", () => {
     const { h } = mk("hotfixer", 90, { rev: [1, 1] });
     // stickers/hats stuffed with crit: crit caps at 50%
-    h.eq[1] = item("hat", 100, 3, { aff: [[D.AFFIX_IDX.lint, 99], [D.AFFIX_IDX.hot, 99]] });
+    h.eq[1] = item("hat", 100, 5, { prop: D.KEEPSAKE_IDX.hazard_cone_hat, aff: [[D.AFFIX_IDX.lint, 99], [D.AFFIX_IDX.hot, 99]] }); // +5% crit
+    h.eq[0] = item("weapon", 100, 3, { type: "knives", uid: 9999, aff: [[D.AFFIX_IDX.lint, 99], [D.AFFIX_IDX.memo, 0]] });
     h.eq[5] = item("sticker", 100, 3, { aff: [[D.AFFIX_IDX.lint, 99], [D.AFFIX_IDX.opt, 99], [D.AFFIX_IDX.hot, 99]] });
     h.eq[4] = { ...item("boots", 100, 5, { prop: D.KEEPSAKE_IDX.lazy_quantifier_boots }), aff: [] };
     const st = H.stats(h);
     assert.equal(st.crit, 0.5);
-    assert.equal(st.cdr, 0.4); // 2 x 20% + 12% capped at 40%
-    assert.ok(near(st.critMult, 1.6 + 0.5)); // Optimized 10% x t5
+    assert.ok(near(st.cdr, 0.32)); // 2 x 10% + 12% (balance: Hot Reload halved), under the 40% cap
+    assert.ok(near(st.critMult, 1.6 + 0.25)); // Optimized 5% x t5 (balance: halved from 10%)
     assert.ok(st.keepsakes.lazy_quantifier_boots);
   });
 

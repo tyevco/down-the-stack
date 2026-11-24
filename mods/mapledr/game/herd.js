@@ -217,6 +217,35 @@ export function nextBuildingCost(state, b) {
   return lvl >= def.max ? null : buildingCost(def, lvl + 1);
 }
 
+/**
+ * The herd's age in days of play: 1 on the day it began (herd.born, a local day number kept by
+ * world.tick; saves from before it use the oldest hero's birth day).
+ */
+export function herdAgeDays(state) {
+  const herd = state.herd;
+  const day = herd.day || 0;
+  let born = herd.born > 0 ? herd.born : 0;
+  if (!born) for (const h of state.heroes || []) if (h.bornDay > 0 && (!born || h.bornDay < born)) born = h.bornDay;
+  return born > 0 && day >= born ? day - born + 1 : 1;
+}
+
+/**
+ * The next level of a building that is not open yet, or null: {level, day} where `day` is the herd
+ * age (herdAgeDays) it opens at. balance: the Campfire grows with the herd, one level per 6 days
+ * of play (T.campfireDaysPerLevel), the Fresh Eyes cap of the D§12.1 model (60 + 15 min(10, day/6)).
+ * D§10.2 prices it like every building, and with real gold incomes (one to five agents) it was
+ * maxed within days, so Fresh Eyes covered whole sessions from Lv 25 on (docs/BALANCE.md).
+ */
+export function buildingGate(state, b) {
+  const i = bIndex(b);
+  const per = T.campfireDaysPerLevel || 0;
+  if (i !== CAMPFIRE || !(per > 0)) return null;
+  const next = buildingLevel(state, i) + 1;
+  if (next > BUILDINGS[i].max) return null;
+  const day = next * per;
+  return herdAgeDays(state) >= day ? null : { level: next, day };
+}
+
 /** Buy one level of building bIdx (index or id). Returns {ok, cost, level?, error?}. */
 export function buy(state, bIdx) {
   const i = bIndex(bIdx);
@@ -225,6 +254,8 @@ export function buy(state, bIdx) {
   if (!state.herd.bld) state.herd.bld = new Array(BUILDINGS.length).fill(0);
   const lvl = state.herd.bld[i] || 0;
   if (lvl >= def.max) return { ok: false, error: "Max level" };
+  const gate = buildingGate(state, i);
+  if (gate) return { ok: false, error: `${def.name} ${gate.level} opens on the herd's day ${gate.day} (day ${herdAgeDays(state)} now)` };
   const cost = buildingCost(def, lvl + 1);
   if ((state.herd.gold || 0) < cost) return { ok: false, cost, error: "Not enough gold" };
   state.herd.gold -= cost;
@@ -242,7 +273,7 @@ export function autoBuyPick(state) {
   let bestCost = Infinity;
   for (let i = 0; i < BUILDINGS.length; i++) {
     const c = nextBuildingCost(state, i);
-    if (c == null || c >= bestCost) continue;
+    if (c == null || c >= bestCost || buildingGate(state, i)) continue;
     if (gold < T.buildingAutoBuyAt * c || gold - c < T.goldReserve * gold) continue;
     best = i;
     bestCost = c;
@@ -528,29 +559,111 @@ export function digestDot(world) {
 export const DIGEST_AWAY = DIGEST_AWAY_MS;
 
 /**
- * The Digest tab's data: what happened since herd.digestAt (the last time the person opened it):
- * levels gained, Release-or-better drops, bosses beaten, chests shipped, plus chests waiting now.
+ * Records what the digest diffs against (D§10.7): every hero's level, boss kills, credited Seals,
+ * notable drops and badges at `nowMs` (world.js calls it when the person marks the digest read).
+ * herd.digestSnap = {at, lv: {heroId: L}, bk: [kills x9], seals, drops, badges: [ids]}.
+ */
+export function digestMark(state, nowMs) {
+  const herd = state.herd;
+  const lv = {};
+  for (const h of state.heroes || []) lv[h.id] = h.L || 1;
+  herd.digestAt = nowMs;
+  herd.digestSnap = {
+    at: nowMs, lv, bk: (herd.bossKills || []).slice(), seals: herd.seals || 0, drops: herd.drops || 0,
+    badges: (herd.badges || []).slice(),
+  };
+  return herd.digestSnap;
+}
+
+/**
+ * The Digest tab's data: what happened since herd.digestAt (the last time the person marked it
+ * read): levels gained, Release-or-better drops, bosses beaten, chests shipped, badges, plus chests
+ * waiting now. Counts come from herd.digestSnap (digestMark) diffed against the herd as it is now,
+ * so nothing goes missing when more happened than the 60-line journal holds; the journal supplies
+ * the details it still has (item names, quest titles, times). Without a snapshot (a fresh herd, or a
+ * save from before snapshots) the baseline is the start of the herd when digestAt is 0, else the
+ * journal alone. Extra fields: levels[].from, dropsMore / shippedMore / bossesMore (counts beyond the
+ * listed lines), sealsShipped.
  * @returns {{since:number, levels:Array, drops:Array, bosses:Array, shipped:Array, badges:Array,
- *            chestsWaiting:number, sealsWaiting:number, empty:boolean}}
+ *            chestsWaiting:number, sealsWaiting:number, dropsMore:number, shippedMore:number,
+ *            bossesMore:number, sealsShipped:number, empty:boolean}}
  */
 export function digest(state, sinceMs) {
   const herd = state.herd;
   const since = sinceMs ?? herd.digestAt ?? 0;
-  const out = { since, levels: [], drops: [], bosses: [], shipped: [], badges: [], chestsWaiting: 0, sealsWaiting: 0, empty: true };
+  // the snapshot taken when digestAt was set (a save stores both; allow its time rounding)
+  let snap = herd.digestSnap && Math.abs((herd.digestSnap.at || 0) - since) < 1000 ? herd.digestSnap : null;
+  if (!snap && !(since > 0)) snap = { at: 0, lv: {}, bk: [], seals: 0, drops: 0, badges: [] };
+  const out = {
+    since, levels: [], drops: [], bosses: [], shipped: [], badges: [], chestsWaiting: 0, sealsWaiting: 0,
+    dropsMore: 0, shippedMore: 0, bossesMore: 0, sealsShipped: 0, empty: true,
+  };
   const byHero = new Map((state.heroes || []).map((h) => [h.id, h]));
-  // levels: one row per hero (the highest level reached since)
-  const lv = new Map();
+  const lvAt = new Map();
+  const lvFirst = new Map();
+  const bossLines = new Map(); // boss index -> journal lines (kills only)
+  const postmortems = [];
   for (const e of herd.log || []) {
     if (!(e[0] > since)) continue;
     const [at, kind, heroId, text, value] = e;
     const name = byHero.has(heroId) ? byHero.get(heroId).name : null;
-    if (kind === "level") lv.set(heroId, { heroId, name, level: value, at });
-    else if (kind === "drop") out.drops.push({ heroId, name, text, rar: value, at });
-    else if (kind === "boss") out.bosses.push({ text, value, at });
-    else if (kind === "ship") out.shipped.push({ heroId, name, text, seals: value, at });
+    if (kind === "level") {
+      lvAt.set(heroId, { heroId, name, level: value, at });
+      if (!lvFirst.has(heroId)) lvFirst.set(heroId, value);
+    } else if (kind === "drop") out.drops.push({ heroId, name, text, rar: value, at });
+    else if (kind === "boss") {
+      const idx = BOSSES.findIndex((b) => text === `${b.name} FIXED` || text === `${b.name} fixed again`);
+      if (idx >= 0) (bossLines.get(idx) || bossLines.set(idx, []).get(idx)).push({ text, value, at });
+      else postmortems.push({ text, value, at });
+    } else if (kind === "ship") out.shipped.push({ heroId, name, text, seals: value, at });
     else if (kind === "badge") out.badges.push({ text, at });
   }
-  out.levels = Array.from(lv.values());
+  if (snap) {
+    // levels: every hero above its recorded level (heroes hired since start from Lv 1)
+    for (const h of state.heroes || []) {
+      const was = snap.lv[h.id] ?? 1;
+      if (!((h.L || 1) > was)) continue;
+      const j = lvAt.get(h.id);
+      out.levels.push({ heroId: h.id, name: h.name, level: h.L, at: j ? j.at : since, from: was });
+    }
+    // bosses: one line per kill since, journal text where it still has it
+    const kills = herd.bossKills || [];
+    for (let i = 0; i < BOSSES.length; i++) {
+      const n = Math.max(0, (kills[i] || 0) - (snap.bk[i] || 0));
+      if (!n) continue;
+      const lines = bossLines.get(i) || [];
+      for (let k = 0; k < n; k++) {
+        if (k < lines.length) out.bosses.push(lines[lines.length - 1 - k]);
+        else {
+          const first = k === n - 1 && !(snap.bk[i] > 0);
+          out.bosses.push({ text: `${BOSSES[i].name} ${first ? "FIXED" : "fixed again"}`, value: i, at: since });
+        }
+      }
+    }
+    // the Backlog's boss floors and Postmortems only live in the journal
+    for (const [i, lines] of bossLines) if (!(i >= 0 && i < BOSSES.length)) out.bosses.push(...lines);
+    out.bosses.push(...postmortems);
+    out.bosses.sort((a, b) => a.at - b.at);
+    out.dropsMore = Math.max(0, (herd.drops || 0) - (snap.drops || 0) - out.drops.length);
+    out.sealsShipped = Math.max(0, (herd.seals || 0) - (snap.seals || 0));
+    const listed = out.shipped.reduce((sum, x) => sum + (Number(x.seals) || 0), 0);
+    out.shippedMore = out.sealsShipped - listed > 0.05 ? Math.round((out.sealsShipped - listed) * 10) / 10 : 0;
+    // badges: exact from the badge list
+    const had = new Set(snap.badges || []);
+    const fromLog = new Set(out.badges.map((b) => b.text));
+    for (const id of herd.badges || []) {
+      if (had.has(id)) continue;
+      const b = BADGE_BY_ID[id];
+      const text = b ? b.name : String(id);
+      if (!fromLog.has(text)) out.badges.push({ text, at: since });
+    }
+  } else {
+    // no snapshot: the journal alone (one row per hero, the highest level reached since)
+    for (const v of lvAt.values()) out.levels.push(Object.assign({ from: Math.max(1, (lvFirst.get(v.heroId) || v.level) - 1) }, v));
+    for (const lines of bossLines.values()) out.bosses.push(...lines);
+    out.bosses.push(...postmortems);
+    out.bosses.sort((a, b) => a.at - b.at);
+  }
   for (const h of state.heroes || []) {
     for (const p of h.pend || []) {
       out.chestsWaiting++;
@@ -558,7 +671,8 @@ export function digest(state, sinceMs) {
       out.sealsWaiting += p.min >= T.seals.minMinutes ? p.min * T.seals.perMinute * (p.sealFactor ?? 1) : 0;
     }
   }
-  out.empty = !out.levels.length && !out.drops.length && !out.bosses.length && !out.shipped.length && !out.badges.length && !out.chestsWaiting;
+  out.empty = !out.levels.length && !out.drops.length && !out.bosses.length && !out.shipped.length && !out.badges.length &&
+    !out.chestsWaiting && !out.dropsMore && !out.shippedMore;
   return out;
 }
 
@@ -574,6 +688,8 @@ export function notableDrop(item) {
 /** Journal + note for a notable drop (Release, LTS, Keepsake). */
 export function logDrop(world, hero, item, ev) {
   if (!notableDrop(item)) return;
+  const st = world.state || world;
+  if (st.herd) st.herd.drops = (st.herd.drops || 0) + 1; // counted for the digest (digestMark)
   const r = RARITIES[item.rar] || RARITIES[0];
   const name = itemName(item);
   if (ev) {

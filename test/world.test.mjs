@@ -107,6 +107,27 @@ describe("create, load, serialize", () => {
     assert.equal(W.command(world, "setting", { key: "calm", value: true }).ok, false);
   });
 
+  test("a read-only world binds for display only: no hires, no chests, no XP", () => {
+    const w0 = W.createWorld({ nowMs: T0, seed: 9 });
+    const obj = JSON.parse(W.serialize(w0));
+    obj.v = SAVE_VERSION + 1;
+    obj.crc = "";
+    const t0 = JSON.stringify(obj);
+    const { world } = W.loadWorld(t0.replace('"crc":""', `"crc":"${crc32(t0)}"`), { nowMs: T0 });
+    let now = T0;
+    for (const [status, seq] of [["working", 1], ["done", 2], ["idle", 3]]) {
+      now += 1000;
+      W.tick(world, snap(now, [ag("t1", status, seq, { focused: true })]));
+    }
+    assert.equal(world.state.heroes.length, 0, "no hire");
+    assert.equal(world.rt.bind.size, 1, "the agent shows (as a Contractor)");
+    const c = world.rt.contractors.get("t1");
+    assert.ok(c && c.contractor);
+    assert.equal(c.xp || 0, 0);
+    assert.equal(world.state.herd.seals, 0);
+    assert.equal(world.rt.dirty, false);
+  });
+
   test("corrupt text throws with a code (the host falls back to save.bak)", () => {
     assert.throws(() => W.loadWorld("{nope", { nowMs: T0 }), (e) => e.code === "parse");
     const t = W.serialize(W.createWorld({ nowMs: T0 }));
@@ -157,12 +178,32 @@ describe("the clock (D§2.10, D§2.11)", () => {
     const w = W.createWorld({ nowMs: T0, seed: 1 });
     W.tick(w, snap(T0 + 5000));
     const before = W.serialize(w);
-    assert.deepEqual(W.tick(w, snap(T0 + 2000)), { advanced: false, ticks: 0 });
-    assert.deepEqual(W.tick(w, snap(T0 + 4900)), { advanced: false, ticks: 0 });
+    // zero steps, but the snapshot is still reconciled so the stage stays live
+    assert.deepEqual(W.tick(w, snap(T0 + 2000)), { advanced: true, ticks: 0 });
+    assert.deepEqual(W.tick(w, snap(T0 + 4900)), { advanced: true, ticks: 0 });
     assert.equal(W.serialize(w), before, "nothing changed");
     assert.ok(w.rt.clockBehind);
     assert.deepEqual(W.tick(w, snap(T0 + 6000)), { advanced: true, ticks: 1 });
     assert.equal(w.rt.clockBehind, false);
+  });
+
+  test("a clock behind by less than an hour still reconciles: statuses move, nothing accrues", () => {
+    const { w, now, agents } = busyWorld({ heroes: 1, ticks: 20 });
+    const h = w.state.heroes[0];
+    const live = w.rt.live.get(h.id);
+    const kills = h.st.kills;
+    const tick = w.state.herd.tick;
+    const lastMs = w.state.herd.lastMs;
+    const v = w.rt.version;
+    agents[0] = ag("t1", "blocked", 2);
+    assert.deepEqual(W.tick(w, snap(now - 30 * 60000, agents)), { advanced: true, ticks: 0 });
+    assert.equal(live.status, "blocked");
+    assert.equal(live.state, "waiting", "the stage shows the agent waiting");
+    assert.ok(w.rt.version > v);
+    assert.equal(w.state.herd.tick, tick);
+    assert.equal(w.state.herd.lastMs, lastMs, "accrual waits for the clock to pass the last tick");
+    assert.equal(h.st.kills, kills);
+    assert.deepEqual(W.tick(w, snap(lastMs + 1000, agents)), { advanced: true, ticks: 1 });
   });
 
   test("a clock that jumps back by more than an hour resyncs without accruing", () => {
@@ -366,7 +407,7 @@ describe("herd trackers in the tick", () => {
   test("the digest dot after 30+ minutes away, cleared by digestSeen", () => {
     const w = W.createWorld({ nowMs: T0, seed: 1 });
     W.tick(w, snap(T0 + 1000));
-    w.state.herd.log.push([T0 + 1500, "level", 1, "Lv 2", 2]);
+    w.state.herd.badges.push("hello_world"); // something new since the herd began
     W.tick(w, snap(T0 + 2000, [], { windowActive: false }));
     W.tick(w, snap(T0 + 3000, [], { windowActive: true }));
     assert.equal(w.rt.digestDot, false, "a short absence");
@@ -378,6 +419,7 @@ describe("herd trackers in the tick", () => {
     assert.equal(W.command(w, "digestSeen", {}, now + 1500).ok, true);
     assert.equal(w.rt.digestDot, false);
     assert.equal(w.state.herd.digestAt, now + 1500);
+    assert.equal(w.state.herd.digestSnap.at, now + 1500, "digestSeen records the snapshot the next digest diffs against");
   });
 });
 
@@ -608,6 +650,7 @@ describe("commands (ARCHITECTURE §3.5)", () => {
 
   test("buy", () => {
     const { w } = cmdWorld();
+    w.state.herd.born = w.state.herd.day - 6; // the herd's day 7: Campfire 1 is open (balance)
     assert.equal(W.command(w, "buy", { building: "spaceship" }).error, "Unknown building");
     assert.equal(W.command(w, "buy", { building: "campfire" }).error, "Not enough gold");
     w.state.herd.gold = 5000;

@@ -202,6 +202,13 @@ Fx    = { key:"fx:<tick>:<n>", bornTick, kind, heroId?, mobUid?, roomId?, text, 
           x?, y? }              // kinds in section 6.3; engine emits, view.js positions
 ```
 
+Fields added during the build (all saved ones have defaults on load in `save.js`):
+`herd.born` (the herd's first local day; `herd.herdAgeDays`, the Campfire gate), `herd.inbox` (chest
+items waiting to be offered, one per tick), `herd.digestSnap` and `herd.drops` (the D§10.7 digest
+baseline), `Mob.hitCt` (combat clock of the first landed hit: the swing timer starts there),
+`live.tally` (per-hero counters incl. `chestXp`, `bossXp`, `reviewXp`) and `rt.tzOffsetMin` (the last
+snapshot's time zone, for the views' dates). Why each exists: `docs/BALANCE.md`.
+
 ### 3.3 Snapshot (what `host.js` passes into `tick`)
 
 ```js
@@ -456,6 +463,16 @@ export function sheetView(world, { heroId, tab, filter }) -> SheetVM   // D§11.
 export function herdView(world, { tab, filter }) -> HerdVM                    // D§11.14 (upgrades/stash/tracker/bosses/roster/digest/settings)
 ```
 
+Contract additions recorded during the build (the "VM additions" JSDoc of each `ui/` module and the
+SheetVM / HerdVM typedefs in `ui/sheet.js` / `ui/herdpanel.js` are the full list):
+- every view also takes optional `nowMs` and `tzOffsetMin` in its args (else `rt.nowMs` /
+  `rt.tzOffsetMin`);
+- `StageVM.signs: [{key, x, text}]` (a fight's participants' home slots; adjacent ones in one room
+  share one sign), `rooms[].stats`, `BossVM.partSprite` / `tooltip` / `stamp.sprite`;
+- `RowVM.slim` (crowded parties), the fork chip's `terminal`;
+- `StashFilter.hover` / `selected` (the sheet's hovered or selected item falls back when it vanishes);
+- `RosterVM.slim`, `fame.more`, `backlog.challenge` (Herd panel).
+
 `sheetView`/`herdView` shapes are owned jointly by the engine-world author and the sheet/herd
 UI author; their exact fields are defined in `game/view.js` JSDoc, which is the source of truth.
 Every derived string shown to the person (tooltips, the "why" breakdown D§2.9, item names,
@@ -618,6 +635,11 @@ Palette per zone from D§9.2; rarity colours D§8.2; reserved colours D§11.1.
 7. D§3.4 Contractors are created in memory and never saved (as designed); Rebind is in the sheet.
 8. The stage height setting maps to `layout.resize {id:"stage", px}`.
 9. D§5.7 map choice: Power Level is class-biased with the reference kit (Refactorer/Forkbinder
-   3–4 below level, Hotfixer 3–6 above), so autopilot picks maps by hero level, moved down at most
-   2 levels when the weapon lags the reference kit, and after a recent crash by min(PL, L).
+   3–4 below level, Hotfixer 3–6 above), so autopilot picks maps by hero level: the deepest open map
+   whose mid level is ≤ L + 1 (by L after a crash in the last 10 minutes; the crash rule still drops
+   a map). The earlier "down at most 2 levels when the weapon lags the reference kit" rule is gone
+   (docs/BALANCE.md §2: one-agent herds sat a map low for days).
 10. `game/view.js` is a barrel over `game/view/{stage,chrome,panels}.js`.
+11. Balance deviations from D§14 numbers and D§10.2 (Campfire levels open with the herd's age, boss
+    XP, thorns, mob multipliers, loot item level) are listed with their reasons in
+    `docs/BALANCE.md`; every changed number carries a `// balance:` comment in `game/data.js`.

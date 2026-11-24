@@ -33,7 +33,7 @@ import { rollItem, rollKeepsake, rollReviewReward, stashPut, itemName } from "./
 import * as Herd from "./herd.js";
 import {
   findHero, heroCtx, heroMapId, actorFor, prepare, act, summons, flush, hitHero, pctHit, upkeep, reboot, auraRanks, FX,
-  isActive, offerDrop,
+  isActive, offerDrop, drainFreshEyes,
 } from "./combat.js";
 
 const B = T.boss;
@@ -682,11 +682,14 @@ const KITS = {
         note(ev, `${f.name}: ${m2.label}`);
       } else if (!f.mech.p2 && f.t % m1.every === 0 && aliveAdds(f) < m1.maxAlive) {
         spawnAdd(f, m1.add, 1);
-        f.mechText = `+1 warning (${aliveAdds(f)})`;
+        f.mech.warnAt = f.t;
       }
       if (f.mech.p2 && !f.mech.angry && aliveAdds(f) < m2.invulnWhileAddsAtLeast) f.mech.angry = 1;
       f.invuln = !!(f.mech.p2 && !f.mech.angry);
-      f.mechText = f.mech.p2 ? (f.invuln ? `Promoted to Error: ${aliveAdds(f)} mites` : "Error") : `${999 + aliveAdds(f)}+ warnings`;
+      // "+1 warning" stays up for 3 ticks after a mite joins (like a header note), then the count
+      const fresh = !f.mech.p2 && f.mech.warnAt != null && f.t - f.mech.warnAt < 3;
+      f.mechText = f.mech.p2 ? (f.invuln ? `Promoted to Error: ${aliveAdds(f)} mites` : "Error")
+        : fresh ? `+1 warning (${aliveAdds(f)})` : `${999 + aliveAdds(f)}+ warnings`;
     },
     dmg(f) {
       const [m1, m2] = f._enc.def.mechanics;
@@ -838,7 +841,7 @@ const KITS = {
       }
       const k = tentacles(f);
       f.invuln = false;
-      f.mechText = k >= m.shieldWhileAtLeast ? m.label.replace("{n}", String(k)) : below ? "Fast-forward" : `${k} branches left`;
+      f.mechText = k >= m.shieldWhileAtLeast ? m.label.replace("{n}", String(k)) : below ? "Fast-forward" : `${k} ${k === 1 ? "branch" : "branches"} left`;
     },
   },
 
@@ -1274,6 +1277,8 @@ export function stepFight(world, fight, ev) {
     if (acts) act(C);
     summons(C, acts);
   }
+  // Fresh Eyes drains while a participant fights, as in a lane (D§2.2: Questing, 1 min per minute)
+  for (let i = 0; i < n; i++) drainFreshEyes(ACTORS[i]);
   // won?
   if (!bossAlive(fight)) {
     for (let i = 0; i < n; i++) flush(ACTORS[i]);
@@ -1407,6 +1412,7 @@ function winFight(world, fight, ev) {
     const xp = bossXP(hero.L, !killedBefore) * gp;
     grantXP(state, hero, xp, ev);
     const live = rt.live.get(hero.id);
+    if (live && live.tally) live.tally.bossXp = (live.tally.bossXp || 0) + xp;
     if (live) live.hp = live.maxHp;
   }
   if (fight.kind === "backlog") {
@@ -1454,8 +1460,10 @@ function winReviewFight(world, fight, ev) {
   if (!winReview(hero, idx)) return;
   const item = rollReviewReward(hero, { reviewIdx: idx, L: hero.L, classId: hero.cls, state });
   rewardItem(world, hero, item, ev);
-  grantXP(state, hero, bossXP(hero.L, true), ev);
+  const rxp = bossXP(hero.L, true);
+  grantXP(state, hero, rxp, ev);
   const live = rt.live.get(hero.id);
+  if (live && live.tally) live.tally.reviewXp = (live.tally.reviewXp || 0) + rxp;
   if (live) live.hp = live.maxHp;
   const title = careerOf(hero).title;
   note(ev, `PROMOTED: ${title}`);

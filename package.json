@@ -9,6 +9,7 @@
     "test": "node --test \"test/*.test.mjs\"",
     "check": "node --import ./tools/mock/register.mjs tools/check.mjs",
     "preview": "node --import ./tools/mock/register.mjs tools/preview/shoot.mjs",
+    "windows": "node --import ./tools/mock/register.mjs tools/preview/windows.mjs",
     "art": "node tools/gen-art.mjs",
     "pacing": "node tools/pacing-sim.mjs"
   },

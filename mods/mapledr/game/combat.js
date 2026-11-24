@@ -25,7 +25,7 @@
 // Pure: RNG only through rng.js holders (the hero's own RNG), no Date.now(), no host calls.
 
 import {
-  TUNING as T, CLASS_IDX, MAPS, MAP_BY_ID, MOB_BY_ID, MOBS, TRAITS, ELITE, BACKLOG, ZONES, SKILL_BY_ID, BUILDING_IDX,
+  TUNING as T, CLASS_IDX, CLASS_BY_ID, MAPS, MAP_BY_ID, MOB_BY_ID, MOBS, TRAITS, ELITE, BACKLOG, ZONES, SKILL_BY_ID, BUILDING_IDX,
 } from "./data.js";
 import {
   mobStats, gap, DR, gold as goldOf, itemTier, fmtNum, crowding, partyXp, freshEyesCap, coffeePrice, shiftKillMult,
@@ -41,6 +41,7 @@ import * as Auto from "./autopilot.js"; // offerDrop only, looked up at call tim
 // ---------------------------------------------------------------------------------------------
 
 const LANE = T.lane.size;
+const SWING_DELAY = T.lane.firstSwingDelay || 0; // ticks between the first landed hit and the first swing
 const ELITE_P = 1 / T.lane.eliteOneIn;
 const DUCK_P = 1 / T.lane.duckOneIn;
 const S_MAIN = 0;
@@ -63,6 +64,7 @@ const F_CRIT = 2; //    always crits
 const F_PRIMARY = 4; // part of the tick's action (first number); else merged into the second
 const F_NOPROC = 8; //  no Recursive / Optional Semicolon repeat (the repeat itself)
 const F_MAIN = 16; //   a Main attack hit (Bisect stacks apply)
+const F_SUMMON = 32; // a summon or Forkling hit (never triggers thorns)
 
 // Shapeshifter pool (D§9.4: any trait but swarm and splitter; copying itself would be a no-op).
 const SHIFT_POOL = Object.keys(TRAITS).filter((k) => !TRAITS.shapeshifter.exclude.includes(k) && k !== "shapeshifter");
@@ -302,7 +304,7 @@ function newActor() {
     armorMul: 1, xpPct: 0, buffXp: 0, melee: true, mult: 1, hold: false, capLeft: Infinity, rebootFaster: 0,
     bisectUid: null, bisectPct: 0, lastAmt: 0, lastCrit: false,
     n1amt: 0, n1c: 0, n1crit: false, n1uid: null, n2amt: 0, n2c: 0, n2crit: false, n2uid: null,
-    missUid: null, invUid: null, inc: 0, dodged: false, reflect: 0, dealt: 0, leveled: false, heals: 0,
+    missUid: null, invUid: null, inc: 0, dodged: false, reflect: 0, reflectLvl: 0, dealt: 0, leveled: false, heals: 0,
     skillName: null,
   };
 }
@@ -324,7 +326,7 @@ export function actorFor(world, hero, live, ev, roomId) {
   C.g = tickGlobals(world);
   C.n1amt = 0; C.n1c = 0; C.n1crit = false; C.n1uid = null;
   C.n2amt = 0; C.n2c = 0; C.n2crit = false; C.n2uid = null;
-  C.missUid = null; C.invUid = null; C.inc = 0; C.dodged = false; C.reflect = 0; C.dealt = 0;
+  C.missUid = null; C.invUid = null; C.inc = 0; C.dodged = false; C.reflect = 0; C.reflectLvl = 0; C.dealt = 0;
   C.leveled = false; C.heals = 0; C.capLeft = Infinity; C.hold = false; C.mult = 1;
   C.extraPct = 0; C.bossPct = 0; C.skillName = null;
   if (!live.cds) live.cds = {};
@@ -371,7 +373,9 @@ export function prepare(C, room) {
   C.st = st;
   C.sv = skillsOf(hero, st);
   C.base = st.weaponDmg * (1 + st.might / 100);
-  C.melee = !(C.sv[S_MAIN] && C.sv[S_MAIN].ranged);
+  // melee: thorns prick the hero (D§9.4). Ranged Main attacks are immune, and so is the summoner,
+  // whose hits are its imps (summons and Forklings never trigger thorns)
+  C.melee = !(C.sv[S_MAIN] && C.sv[S_MAIN].ranged) && !(C.st.clsId && CLASS_BY_ID[C.st.clsId] && CLASS_BY_ID[C.st.clsId].role === "summoner");
   C.rebootFaster = Math.floor(room.safety / 2) * SAFETY_AURA.rebootFasterTicksPer2Ranks;
   syncHp(C);
   scanBuffs(C);
@@ -530,7 +534,14 @@ function apply(C, ent, amt, flags, crit) {
   C.dealt += dealt;
   C.live.tally.dealt += dealt;
   if (arena.boss) arena.after(C, ent, dealt, flags);
-  else if (C.melee && thornsOf(ent) > 0) C.reflect += dealt * thornsOf(ent);
+  else {
+    if (dealt > 0) ent.hitCt = C.ct; // the swing timer starts on the first hit that lands (laneTick)
+    // thorns (D§9.4): the hero's own melee hits only; summons and Forklings never prick themselves
+    if (C.melee && !(flags & F_SUMMON) && thornsOf(ent) > 0) {
+      C.reflect += dealt * thornsOf(ent);
+      if (ent.level > C.reflectLvl) C.reflectLvl = ent.level;
+    }
+  }
   record(C, ent.uid, amt, crit, flags);
   return dealt;
 }
@@ -801,15 +812,15 @@ export function summons(C, heroActs) {
   const mainCoef = main ? main.coef : 1;
   if (heroActs) {
     const daemon = sv[S_BUFF];
-    if (daemon && daemon.usable && daemon.type === "summon") deal(C, tgt, mainCoef * daemon.pctOfMain, 0);
+    if (daemon && daemon.usable && daemon.type === "summon") deal(C, tgt, mainCoef * daemon.pctOfMain, F_SUMMON);
     const ducks = sv[S_SIG];
     if (ducks && ducks.usable && ducks.type === "summon") {
       const n = ducks.count || 1;
-      for (let i = 0; i < n; i++) deal(C, tgt, mainCoef * ducks.pctOfMain, 0);
+      for (let i = 0; i < n; i++) deal(C, tgt, mainCoef * ducks.pctOfMain, F_SUMMON);
     }
   }
   const n = Math.min(st.forklingCount, workingForklings(live));
-  if (n > 0) deal(C, tgt, n * st.forklingPct * st.mainCoef, 0);
+  if (n > 0) deal(C, tgt, n * st.forklingPct * st.mainCoef, F_SUMMON);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -867,7 +878,7 @@ function damageTaken(C, taken) {
  * DR against the attacker's level (Feature-Flagged armor phase included), room aura and
  * Idempotence. `raw` already holds atk x atkMult x U(0.9, 1.1). Returns the damage taken.
  */
-export function hitHero(C, raw, level) {
+export function hitHero(C, raw, level, capFrac) {
   const { live, st, hero } = C;
   if (isDown(live) || !(raw > 0)) return 0;
   if (C.untargetable) { C.dodged = true; return 0; }
@@ -879,7 +890,8 @@ export function hitHero(C, raw, level) {
     return 0;
   }
   const dr = C.armorMul !== 1 ? DR(st.armor * C.armorMul, level, st.drFlat) : st.dr(level);
-  const taken = Math.max(1, Math.round(raw * (1 - dr) * (1 + C.buffDmgTaken) * (1 + st.dmgTaken)));
+  let taken = Math.max(1, Math.round(raw * (1 - dr) * (1 + C.buffDmgTaken) * (1 + st.dmgTaken)));
+  if (capFrac > 0) taken = Math.max(1, Math.min(taken, Math.round(capFrac * live.maxHp)));
   return damageTaken(C, taken);
 }
 
@@ -994,7 +1006,7 @@ function makeMob(rt, def, level, opts) {
     uid: nextMobUid(rt), mobId: def.id, level, hp, maxHp: hp, baseHp: hp,
     atk: opts.atk ?? s.atk, xp: opts.xp ?? s.xp, gold: opts.gold ?? s.gold,
     elite: !!opts.elite, holo: !!opts.holo, v2: (opts.floor || 0) > 0,
-    arriveTick: opts.arriveTick, engaged: false, swingTick: 0, swingEvery: baseEvery(tr), rangedTick: 0,
+    arriveTick: opts.arriveTick, engaged: false, swingTick: 0, swingEvery: baseEvery(tr), rangedTick: 0, hitCt: -1,
     lanePos: 0, traits: tr,
   };
 }
@@ -1346,6 +1358,7 @@ function laneTick(C, room, map, acts) {
         live.bisect.stacks = 0;
       }
     }
+    tickPending(arena);
     drainFreshEyes(C);
     flush(C);
     return;
@@ -1365,8 +1378,9 @@ function laneTick(C, room, map, acts) {
   }
   if (acts) act(C);
   summons(C, acts);
-  // mob swings: the engaged mob on the tick it is first hit, then every 2nd tick (fast 1, slow 3)
-  if (acts && tgt.swingTick === 0) tgt.swingTick = C.ct;
+  // mob swings: the engaged mob on the tick the first hit lands on it (a 403 or a 404 does not
+  // count), then every 2nd tick (fast 1, slow 3)
+  if (tgt.swingTick === 0 && tgt.hitCt === C.ct) tgt.swingTick = C.ct + SWING_DELAY;
   if (tgt.hp > 0 && tgt.swingTick > 0 && C.ct >= tgt.swingTick && !tgt.holo) {
     mobSwing(C, tgt);
     tgt.swingTick = C.ct + tgt.swingEvery;
@@ -1383,9 +1397,10 @@ function laneTick(C, room, map, acts) {
       m.rangedTick = C.ct + TRAITS.ranged.swingEvery;
     }
   }
-  // thorns reflect what the hero dealt to spiked mobs this tick (ranged classes are immune)
-  if (C.reflect > 0) damageTaken(C, Math.max(1, Math.round(C.reflect)));
-  if (acts && tgt.traits.pending > 0) tgt.traits.pending--;
+  // thorns reflect a share of what the hero's own melee hits dealt to spiked mobs this tick, as one
+  // hit through dodge, Stealth Commit, DR and damage-taken modifiers, capped per tick (D§9.4)
+  if (C.reflect > 0) hitHero(C, C.reflect, C.reflectLvl, TRAITS.thorns.capPerTick);
+  tickPending(arena);
   deaths(C, room, map);
   upkeep(C, T.regen.engaged, T.crash.downTicks);
   if (live.crashedUntil > 0) crashRule(C, room);
@@ -1393,8 +1408,19 @@ function laneTick(C, room, map, acts) {
   flush(C);
 }
 
-// Fresh Eyes drains 1 minute per working minute (D§2.9).
-function drainFreshEyes(C) {
+// pending (D§9.4): a Promise resolves on its own, counting its first ticks in the lane from arrival,
+// engaged or not, at the end of each lane tick (balance: D§9.4 counts engaged ticks only, so every
+// queued Wisp also swallowed the area hits and 2 more ticks once engaged: map 2-2 ran at 10 kills
+// a minute whatever the class; docs/BALANCE.md)
+function tickPending(arena) {
+  for (let i = 0; i < arena.count; i++) {
+    const m = arena.list[i];
+    if (m.traits.pending > 0) m.traits.pending--;
+  }
+}
+
+/** Fresh Eyes drains 1 minute per working minute (D§2.9), in a lane or a fight (internal API for boss.js). */
+export function drainFreshEyes(C) {
   const h = C.hero;
   if (h.fe > 0) h.fe = Math.max(0, h.fe - 1 / 60);
 }

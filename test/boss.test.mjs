@@ -7,7 +7,16 @@ import * as F from "../mods/mapledr/game/formulas.js";
 import * as H from "../mods/mapledr/game/heroes.js";
 import * as Bo from "../mods/mapledr/game/boss.js";
 import { encodeState, decodeState } from "../mods/mapledr/game/save.js";
-import { makeWorld, addHero, makeEv, stepWorld, heroOf, liveOf } from "./helpers/engine.mjs";
+import { makeWorld as baseMakeWorld, addHero, makeEv, stepWorld, heroOf, liveOf } from "./helpers/engine.mjs";
+import { fullRefKit } from "../tools/pacing-sim.mjs";
+
+// Heroes wear the complete D§5.2 reference kit (the helper's kit carries the reference damage, HP
+// and armor bonuses in one affix each, which the halved affix ranges can no longer hold: docs/BALANCE.md)
+function makeWorld(opts = {}) {
+  const w = baseMakeWorld(opts);
+  (opts.heroes || []).forEach((spec, i) => { if ((spec.kit || "ref") === "ref") fullRefKit(w.state, w.state.heroes[i]); });
+  return w;
+}
 
 const CLS5 = ["refactorer", "hotfixer", "shellmancer", "forkbinder", "rubberducker"];
 const { KITS, arenaOf } = Bo._internal;
@@ -154,10 +163,19 @@ describe("mechanic primitives (D§9.6)", () => {
     f.pool = 1e9;
     for (let t = 0; t < 19; t++) stepWorld(w, ev, 1);
     assert.equal(f.parts.filter((p) => p.kind === "add").length, 0);
+    assert.equal(f.mechText, "999+ warnings");
     stepWorld(w, ev, 1);
     const mites = f.parts.filter((p) => p.kind === "add");
     assert.ok(mites.length === 1 || f.dealt > 0);
     assert.equal(KITS.ignored_warning.dmg(f), 0.1 * mites.length);
+    // "+1 warning" stays up for 3 ticks (it was overwritten in the same tick), then the count
+    if (mites.length) {
+      assert.match(f.mechText, /^\+1 warning/);
+      stepWorld(w, ev, 2);
+      assert.match(f.mechText, /^\+1 warning/);
+      stepWorld(w, ev, 1);
+      assert.match(f.mechText, /warnings$/);
+    }
     // phase 2
     body.hp = Math.round(body.maxHp * 0.49);
     stepWorld(w, ev, 1);
@@ -293,6 +311,8 @@ describe("mechanic primitives (D§9.6)", () => {
     assert.equal(mutex.label, "Mutex");
     assert.equal(sema.label, "Semaphore");
     assert.equal(mutex.maxHp + sema.maxHp, f.pool + (f.pool % 2 ? 1 : 0));
+    // tougher heads, so the fight outlasts the two checks this test needs
+    for (const p of [mutex, sema]) { p.maxHp *= 20; p.hp = p.maxHp; }
     mutex.hp = Math.round(mutex.maxHp * 0.8);
     assert.equal(arenaOf(f).main, sema);
     stepWorld(w, ev, 1);
@@ -302,7 +322,7 @@ describe("mechanic primitives (D§9.6)", () => {
     stepWorld(w, ev, 1);
     assert.equal(f.mech.low, -1);
     // the check at tick 40: balanced -> Resolved
-    while (f.t < 40) stepWorld(w, ev, 1);
+    for (let i = 0; i < 100 && f.t < 40 && !f.result; i++) stepWorld(w, ev, 1);
     assert.equal(f.mech.tel, 3);
     mutex.hp = Math.round(mutex.maxHp * 0.5);
     sema.hp = Math.round(sema.maxHp * 0.5);
@@ -311,7 +331,7 @@ describe("mechanic primitives (D§9.6)", () => {
     assert.ok(f.mech.stun > 0);
     assert.ok(KITS.deadlock_hydra.mod(f, live._act, sema, 1000) === 1250);
     // the next check unbalanced -> the party waits 3 ticks (no actions)
-    while (f.t < 80) stepWorld(w, ev, 1);
+    for (let i = 0; i < 100 && f.t < 80 && !f.result; i++) stepWorld(w, ev, 1);
     mutex.hp = Math.round(mutex.maxHp * 0.3);
     sema.hp = Math.round(sema.maxHp * 0.4);
     f.mech.low = -1;
@@ -386,15 +406,15 @@ describe("mechanic primitives (D§9.6)", () => {
     const C = live._act;
     assert.equal(KITS.heisenbug.mod(f, C, body, 1000, 0), 1500);
     assert.equal(KITS.heisenbug.mod(f, C, body, 1000, 1), 500);
-    while (f.t < 20) stepWorld(w, ev, 1);
+    for (let i = 0; i < 400 && f.t < 20 && !f.result; i++) stepWorld(w, ev, 1);
     assert.equal(f.mech.stance, 1);
     assert.equal(f.phaseLabel, "Momentum");
     live.focused = true;
     stepWorld(w, ev, 1);
     assert.equal(f.mech.next, 20 + 20 + 5);
-    while (f.t < 30) stepWorld(w, ev, 1);
+    for (let i = 0; i < 400 && f.t < 30 && !f.result; i++) stepWorld(w, ev, 1);
     assert.ok(live.tally.taken > 0);
-    while (f.t < 45) stepWorld(w, ev, 1);
+    for (let i = 0; i < 400 && f.t < 45 && !f.result; i++) stepWorld(w, ev, 1);
     assert.equal(f.mech.stance, 0);
   });
 
@@ -409,13 +429,22 @@ describe("mechanic primitives (D§9.6)", () => {
     stepWorld(w, ev, 10);
     assert.equal(f.t, 0, "a blocked participant holds");
     liveOf(w, 1).state = "questing";
-    while (f.t < Math.floor(0.8 * 192) - 1) stepWorld(w, ev, 1);
+    for (let i = 0; i < 400 && f.t < Math.floor(0.8 * 192) - 1 && !f.result; i++) stepWorld(w, ev, 1);
     assert.equal(f.enraged, false);
     stepWorld(w, ev, 1);
     assert.equal(f.enraged, true);
     heroOf(w, 1).cups = 99;
     assert.equal(finish(w, ev), "lost");
     assert.equal(f.t, 192);
+  });
+});
+
+describe("Fresh Eyes in fights (D§2.2, D§2.9)", () => {
+  test("the pool drains 1 minute per working minute in a boss fight too", () => {
+    const { w, ev, hero } = solo(2, "shellmancer", 34, 3);
+    hero.fe = 30;
+    stepWorld(w, ev, 60);
+    assert.ok(Math.abs(hero.fe - 29) < 1e-9, `fe ${hero.fe}`);
   });
 });
 
@@ -564,7 +593,7 @@ describe("rewards (D§8.6, D§9.5)", () => {
     assert.ok(h.L > 12 || h.xp - xp0 >= F.bossXP(12, true) - 1);
   });
 
-  test("repeat kills: 0.1 Need XP x level gap, once per 3 working hours per hero, no meter needed", () => {
+  test("repeat kills: xpRepeat x Need XP x level gap (balance: 0.02, design 0.1), once per 3 working hours per hero, no meter needed", () => {
     const w = makeWorld({ seed: 4, heroes: [{ cls: "shellmancer", L: 30, mapId: "1-3" }] });
     openDoor(w, 1);
     const h = heroOf(w, 1);
@@ -579,10 +608,10 @@ describe("rewards (D§8.6, D§9.5)", () => {
     Bo.startFight(w, "boss", 0, null, ev);
     assert.equal(finish(w, ev), "won");
     assert.equal(w.state.herd.bossKills[0], 1);
-    // boss XP follows the level gap like kill XP: a Lv 30 hero farming the Lv 12 boss gets 10% of
-    // the 0.1 Need (integration fix: farming long-beaten bosses outpaced on-level work)
+    // boss XP follows the level gap like kill XP: a Lv 30 hero farming the Lv 12 boss gets the gap
+    // floor of the repeat XP (integration fix: farming long-beaten bosses outpaced on-level work)
     assert.ok(h.L > L || Math.abs(h.xp - xp0 - F.bossXP(L, false) * F.gap(L - 12)) < 1);
-    assert.equal(F.gap(L - 12), 0.1);
+    assert.equal(F.gap(L - 12), D.TUNING.gap.floor);
     assert.equal(h.cd.boss[0], 3 * 3600);
   });
 
@@ -618,7 +647,7 @@ describe("challenge, estimate, participants (D§9.5)", () => {
     const w = makeWorld({ seed: 1, heroes: [{ cls: "refactorer", L: 45, mapId: "4-3" }, { cls: "hotfixer", L: 47, mapId: "4-3" }] });
     const st1 = H.stats(heroOf(w, 1), { herd: w.state.herd });
     const st2 = H.stats(heroOf(w, 2), { herd: w.state.herd });
-    const hp = F.bossHP(24, 45, 2);
+    const hp = F.bossHP(D.BOSSES[3].bk, 45, 2);
     const want = (st1.dpsEst * (1 + st1.bossDmg) + st2.dpsEst * (1 + st2.bossDmg)) * 0.85 * 180 * 0.75 / hp;
     assert.ok(Math.abs(Bo.estimate(w, "boss", 3, [1, 2]) - want) < 1e-9);
     w.state.herd.lessons["3"] = 2;

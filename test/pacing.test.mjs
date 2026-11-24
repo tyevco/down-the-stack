@@ -1,15 +1,32 @@
-// Persona pacing with the real engine, shortened (tools/pacing-sim.mjs runs the full D§12 table:
-// `npm run pacing`). Day 1 of every D§12.1 persona, Solo's first four days, and day 1 of the
-// always-working bot (D§12.2). Deterministic (seed 1); about 5 s.
-//
-// Tolerances: the D§12.1 ±15% where the engine meets it on day 1 (Boss 1, Lv 20, the bot); the
-// first levels (Lv 5 at 12 min, Lv 10 at 42 min) run 10-30% early because the first chest lands
-// at once at the end of a task (the model spreads chest XP over the minutes), so they get ±35%.
-// Later milestones are reported by `npm run pacing`, not asserted here (see its header for the
-// remaining calibration gap).
+// Persona pacing with the real engine (D§12.1, D§12.2), shortened where it has to be: tools/
+// pacing-sim.mjs runs the full table (`npm run pacing`, about 80 s) and the sustain sweep with real
+// autopilot gear (`npm run pacing -- --sweep`). Deterministic (seed 1), about 40 s:
+//   - day 1 of every persona: Lv 5, Lv 10 and Boss 1 within ±15% (D§12.1's exact model hours,
+//     pacing-sim DESIGN);
+//   - Typical and Casual to Lv 100 and Boss 9: every D§12.1 milestone within ±15% (days ±15% or
+//     one day for bosses after day 1);
+//   - Solo and Heavy to Boss 3: every milestone up to there;
+//   - the always-working bot (D§12.2) on days 1 and 7;
+//   - real autopilot gear (recorded during the Typical run) in the sustain sweep: 0 crashes, at
+//     most 3 cups per on-level hour on every map x class, kill pace around the reference kit's.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { simPersona, simBot, PERSONAS, DESIGN, BOT_DESIGN, compare } from "../tools/pacing-sim.mjs";
+import {
+  simPersona, simBot, PERSONAS, DESIGN, BOT_DESIGN, compare, gearRecorder, sweep, SWEEP_TARGET,
+} from "../tools/pacing-sim.mjs";
+
+const ORDER = ["L5", "L10", "B1", "L20", "B2", "L30", "B3", "B4", "L50", "B5", "L60", "B6", "B7", "B8", "L90", "B9", "L100"];
+
+// every milestone of the persona up to `last` (inclusive): within ±15% (compare())
+function assertMilestones(id, r, last) {
+  const off = [];
+  for (const k of ORDER) {
+    const c = compare(k, DESIGN[id][k], r.events[k]);
+    if (!c || !c.ok) off.push(`${k}: ${r.events[k] ? `day ${r.events[k].day} (${r.events[k].hours} h)` : "not reached"} vs ${JSON.stringify(DESIGN[id][k])}`);
+    if (k === last) break;
+  }
+  assert.deepEqual(off, [], `${id}: milestones more than 15% off D§12.1`);
+}
 
 const runs = {};
 function day1(id) {
@@ -17,36 +34,18 @@ function day1(id) {
   return runs[id];
 }
 
-function within(id, key, tol, got) {
-  const d = DESIGN[id][key];
-  const e = got.events[key];
-  assert.ok(e, `${id}: ${key} not reached on day ${got.days}`);
-  assert.ok(e.day <= d[0], `${id}: ${key} on day ${e.day}, design day ${d[0]}`);
-  if (d[1] != null) {
-    const dev = e.hours / d[1] - 1;
-    assert.ok(Math.abs(dev) <= tol, `${id}: ${key} at ${e.hours} h, design ${d[1]} h (${Math.round(dev * 100)}%)`);
-  }
-}
-
 describe("day 1 of every persona (D§12.1)", () => {
   for (const id of Object.keys(PERSONAS)) {
-    test(`${id}: Lv 5, Lv 10 and Boss 1 on day 1`, () => {
+    test(`${id}: Lv 5, Lv 10 and Boss 1 on day 1, within 15%`, () => {
       const r = day1(id);
-      within(id, "L5", 0.35, r);
-      within(id, "L10", 0.35, r);
-      within(id, "B1", 0.15, r);
+      assertMilestones(id, r, "B1");
+      for (const k of ["L5", "L10", "B1"]) assert.equal(r.events[k].day, 1, k);
       // every hero got its class at Lv 10 and nothing went wrong
       for (const h of r.world.state.heroes) assert.ok(h.L >= 10 && h.cls > 0, `Lv ${h.L} cls ${h.cls}`);
       assert.deepEqual(r.world.rt.errors, []);
       assert.ok(r.final.saveBytes < 30 * 1024);
     });
   }
-
-  test("heavy: Lv 20 and Boss 2 on day 1", () => {
-    const r = day1("heavy");
-    within("heavy", "L20", 0.15, r);
-    within("heavy", "B2", 0.15, r);
-  });
 
   test("the first day's story: three Interns become Juniors and open Callback Caverns", () => {
     const r = day1("typical");
@@ -56,29 +55,48 @@ describe("day 1 of every persona (D§12.1)", () => {
   });
 });
 
-describe("solo, days 1-4", () => {
-  const r = simPersona(PERSONAS.solo, { days: 4, seed: 1 });
-  test("Lv 20 and Boss 2 on day 2 at the latest, within 15% of the design's hours", () => {
-    within("solo", "L20", 0.15, r);
-    const c = compare("B2", DESIGN.solo.B2, r.events.B2);
-    assert.ok(c && c.ok, `Boss 2 on day ${r.events.B2 && r.events.B2.day}`);
-  });
+describe("whole games: Typical and Casual to Lv 100 and the Heisenbug (D§12.1)", () => {
+  const rec = gearRecorder();
+  const typical = simPersona(PERSONAS.typical, { seed: 1, until: ["B9", "L100"], onTick: rec.onTick });
+  const casual = simPersona(PERSONAS.casual, { seed: 1, until: ["B9", "L100"] });
 
-  test("Lv 30 and Boss 3 by day 4 (design: day 3 and day 4)", () => {
-    assert.ok(r.events.L30 && r.events.L30.day <= 4, `Lv 30 ${JSON.stringify(r.events.L30)}`);
-    assert.ok(r.events.B3 && r.events.B3.day <= 4, `Boss 3 ${JSON.stringify(r.events.B3)}`);
-  });
+  test("Typical: every milestone within 15%", () => assertMilestones("typical", typical, "L100"));
+  test("Casual: every milestone within 15%", () => assertMilestones("casual", casual, "L100"));
 
   test("deterministic: the same seed gives the same milestones", () => {
-    const again = simPersona(PERSONAS.solo, { days: 2, seed: 1 });
-    for (const k of Object.keys(again.events)) assert.deepEqual(again.events[k], r.events[k], k);
+    const again = simPersona(PERSONAS.typical, { days: 2, seed: 1 });
+    for (const k of Object.keys(again.events)) assert.deepEqual(again.events[k], typical.events[k], k);
+  });
+
+  test("real autopilot gear (Typical's): no crashes, at most 3 cups an hour, kill pace near the reference kit", () => {
+    const rows = sweep({ kits: ["auto"], ticks: 3600, seed: 1, gear: rec.done() });
+    const bad = rows.filter((r) => r.crashesH > 0 || r.cupsH > SWEEP_TARGET.cups);
+    assert.deepEqual(bad.map((r) => `${r.mapId} ${r.cls}: ${r.crashesH} crashes ${r.cupsH} cups`), []);
+    const [lo, hi] = SWEEP_TARGET.auto;
+    const pace = rows.filter((r) => r.xkpm < lo || r.xkpm > hi);
+    assert.deepEqual(pace.map((r) => `${r.mapId} ${r.cls}: ${r.xkpm.toFixed(1)}`), []);
+    const mean = rows.reduce((a, r) => a + r.xkpm, 0) / rows.length;
+    assert.ok(mean >= 14.5 && mean <= 17.5, `mean ${mean.toFixed(1)} kills/min (reference kit: ~16)`);
   });
 });
 
-test("the always-working bot (D§12.2): day 1 within 15%, never leaves Lint Meadows", () => {
-  const b = simBot(1, { seed: 1 });
-  const L = b.levels[1];
-  assert.ok(Math.abs(L / BOT_DESIGN[1] - 1) <= 0.15, `bot Lv ${L} on day 1, design ${BOT_DESIGN[1]}`);
+describe("Solo and Heavy to Boss 3 (D§12.1)", () => {
+  for (const id of ["solo", "heavy"]) {
+    test(`${id}: every milestone up to Boss 3 within 15%`, () => {
+      const r = simPersona(PERSONAS[id], { seed: 1, until: ["B3"] });
+      assertMilestones(id, r, "B3");
+      assert.deepEqual(r.world.rt.errors, []);
+    });
+  }
+});
+
+test("the always-working bot (D§12.2): days 1 and 7 within tolerance, never leaves Lint Meadows", () => {
+  const b = simBot(7, { seed: 1 });
+  for (const d of [1, 7]) {
+    const L = b.levels[d];
+    const D = BOT_DESIGN[d];
+    assert.ok(Math.abs(L - D) <= Math.max(1, Math.round(D * 0.15)), `bot Lv ${L} on day ${d}, design ${D}`);
+  }
   assert.equal(b.world.state.herd.zone, 0);
   assert.equal(b.world.state.herd.seals, 0, "never seen: no Seals");
   assert.equal(b.world.state.heroes[0].fe, 0, "no Fresh Eyes without a credited Seal");

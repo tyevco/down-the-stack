@@ -106,7 +106,8 @@
  *            the fight in progress: text "Phase 2 · 41% HP · 64 ticks left · 3 heroes"; frac = boss HP
  * @property {BossRowVM[]} bosses   9
  * @property {null|{key:string, title:string, text:string, progress:{frac:number, text:string},
- *            locked:boolean}} backlog   "The Backlog", "Floor 12 · deepest 14", "31 / 50 kills"
+ *            locked:boolean, challenge?:ActionVM|null}} backlog   "The Backlog", "Floor 12 · deepest 14",
+ *            "31 / 50 kills"; challenge: cmd "challenge" {kind:"backlog", idx: floor} on a boss floor
  * @property {string|null} trophies   "Trophies: +3% damage and max HP"
  *
  * @typedef {Object} RosterRowVM
@@ -123,9 +124,11 @@
  *
  * @typedef {Object} RosterVM
  * @property {string} count     "12 / 30 heroes · 2 hired today (6 a day)"
+ * @property {boolean} [slim]   many heroes: one-line rows without portraits (render budget)
  * @property {Array<{key:string, name:string, rows:RosterRowVM[]}>} groups   live guilds, then "Off duty"
  * @property {{title:string, bonus:string, rows:Array<{key:string, name:string, cls:string,
- *            level:string, date:string}>, emptyText:string}} fame
+ *            level:string, date:string}>, more?:string|null, emptyText:string}} fame   rows ≤ 10;
+ *            more: "+4 more" when the Hall of Fame is longer
  *
  * @typedef {Object} DigestVM
  * @property {string} since     "Since you last looked · 2h 14m ago"
@@ -165,7 +168,7 @@ import { C, MONO, art, zoom, alpha, kids } from "./kit.js";
 import { ink, tone, portrait, openSheet, chromeCommand } from "./party.js";
 import {
   dialogTheme, dialogTokens, newUi, filterArgs, flash, actionButton, plainButton, iconButton, switchEl, tag,
-  sectionTitle, fluidBar, tabBar, footerBar, itemCard, emptyCard, stashColumn,
+  sectionTitle, fluidBar, tabBar, footerBar, itemCard, emptyCard, stashColumn, runAction,
 } from "./sheet.js";
 
 export const HERD_TABS = ["upgrades", "stash", "tracker", "bosses", "roster", "digest", "settings"];
@@ -353,9 +356,12 @@ function zoneRow(z, on, ui, t) {
 }
 
 function zoneDetail(z, tr, t) {
+  // The herd-wide totals open the column (at its foot they sat below the fold of the scroll).
+  const totals = String(tr.totals ?? "");
   return div().relative().flex_1().min_w(0).h_full()
     .child(v_flex().id(`hd-zd-${z.key}`).absolute().left(0).top(0).size_full().overflow_y_scroll()
       .child(v_flex().gap(10).pr(4)
+        .when(Boolean(totals), (e) => e.child(div().id("hd-totals").truncate().text_size(10.5).text_color(t.dim).tooltip(totals).child(totals)))
         .child(h_flex().gap(10).items_center()
           .child(div().flex_1().min_w(0).truncate().text_size(15).font_semibold().child(z.name))
           .child(div().flex_none().font_family(MONO).text_size(11).text_color(t.muted).child(`${z.kills} filed`)))
@@ -372,8 +378,7 @@ function zoneDetail(z, tr, t) {
         .child(div().text_size(11.5).text_color(t.muted).child(z.locked ? "Beat the previous zone's boss to open this frame of the Stack." : `Perk: ${z.perk}`))
         .child(sectionTitle("Bug reports", t))
         .child(h_flex().gap(8).items_start().children((z.mobs ?? []).map((m) => mobReport(m, t))))
-        .children(kids([bossReport(z.boss, t)]))
-        .child(div().text_size(10.5).text_color(t.dim).child(tr.totals ?? ""))));
+        .children(kids([bossReport(z.boss, t)]))));
 }
 
 function mobReport(m, t) {
@@ -426,7 +431,8 @@ function bossesTab(bv, env, ui, t) {
               .child(div().text_size(12.5).font_semibold().child(bl.title))
               .child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child(bl.text)))
             .child(div().w(120).flex_none().child(fluidBar(bl.progress.frac, 4, tone(C.fresh, t), alpha(t.fg.slice(0, 7), 0.12))))
-            .child(div().w(70).flex_none().text_right().font_family(MONO).text_size(10.5).text_color(t.muted).child(bl.progress.text)))))))
+            .child(div().w(70).flex_none().text_right().font_family(MONO).text_size(10.5).text_color(t.muted).child(bl.progress.text))
+            .when(Boolean(bl.challenge), (x) => x.child(actionButton("hd-ch-backlog", bl.challenge, env, ui, t, { h: 26, px: 10, size: 12, cost: false }))))))))
     .when(Boolean(bv.trophies), (e) => e.child(div().flex_none().text_size(11).text_color(t.dim).child(bv.trophies)))];
 }
 
@@ -456,9 +462,10 @@ function bossRow(b, env, ui, t) {
 function rosterTab(r, env, ui, t, calm) {
   const fame = r.fame;
   const body = v_flex().gap(4).pr(4);
+  const rowOf = r.slim ? rosterRowSlim : rosterRow;
   for (const g of r.groups ?? []) {
     body.child(sectionTitle(`${g.name} · ${g.rows.length}`, t));
-    body.children(g.rows.map((row) => rosterRow(row, env, ui, t, calm)));
+    body.children(g.rows.map((row) => rowOf(row, env, ui, t, calm)));
   }
   body.child(div().h(6))
     .child(sectionTitle(fame.title, t, div().text_size(10.5).text_color(t.muted).child(fame.bonus)))
@@ -468,6 +475,7 @@ function rosterTab(r, env, ui, t, calm) {
       .child(div().flex_none().text_size(11).text_color(t.muted).child(f.cls))
       .child(div().w(52).flex_none().font_family(MONO).text_size(11).text_color(t.fg).text_right().child(f.level))
       .child(div().w(84).flex_none().text_size(11).text_color(t.dim).text_right().child(f.date))))
+    .when(Boolean(fame.more), (e) => e.child(div().px(10).py(4).text_size(11).text_color(t.dim).child(fame.more)))
     .when((fame.rows ?? []).length === 0, (e) => e.child(div().px(10).py(6).text_size(11.5).text_color(t.dim).child(fame.emptyText)));
   return [v_flex().w_full().h_full().gap(8)
     .child(div().flex_none().text_size(11.5).text_color(t.muted).child(r.count))
@@ -492,6 +500,35 @@ function rosterRow(row, env, ui, t, calm) {
     .child(h_flex().w(64).flex_none().justify_end()
       .when(Boolean(row.retire), (e) => e.child(actionButton(`hd-ret-${row.key}`, row.retire, env, ui, t, { h: 24, px: 8, size: 11, cost: false }))))
     .child(plainButton(`hd-sheet-${row.key}`, "Sheet", t, () => openSheet(row.heroId), { h: 24, px: 8, size: 11, icon: "ui/sheet.svg", tooltip: `Open ${row.name}'s character sheet` }));
+}
+
+/**
+ * The slim roster row (RosterVM.slim, 13+ heroes): one 26 px line of about ten elements, no
+ * portrait; the stripe carries the status, the tooltip the rest.
+ */
+function rosterRowSlim(row, env, ui, t) {
+  const off = row.status === "off";
+  const r = row.retire;
+  const armed = !!r && !!r.confirm && ui.armed === r.key;
+  const retire = r
+    ? div().id(`hd-ret-${row.key}`).w(52).flex_none().text_right().text_size(11).font_medium()
+      // quiet until hovered or armed: thirty red "Retire"s would shout
+      .text_color(armed ? t.bad : t.dim).opacity(r.enabled ? 1 : 0.45)
+      .when(Boolean(r.tooltip) || armed, (e) => e.tooltip(armed ? `${r.confirm} (click again)` : r.tooltip))
+      .when(r.enabled, (e) => e.cursor_pointer().hover((s) => s.text_color(t.bad)))
+      .on_click((_e, cx) => { cx.stop_propagation(); runAction(r, env, ui, cx); })
+      .child(armed ? "Sure?" : r.label)
+    : div().w(52).flex_none();
+  return h_flex().id(`hd-${row.key}`).flex_none().h(26).pl(4).pr(4).gap(8).items_center().rounded(6)
+    .hover((s) => s.bg(t.hover))
+    .tooltip(`${row.name} · ${row.level} ${row.title} · ${row.where} · ${row.seen}`)
+    .child(div().w(3).h(16).flex_none().rounded(2).bg(tone(row.stripe, t)))
+    .child(div().w(170).flex_none().truncate().text_size(12).font_medium().text_color(off ? t.muted : t.fg).child(row.name))
+    .child(div().w(42).flex_none().font_family(MONO).text_size(10.5).text_color(t.muted).child(row.level))
+    .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(`${row.title} · ${row.where}`))
+    .child(div().w(100).flex_none().truncate().text_right().text_size(11).text_color(t.dim).child(row.seen))
+    .child(retire)
+    .child(iconButton(`hd-sheet-${row.key}`, "ui/sheet.svg", t, `Open ${row.name}'s character sheet`, () => openSheet(row.heroId), 12));
 }
 
 // ── Digest ───────────────────────────────────────────────────────────────────────────────────

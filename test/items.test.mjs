@@ -122,7 +122,9 @@ describe("rollItem: shape and affix rules", () => {
       const gold = I.rollChest(h, { raw: 7, mapTop: 20 });
       assert.equal(gold.length, 7);
       assert.ok(gold.some((x) => x.rar >= 2));
-      for (const it of gold) assert.ok(it.ilvl >= 20 && it.ilvl <= 22);
+      // map top + U{0,1,2}, lowered by the balance offset (T.loot.ilvlOffset at level 20)
+      const off = I.lootOffset(20);
+      for (const it of gold) assert.ok(it.ilvl >= 20 + off && it.ilvl <= 22 + off, `${it.ilvl}`);
       assert.equal(I.rollChest(h, { raw: 7, mapTop: 20, unreviewed: true }).length, 3);
     }
   });
@@ -144,11 +146,13 @@ describe("rollItem: shape and affix rules", () => {
 
 describe("item numbers and names (D§8.3, D§8.7)", () => {
   test("affix values: (lo + (hi - lo) roll / 99) t, 0.1 pp", () => {
-    assert.equal(I.affixValue(A.memo, 0, 1), 0.02);
-    assert.equal(I.affixValue(A.memo, 99, 1), 0.04);
-    assert.equal(I.affixValue(A.memo, 49, 3), 0.09); // 8.97% -> 9.0%
+    // balance: the offensive / economy ranges are halved (Memoized 1-2%, Async 0.25-0.5%), the
+    // defensive ones keep D§8.3 (Idempotence 1-2%): docs/BALANCE.md
+    assert.equal(I.affixValue(A.memo, 0, 1), 0.01);
+    assert.equal(I.affixValue(A.memo, 99, 1), 0.02);
+    assert.equal(I.affixValue(A.memo, 49, 3), 0.045); // 4.48% -> 4.5%
     assert.equal(I.affixValue(A.idem, 99, 2), -0.04);
-    assert.equal(I.affixValue(A.async, 50, 5), 0.038); // 3.76% -> 3.8%
+    assert.equal(I.affixValue(A.async, 50, 5), 0.019); // 1.88% -> 1.9%
   });
 
   test("itemStats", () => {
@@ -157,8 +161,8 @@ describe("item numbers and names (D§8.3, D§8.7)", () => {
     const s = I.itemStats(w);
     assert.ok(near(s.weaponDmg, 6 * F.g(50) * 1.22 * 1.15));
     assert.equal(s.armor, 0);
-    assert.deepEqual(s.affixes, { memo: 0.12, vec: 0.09 });
-    assert.deepEqual(s.stats, { dmg: 0.12, areaDmg: 0.09 });
+    assert.deepEqual(s.affixes, { memo: 0.06, vec: 0.045 });
+    assert.deepEqual(s.stats, { dmg: 0.06, areaDmg: 0.045 });
     const mug = I.itemStats(mkItem(state, "mug", 45, 0));
     assert.ok(near(mug.armor, 3 * 0.8 * F.g(45)));
     assert.ok(near(mug.coffeeHeal, 0.06));

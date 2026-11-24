@@ -6,7 +6,7 @@
 // (ActionVM, ItemVM, CardVM, ChipVM, SquashVM, StashVM). Every string is display-ready; content
 // names come from game/data.js so they match the art and the rest of the game.
 
-import { ZONES, MOBS, BOSSES } from "../../mods/mapledr/game/data.js";
+import { ZONES, MOBS, BOSSES, AFFIXES } from "../../mods/mapledr/game/data.js";
 import { RAR, action, item, cardOf, filters } from "./sheet.mjs";
 
 const C = { working: "#4CC38A", blocked: "#F2A93B", done: "#FFD447", idle: "#8A8F98", hp: "#FF5A5F", xp: "#7FE9F5", fresh: "#A9B8FF" };
@@ -83,24 +83,27 @@ function upgrades(levels, gold, autoOn = true, trophies = 3) {
 function stashItems() {
   const list = [
     item(921, { slot: "weapon", cls: "refactorer", name: "Vectorized Extract Saber of Graceful Degradation", rar: 3, ilvl: 36, ip: "741", isNew: true, delta: { text: "+4.1%", good: true }, tooltip: "Release weapon (Blades) · iLvl 36 · best on Kip (+4.1%)" }),
-    item(940, { slot: "weapon", cls: "hotfixer", name: "Monkey-Patch Knife of Rate Limiting", rar: 3, ilvl: 35, ip: "702", tooltip: "Release weapon (Patch Knives) · iLvl 35 · best on Rue (+2.7%)" }),
-    item(915, { slot: "hoodie", name: "Robust Fleece Vest", rar: 2, ilvl: 37, ip: "601", tooltip: "Beta hoodie · iLvl 37 · best on Fen (+1.6%)" }),
-    item(950, { slot: "sticker", name: "Bottomless Okayest Dev Mug", rar: 4, ilvl: 41, ip: "897", icon: "ui/slot-mug.svg", tooltip: "LTS mug · iLvl 41 · best on Juno (+5.0%)", squashable: false }),
+    item(940, { slot: "weapon", cls: "hotfixer", name: "Recursive Monkey-Patch Knife of Graceful Degradation", rar: 3, ilvl: 35, ip: "702", tooltip: "Release weapon (Patch Knives) · iLvl 35 · best on Rue (+2.7%)" }),
+    item(915, { slot: "hoodie", name: "Robust Fleece Vest", rar: 2, ilvl: 41, ip: "580", tooltip: "Beta hoodie · iLvl 41 · best on Fen (+1.6%)" }),
+    item(950, { slot: "mug", name: "Bottomless Travel Thermos", rar: 4, ilvl: 41, ip: "897", tooltip: "LTS mug · iLvl 41 · best on Juno (+5.0%)", squashable: false }),
     item(951, { slot: "hat", name: "Hazard Cone Hat", rar: 5, ilvl: 12, ip: "235", locked: true, tooltip: "Keepsake hat · iLvl 12 · from The Ignored Warning", squashable: false }),
     item(952, { slot: "hat", name: "Curly Brace Crown", rar: 5, ilvl: 23, ip: "461", locked: true, tooltip: "Keepsake hat · iLvl 23 · from The Pyramid of Doom", squashable: false }),
   ];
   const slots = ["weapon", "hat", "hoodie", "mug", "boots", "sticker"];
-  const names = { weapon: ["Here-Doc Staff", "Manpage Grimoire", "Bathtub Duck", "Extract Saber", "Monkey-Patch Knife"], hat: ["Headphones", "Thinking Cap"], hoodie: ["Zip Hoodie", "Fleece Vest"], mug: ["Chipped Mug", "Travel Thermos"], boots: ["Office Slippers", "Standing-Desk Sneakers"], sticker: ["Holo Sticker", "Die-Cut Sticker"] };
+  // tier-2 bases (iLvl 21–40) and only the affixes each slot can roll (D§8.3, D§14.7)
+  const names = { weapon: ["Here-Doc Staff", "Manpage Grimoire", "Bathtub Duck", "Extract Saber", "Monkey-Patch Knife"], hat: ["Headphones"], hoodie: ["Zip Hoodie"], mug: ["Chipped Mug"], boots: ["Office Slippers"], sticker: ["Holo Sticker"] };
   const cls = ["shellmancer", "forkbinder", "rubberducker", "refactorer", "hotfixer"];
-  const pre = ["Memoized", "Linted", "Async", "Typed", "Robust", "Vectorized"];
-  const suf = ["of Caching", "of Uptime", "of Hot Reload", "of Idempotence"];
+  const pool = (slot, kind) => AFFIXES.filter((a) => a.kind === kind && a.slots.includes(slot)).map((a) => a.name);
   for (let i = 0; i < 38; i++) {
     const slot = slots[i % 6];
     const nm = names[slot][i % names[slot].length];
     const rar = [0, 1, 1, 2, 0, 1, 2, 3][i % 8];
-    const ilvl = 28 + (i * 5) % 14;
-    const name = rar === 0 ? nm : rar === 1 ? `${pre[i % 6]} ${nm}` : `${pre[(i + 2) % 6]} ${nm} ${suf[i % 4]}`;
-    list.push(item(960 + i, { slot, cls: slot === "weapon" ? cls[i % 5] : undefined, name, rar, ilvl, pol: i % 7 === 3 ? 2 : 0,
+    const ilvl = 28 + (i * 5) % 13;
+    const pre = pool(slot, "prefix");
+    const suf = pool(slot, "suffix");
+    const name = rar === 0 ? nm : rar === 1 ? `${pre[i % pre.length]} ${nm}` : `${pre[(i + 2) % pre.length]} ${nm} ${suf[i % suf.length]}`;
+    const pol = i % 7 === 3 ? 2 : 0;
+    list.push(item(960 + i, { slot, cls: slot === "weapon" ? cls[i % 5] : undefined, name: pol ? `${name} +${pol}` : name, rar, ilvl, pol,
       ip: String(Math.round(10 * ilvl * [1, 1.1, 1.22, 1.36][rar] * (1 + 0.08 * rar))), locked: i % 13 === 5, usable: i % 9 !== 4,
       isNew: i % 11 === 2, tooltip: `${["Prototype", "Alpha", "Beta", "Release"][rar]} ${slot} · iLvl ${ilvl}` }));
   }
@@ -112,7 +115,7 @@ function herdStash(f = {}, o = {}) {
   const slotOf = (it) => (it.icon.startsWith("gear/weapon") ? "weapon" : it.icon.replace(/^ui\/slot-|\.svg$/g, ""));
   const items = all.filter((it) => (!f.slot || f.slot === "all" || slotOf(it) === f.slot) && it.rar >= (f.minRar ?? 0) && (!f.usable || it.usable));
   const picked = (f.squash ?? []).slice();
-  const focus = f.focus ?? null;
+  const focus = all.some((x) => x.uid === f.focus) ? f.focus : null; // a focus on a missing item shows no card
   let card = null;
   if (focus === 921) {
     card = cardOf(all.find((x) => x.uid === 921), {
@@ -133,7 +136,7 @@ function herdStash(f = {}, o = {}) {
   } else if (focus === 951) {
     card = cardOf(all.find((x) => x.uid === 951), {
       sub: "Keepsake hat · iLvl 12 · req Lv 9", stat: "Armor 18",
-      affixes: [{ key: "951:0", text: "+3.4% crit chance", reroll: null }, { key: "951:1", text: "+5.2% max HP", reroll: null }, { key: "951:2", text: "+1.6% XP", reroll: null }],
+      affixes: [{ key: "951:0", text: "+1.4% crit chance", reroll: null }, { key: "951:1", text: "+5.2% max HP", reroll: null }, { key: "951:2", text: "+1.6% XP", reroll: null }],
       prop: { name: "Hazard Cone Hat", text: "+5% crit chance, +5% XP" }, polish: "Polish +0 of +12",
       flavor: "From The Ignored Warning. Yellow since the first commit.", owner: "Nobody wears it: heroes outlevelled it",
       actions: [
@@ -236,7 +239,7 @@ function bosses(o = {}) {
       frac: 0.41, retreat: action("retreat", "Retreat", "retreat", {}, { tone: "danger", confirm: "Retreat? (a Postmortem)", tooltip: "End the fight as a Postmortem: Wounds and Lessons are kept" }),
     } : null,
     bosses: rows,
-    backlog: { key: "backlog", title: "The Backlog", text: "Opens after The Heisenbug is fixed: endless floors, no leaderboards.", progress: { frac: 0, text: "—" }, locked: true },
+    backlog: { key: "backlog", title: "The Backlog", text: "Opens after The Heisenbug is fixed: endless floors, no leaderboards.", progress: { frac: 0, text: "—" }, locked: true, challenge: null },
     trophies: "Trophies: +3% damage and max HP for every hero (one per boss fixed)",
   };
 }
@@ -257,7 +260,7 @@ function rr(id, o) {
 
 function roster() {
   return {
-    count: "9 / 30 heroes · 1 hired today (6 a day)",
+    count: "9 / 30 heroes · 1 hired today (6 a day)", slim: false,
     groups: [
       { key: "g:herdr-app", name: "herdr-app", rows: [
         rr(1, { name: "Kip the Idempotent", level: 34, title: "Senior Refactorer", where: "4-1 Fast-Forward Ford", seen: "working 12m" }),
@@ -281,6 +284,7 @@ function roster() {
         { key: "f:1", name: "Lin the Patient", cls: "Staff Refactorer", level: "Lv 64", date: "Oct 30, 2026" },
         { key: "f:2", name: "Oskar Off-By-One", cls: "Senior Hotfixer", level: "Lv 38", date: "Nov 12, 2026" },
       ],
+      more: null,
       emptyText: "Heroes retired at Lv 30+ rest here and add +0.5% herd XP each.",
     },
   };
@@ -301,8 +305,8 @@ function digest(empty = false) {
       ] },
       { key: "drops", title: "Release or better", icon: "ui/slot-weapon.svg", lines: [
         line("d:921", "Vectorized Extract Saber of Graceful Degradation", "Kip · Release", RAR[3], null, true),
-        line("d:950", "Bottomless Okayest Dev Mug", "Mira · LTS", RAR[4], null, true),
-        line("d:940", "Monkey-Patch Knife of Rate Limiting", "Fen · Release", RAR[3], null, true),
+        line("d:950", "Bottomless Travel Thermos", "Mira · LTS", RAR[4], null, true),
+        line("d:940", "Recursive Monkey-Patch Knife of Graceful Degradation", "Fen · Release", RAR[3], null, true),
       ] },
       { key: "bosses", title: "Bosses", icon: "ui/boss.svg", lines: [
         line("b:2", "The Catastrophic Backtracker: FIXED", "Kip, Rue, Mira · 118 ticks", C.working),
@@ -435,4 +439,10 @@ export function nextTick(vm) {
   if (out.bosses?.fight) out.bosses.fight.frac = Math.max(0, out.bosses.fight.frac - 0.02);
   if (out.tracker) for (const z of out.tracker.zones) if (!z.locked) z.progress.frac = Math.min(1, z.progress.frac + 0.001);
   return out;
+}
+
+// Previews of real demo worlds through game/view.js herdView and the role (see sheet.mjs):
+//   node --import ./tools/mock/register.mjs tools/vm-samples/herd.mjs --views [--all] [--only kind] [--tab stash]
+if (typeof process !== "undefined" && process.argv[1] && /vm-samples[\\/]herd\.mjs$/.test(process.argv[1]) && process.argv.includes("--views")) {
+  import("./sheet.mjs").then((m) => m.shootDialogViews("herd", process.argv.slice(2))).catch((e) => { console.error(e); process.exit(1); });
 }

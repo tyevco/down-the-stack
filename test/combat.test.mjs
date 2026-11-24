@@ -8,6 +8,7 @@ import * as H from "../mods/mapledr/game/heroes.js";
 import * as C from "../mods/mapledr/game/combat.js";
 import { encodeState } from "../mods/mapledr/game/save.js";
 import { makeWorld, makeEv, stepWorld, heroOf, liveOf } from "./helpers/engine.mjs";
+import { fullRefKit, sweep, SWEEP_CLASSES } from "../tools/pacing-sim.mjs";
 
 const CLS5 = ["refactorer", "hotfixer", "shellmancer", "forkbinder", "rubberducker"];
 const { makeMob } = C._internal;
@@ -101,7 +102,8 @@ describe("kill pace (D§5.5: 14-19 kills/min on-level, reference kit)", () => {
   };
   const TICKS = 1800;
   function kpm(cls, L, seed) {
-    const w = makeWorld({ seed, heroes: [{ cls, L, mapId: testMap(L) }] });
+    const w = makeWorld({ seed, heroes: [{ cls, L, mapId: testMap(L), kit: "none" }] });
+    fullRefKit(w.state, heroOf(w, 1)); // D§5.2 complete (the affix ranges were halved: docs/BALANCE.md)
     farm(w, null, TICKS);
     const live = liveOf(w, 1);
     return { kpm: live.tally.kills / (TICKS / 60), crashes: live.tally.crashes, cups: live.tally.cups };
@@ -124,6 +126,28 @@ describe("kill pace (D§5.5: 14-19 kills/min on-level, reference kit)", () => {
       });
     });
   }
+});
+
+describe("sustain sweep: every real map x class at on-level, reference kit (D§4.3, D§5.5, D§5.6)", () => {
+  // tools/pacing-sim.mjs sweep: one working hour per case (Backlog: the floor autopilot picks);
+  // kill pace counted in on-level kills (kill XP / (mobXP(map mid) x gap)), so swarm halves and
+  // tanky mobs count by what they pay; `npm run pacing -- --sweep` prints the table and also runs
+  // real autopilot gear
+  const rows = sweep({ kits: ["ref"], ticks: 3600, seed: 1 });
+  test("133 cases: 27 maps x 5 classes, the Intern on zone 1, the Backlog", () => {
+    assert.equal(rows.length, 27 * 5 - 2 * 5 + 3 + 5);
+    assert.deepEqual([...new Set(rows.map((r) => r.cls))].sort(), ["intern", ...SWEEP_CLASSES].sort());
+  });
+  test("0 crashes and at most 3 cups per on-level hour", () => {
+    const bad = rows.filter((r) => r.crashesH > 0 || r.cupsH > 3);
+    assert.deepEqual(bad.map((r) => `${r.mapId} ${r.cls}: ${r.crashesH} crashes ${r.cupsH} cups`), []);
+  });
+  test("14-19 on-level kills a minute", () => {
+    const bad = rows.filter((r) => r.xkpm < 14 || r.xkpm > 19);
+    assert.deepEqual(bad.map((r) => `${r.mapId} ${r.cls}: ${r.xkpm.toFixed(1)}`), []);
+    const mean = rows.reduce((a, r) => a + r.xkpm, 0) / rows.length;
+    assert.ok(mean >= 15 && mean <= 17, `mean ${mean.toFixed(2)} (D§5.5: about 15.5)`);
+  });
 });
 
 describe("numbers add up", () => {
@@ -178,7 +202,7 @@ describe("numbers add up", () => {
 });
 
 describe("lane rules (D§5.5)", () => {
-  test("spawn at the right edge, arrive next tick, advance step engages, first swing on first hit", () => {
+  test("spawn at the right edge, arrive next tick, advance step engages, first swing the tick after the first landed hit", () => {
     const w = makeWorld({ seed: 2, heroes: [{ cls: "refactorer", L: 20, mapId: testMap(20) }] });
     const live = liveOf(w, 1);
     const ev = makeEv();
@@ -191,10 +215,29 @@ describe("lane rules (D§5.5)", () => {
     assert.equal(live.engagedUid, live.lane[0].uid);
     assert.equal(live.tally.actions, 0);
     const hp = live.lane[0].hp;
-    stepWorld(w, ev, 1); // ct 3: first action, first swing
+    stepWorld(w, ev, 1); // ct 3: first action lands; the mob reels (balance: T.lane.firstSwingDelay)
     assert.equal(live.tally.actions, 1);
     assert.ok(live.lane.length === 3 || live.lane[0].hp < hp);
-    assert.equal(live.lane.find((m) => m.uid === live.engagedUid)?.traits.swing ?? 3, 3);
+    const tgt = () => live.lane.find((m) => m.uid === live.engagedUid);
+    if (tgt()) {
+      assert.equal(tgt().traits.swing, 0, "no swing on the first hit");
+      assert.equal(tgt().swingTick, 3 + D.TUNING.lane.firstSwingDelay);
+      stepWorld(w, ev, 1); // ct 4: first swing
+      if (tgt()) assert.equal(tgt().traits.swing, 4);
+    }
+  });
+
+  test("a hit that does not land (403 pending, 404 phaser) does not start the swing timer", () => {
+    const w = makeWorld({ seed: 3, heroes: [{ cls: "refactorer", L: 20, mapId: "1-1" }] });
+    const live = liveOf(w, 1);
+    const lane = setLane(w, 1, [{ hp: 1e9, atk: 50, traits: { phaser: 1 } }, { hp: 1e9, atk: 0 }, { hp: 1e9, atk: 0 }]);
+    live.engagedUid = lane[0].uid;
+    stepWorld(w, null, 6);
+    assert.equal(lane[0].swingTick, 0);
+    assert.equal(tal(live).taken, 0, "a mob nobody has touched yet does not swing");
+    lane[0].traits.phaser = 0;
+    stepWorld(w, null, 3);
+    assert.ok(lane[0].swingTick > 0 && tal(live).taken > 0);
   });
 
   test("slow mobs swing every 3rd tick, fast every tick, others every 2nd", () => {
@@ -287,20 +330,24 @@ describe("traits (D§9.4)", () => {
     assert.ok(b.live.hp > b.live.maxHp * 0.6);
   });
 
-  test("pending: invulnerable (403) for its first 2 engaged ticks", () => {
-    const { w, lane, ev } = lab("hotfixer", [{ id: "promise_wisp", hp: 1e6, atk: 0 }, { hp: 1e9, atk: 0 }, { hp: 1e9, atk: 0 }]);
+  test("pending: invulnerable (403) for its first 2 ticks in the lane, engaged or not (balance: D§9.4 says engaged)", () => {
+    const { w, lane, ev } = lab("hotfixer", [{ id: "promise_wisp", hp: 1e6, atk: 0 }, { id: "promise_wisp", hp: 1e6, atk: 0 }, { hp: 1e9, atk: 0 }]);
     const hp0 = lane[0].hp;
     stepWorld(w, ev, 1);
     stepWorld(w, ev, 1);
     assert.equal(lane[0].hp, hp0);
+    assert.equal(lane[1].hp, hp0, "a queued Wisp is still pending too");
     assert.ok(ev.fxOf("inv").some((f) => f.mobUid === lane[0].uid && f.text === "403"));
+    assert.equal(lane[1].traits.pending, 0, "and it resolved while it waited");
     stepWorld(w, ev, 1);
     assert.ok(lane[0].hp < hp0);
   });
 
   test("leech: heals a share of the damage it deals", () => {
     // every hero hit phases through (phaser 1), so the leech's HP moves only by its own heals
-    const { w, lane, live } = lab("rubberducker", [{ id: "diff_leech", hp: 1e6, atk: 50, traits: { phaser: 1 } }, { hp: 1e9, atk: 0 }, { hp: 1e9, atk: 0 }]);
+    const { w, lane, live } = lab("rubberducker", [{ id: "diff_leech", hp: 1e6, atk: 50 }, { hp: 1e9, atk: 0 }, { hp: 1e9, atk: 0 }]);
+    stepWorld(w, null, 1); // a first hit lands: the swing timer starts (combat: first landed hit)
+    lane[0].traits.phaser = 1;
     lane[0].hp = 5e5;
     let healed = 0;
     for (let t = 0; t < 10; t++) {
@@ -353,13 +400,51 @@ describe("traits (D§9.4)", () => {
     assert.ok(Math.abs(slime.traits.grow - 0.6) < 1e-9);
   });
 
-  test("thorns: melee heroes take a share of their damage back; ranged classes are immune", () => {
+  test("thorns: melee heroes take a share of their damage back; ranged classes and summoners are immune", () => {
     const melee = lab("refactorer", [{ id: "version_pin_porcupine", hp: 1e9, atk: 0 }, { hp: 1e9, atk: 0 }, { hp: 1e9, atk: 0 }]);
     stepWorld(melee.w, null, 4);
     assert.ok(melee.live.tally.taken > 0);
-    const ranged = lab("shellmancer", [{ id: "version_pin_porcupine", hp: 1e9, atk: 0 }, { hp: 1e9, atk: 0 }, { hp: 1e9, atk: 0 }]);
-    stepWorld(ranged.w, null, 4);
-    assert.equal(ranged.live.tally.taken, 0);
+    for (const cls of ["shellmancer", "forkbinder"]) {
+      const imm = lab(cls, [{ id: "version_pin_porcupine", hp: 1e9, atk: 0 }, { hp: 1e9, atk: 0 }, { hp: 1e9, atk: 0 }]);
+      stepWorld(imm.w, null, 4);
+      assert.equal(imm.live.tally.taken, 0, cls);
+    }
+  });
+
+  test("thorns go through DR and damage-taken modifiers, at most capPerTick of max HP a tick (D§9.4, balance)", () => {
+    const { w, live, hero } = lab("hotfixer", [{ id: "version_pin_porcupine", hp: 1e12, atk: 0 }, { hp: 1e12, atk: 0 }, { hp: 1e12, atk: 0 }], { L: 54 });
+    const per = [];
+    let dealt = 0;
+    for (let t = 0; t < 12; t++) {
+      const taken = tal(live).taken;
+      const d0 = tal(live).dealt;
+      live.hp = live.maxHp; // no coffee, no crash in the way
+      stepWorld(w, null, 1);
+      per.push(tal(live).taken - taken);
+      dealt += tal(live).dealt - d0;
+    }
+    const cap = Math.round(D.TRAITS.thorns.capPerTick * live.maxHp);
+    assert.ok(per.every((x) => x <= cap), `per tick ${per} > cap ${cap}`);
+    const p = D.MOB_BY_ID.version_pin_porcupine.thorns;
+    assert.ok(per.reduce((a, x) => a + x, 0) < p * dealt * 0.9, "reflect is reduced by DR");
+    // Stealth Commit (untargetable) also stops the spikes
+    const st = lab("hotfixer", [{ id: "version_pin_porcupine", hp: 1e12, atk: 0 }, { hp: 1e12, atk: 0 }, { hp: 1e12, atk: 0 }], { L: 54 });
+    C.addBuff(st.live, "stealth_commit", 50, { crit: true, untargetable: true });
+    stepWorld(st.w, null, 5);
+    assert.equal(tal(st.live).taken, 0);
+    assert.ok(hero.st.dodges >= 0);
+  });
+
+  test("summons and Forklings never trigger thorns", () => {
+    const { w, live, lane } = lab("refactorer", [{ id: "version_pin_porcupine", hp: 1e12, atk: 0 }, { hp: 1e12, atk: 0 }, { hp: 1e12, atk: 0 }], { L: 54 });
+    live.state = "supervising";
+    live.status = "idle";
+    live.forklings = [{ address: "f1", status: "working" }, { address: "f2", status: "working" }];
+    const hp0 = lane[0].hp;
+    // odd ticks of a Supervising hero: only Forklings hit
+    stepWorld(w, null, 1);
+    assert.ok(lane[0].hp < hp0, "the Forklings hit");
+    assert.equal(tal(live).taken, 0, "and nobody was pricked");
   });
 
   test("ranged: also swings from the second lane position every 3rd tick", () => {
@@ -401,7 +486,7 @@ describe("traits (D§9.4)", () => {
     assert.equal(tank.maxHp, F.mobHP(10, 1.6));
     const elite = makeMob(w.rt, D.MOB_BY_ID.typo_sprout, 10, { arriveTick: 0, elite: true });
     assert.equal(elite.maxHp, F.mobHP(10, 3));
-    assert.equal(elite.atk, F.mobATK(10, 1.5));
+    assert.equal(elite.atk, F.mobATK(10, D.MOB_BY_ID.typo_sprout.atk * 1.5));
     const duck = makeMob(w.rt, D.MOB_BY_ID.holo_duck, 10, { arriveTick: 0, holo: true });
     assert.equal(duck.maxHp, F.mobHP(10, 4));
     assert.equal(duck.atk, 0);
@@ -613,6 +698,7 @@ describe("coffee, crashes, rest (D§5.6, D§2.2)", () => {
     const live = liveOf(w, 1);
     const h = heroOf(w, 1);
     live.engagedUid = lane[0].uid;
+    lane[0].swingTick = 1; // swings on the hero's first tick
     h.cups = 0;
     stepWorld(w, null, 1);
     assert.ok(live.crashedUntil > 0);

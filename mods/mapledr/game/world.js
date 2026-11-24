@@ -251,18 +251,19 @@ export function tick(world, snap) {
   if (!Number.isFinite(now)) return { advanced: false, ticks: 0 };
   rt.nowMs = now;
   const dt = now - (herd.lastMs || 0);
-  if (dt < 0) {
-    rt.clockBehind = true;
-    if (-dt > RESYNC_MS && !rt.readOnly) {
-      herd.lastMs = now;
-      rt.dirty = true;
-    }
+  // a clock behind the last tick: nothing accrues until it passes it again, but the snapshot is
+  // still reconciled (zero steps) so statuses, bindings and chests seen stay live on the stage; a
+  // jump back of more than an hour resyncs instead (lastMs follows the clock, no accrual)
+  const behind = dt < 0;
+  rt.clockBehind = behind;
+  if (behind && -dt > RESYNC_MS && !rt.readOnly) {
+    herd.lastMs = now;
+    rt.dirty = true;
     return { advanced: false, ticks: 0 };
   }
-  rt.clockBehind = false;
-  const offline = dt > T.offlineGapSec * 1000;
-  let steps = offline ? 0 : Math.min(T.maxCatchUpTicks, Math.round(dt / T.tickMs));
-  if (!offline && steps <= 0) return { advanced: false, ticks: 0 };
+  const offline = !behind && dt > T.offlineGapSec * 1000;
+  let steps = behind || offline ? 0 : Math.min(T.maxCatchUpTicks, Math.round(dt / T.tickMs));
+  if (!behind && !offline && steps <= 0) return { advanced: false, ticks: 0 };
   if (rt.readOnly) steps = 0;
 
   const ev = makeEmitter(world);
@@ -270,10 +271,14 @@ export function tick(world, snap) {
   const bindBefore = bindKey(rt);
   if (rt.bossSeen == null) rt.bossSeen = (herd.bossKills || []).slice();
   if (rt.zoneSeen == null) rt.zoneSeen = herd.zone || 0;
+  // the local time zone, for the views' dates and clock times (game/view/panels.js)
+  if (Number.isFinite(s.tzOffsetMin)) rt.tzOffsetMin = s.tzOffsetMin;
 
-  if (!rt.readOnly) {
+  if (!rt.readOnly && !behind) {
     const day = localDay(now, s.tzOffsetMin);
     if (day > (herd.day || 0)) herd.day = day; // the Daily Shift resets lazily per hero (agents.shiftToday)
+    // the herd's first day (herd.herdAgeDays); a save from before herd.born counts from its oldest hero
+    if (!(herd.born > 0)) herd.born = (herd.day || day) - H.herdAgeDays(state) + 1;
     if (offline) applyOffline(world, dt, ev);
     herd.lastMs = offline || steps >= T.maxCatchUpTicks ? now : herd.lastMs + steps * T.tickMs;
   }
@@ -282,6 +287,11 @@ export function tick(world, snap) {
   guard(world, "reconcile", () => A.reconcile(world, s, ev));
   ev.flush();
   for (let k = 0; k < steps; k++) stepOnce(world, s, ev);
+  // chest items wait in herd.inbox and one is offered per callback, however many steps ran
+  if (steps > 0 && state.herd.inbox) {
+    guard(world, "drainInbox", () => A.drainInbox(world, ev));
+    ev.flush();
+  }
 
   // expire effects, notes and the banner (an expiry is a visible change too: on an idle stage a
   // note or banner must not linger until the next minute's version bump)
@@ -292,7 +302,7 @@ export function tick(world, snap) {
   const expired = rt.fx.length + rt.notes.length + (rt.banner ? 1 : 0) !== shown;
 
   const visible = ev.visible || expired || steps > 0 && (rt.live.size > 0 || rt.fights.length > 0 || herd.tick % 60 < steps) ||
-    offline || bindKey(rt) !== bindBefore;
+    offline || behind && rt.live.size > 0 || bindKey(rt) !== bindBefore;
   if (visible && rt.version === versionBefore) rt.version++;
   if (!rt.readOnly) rt.dirty = true;
   return { advanced: true, ticks: steps };
@@ -815,7 +825,7 @@ const COMMANDS = {
 
   // not in ARCHITECTURE §3.5: the Herd panel's Digest tab clears the dot (D§10.7)
   digestSeen(world, a, now) {
-    world.state.herd.digestAt = now;
+    H.digestMark(world.state, now); // herd.digestAt = now, plus the snapshot the next digest diffs against
     world.rt.digestDot = false;
     return { ok: true };
   },

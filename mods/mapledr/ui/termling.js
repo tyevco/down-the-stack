@@ -15,7 +15,7 @@
 //
 // Element economy matters (the stage budget is 400 elements for 12 heroes): the body div is the
 // rig's root and every part is its absolute child, so a full hero is 12 elements (13 with a
-// tier-5 weapon edge). Children are placed in the body's padding box, which starts inside its
+// tier-5 weapon edge, 14 with a pin banner). Children are placed in the body's padding box, which starts inside its
 // 2 px border; `inner()` converts rig coordinates to that box.
 
 import { div, svg, image } from "gpui-kit";
@@ -128,6 +128,10 @@ export function renderTermling(hero, env, o = {}) {
       body.child(svg(art(`gear/weapon-${wcls}-edge.svg`)).absolute().left(ix(35)).top(iy(15)).w(u(16)).h(u(16))
         .text_color(EDGE_CYAN));
     }
+  }
+  // Pinned (D§2.8): a small banner on the hero's back, its pole behind the left shoulder.
+  if (hero.pinned && !o.lean) {
+    body.child(image(art("fx/banner.svg")).absolute().left(ix(-8)).top(iy(-8)).w(u(8)).h(u(12)));
   }
   const tier = hero.hat?.tier;
   if (tier >= 1 && tier <= 5) {

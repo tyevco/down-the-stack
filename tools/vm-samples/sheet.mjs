@@ -7,6 +7,8 @@
 // `uiStates[name]` is the role's UI state a scenario is meant to be seen with (selection, squash
 // picking); `widths` the dialog width; `nextTick(vm)` the same VM a tick later (ids stay stable).
 
+import { AFFIXES } from "../../mods/mapledr/game/data.js";
+
 export const RAR = ["#A0A4AB", "#5BD16A", "#4EA3FF", "#B36BFF", "#FF9A2E", "#FF7AA8"];
 export const RAR_NAME = ["Prototype", "Alpha", "Beta", "Release", "LTS", "Keepsake"];
 const C = { working: "#4CC38A", blocked: "#F2A93B", done: "#FFD447", idle: "#8A8F98", hp: "#FF5A5F", xp: "#7FE9F5", fresh: "#A9B8FF" };
@@ -116,22 +118,22 @@ const kipEq = {
 function kipStash(f) {
   const all = [
     item(921, { slot: "weapon", cls: "refactorer", name: "Vectorized Extract Saber of Graceful Degradation", rar: 3, ilvl: 36, ip: "741", delta: good("+4.1%"), isNew: true }),
-    item(915, { slot: "hoodie", name: "Robust Fleece Vest", rar: 2, ilvl: 37, ip: "601", delta: good("+1.6%"), usable: false, tooltip: "Beta hoodie · iLvl 37 · req Lv 34 · IP 601" }),
+    item(915, { slot: "hoodie", name: "Robust Fleece Vest", rar: 2, ilvl: 41, ip: "580", delta: good("+1.6%"), usable: false, tooltip: "Beta hoodie · iLvl 41 · req Lv 38 · IP 580" }),
     item(931, { slot: "hat", name: "Linted Headphones", rar: 2, ilvl: 34, ip: "498", delta: bad("−0.8%") }),
     item(907, { slot: "mug", name: "Chipped Mug of Hot Reload", rar: 1, ilvl: 33, ip: "399", delta: bad("−1.1%") }),
     item(905, { slot: "boots", name: "Async Office Slippers", rar: 1, ilvl: 32, ip: "380", delta: bad("−6.4%") }),
     item(912, { slot: "sticker", name: "Optimized Holo Sticker", rar: 1, ilvl: 30, ip: "356", delta: bad("−9.0%") }),
-    item(940, { slot: "weapon", cls: "hotfixer", name: "Monkey-Patch Knife of Rate Limiting", rar: 3, ilvl: 35, ip: "702", usable: false, tooltip: "Release weapon (Patch Knives) · iLvl 35 · a Hotfixer's" }),
-    item(941, { slot: "weapon", cls: "shellmancer", name: "Here-Doc Staff", rar: 2, ilvl: 34, ip: "546", usable: false, tooltip: "Beta weapon (Pipes) · iLvl 34 · a Shellmancer's" }),
+    item(940, { slot: "weapon", cls: "hotfixer", name: "Recursive Monkey-Patch Knife of Graceful Degradation", rar: 3, ilvl: 35, ip: "702", usable: false, tooltip: "Release weapon (Patch Knives) · iLvl 35 · a Hotfixer's" }),
+    item(941, { slot: "weapon", cls: "shellmancer", name: "Memoized Here-Doc Staff", rar: 2, ilvl: 34, ip: "546", usable: false, tooltip: "Beta weapon (Pipes) · iLvl 34 · a Shellmancer's" }),
     item(942, { slot: "weapon", cls: "rubberducker", name: "Memoized Bathtub Duck", rar: 1, ilvl: 33, ip: "421", usable: false, tooltip: "Alpha weapon (Ducks) · iLvl 33 · a Rubberducker's" }),
     item(908, { slot: "hoodie", name: "Zip Hoodie of Idempotence", rar: 1, ilvl: 31, ip: "394", delta: bad("−7.7%") }),
     item(909, { slot: "hat", name: "Headphones", rar: 0, ilvl: 33, ip: "330", delta: bad("−4.2%") }),
     item(910, { slot: "boots", name: "Office Slippers", rar: 0, ilvl: 34, ip: "340", delta: bad("−5.9%") }),
     item(911, { slot: "mug", name: "Chipped Mug", rar: 0, ilvl: 32, ip: "320", delta: bad("−2.3%") }),
-    item(913, { slot: "boots", name: "Robust Office Slippers", rar: 1, ilvl: 35, ip: "415", delta: bad("−5.2%") }),
-    item(914, { slot: "sticker", name: "Vinyl Sticker of Tab Completion", rar: 1, ilvl: 22, ip: "261", delta: bad("−11.4%") }),
+    item(913, { slot: "boots", name: "Typed Office Slippers", rar: 1, ilvl: 35, ip: "415", delta: bad("−5.2%") }),
+    item(914, { slot: "sticker", name: "Holo Sticker of Tab Completion", rar: 1, ilvl: 22, ip: "261", delta: bad("−11.4%") }),
     item(916, { slot: "hat", name: "Thinking Cap", rar: 0, ilvl: 41, ip: "410", usable: false, delta: null, tooltip: "Prototype hat · iLvl 41 · req Lv 38" }),
-    item(917, { slot: "mug", name: "Okayest Dev Mug of Uptime", rar: 1, ilvl: 29, ip: "355", delta: bad("−3.0%"), locked: true, squashable: false }),
+    item(917, { slot: "mug", name: "Chipped Mug of Uptime", rar: 1, ilvl: 29, ip: "355", delta: bad("−3.0%"), locked: true, squashable: false }),
     item(918, { slot: "hoodie", name: "Swag Tee", rar: 0, ilvl: 18, ip: "180", delta: bad("−12.8%") }),
   ];
   return stash(all, f, { count: "86 / 120", fill: 86 / 120 });
@@ -486,7 +488,8 @@ function adaGear(f = {}) {
     hat: item(2002, { slot: "hat", name: "Uncertainty Lens +12", rar: 5, ilvl: 100, ip: "6,431", pol: 12, locked: true, squashable: false }),
     hoodie: item(2003, { slot: "hoodie", name: "Infinite-Pocket Parka of Prod +10", rar: 4, ilvl: 104, ip: "5,898", pol: 10, squashable: false }),
     mug: item(2004, { slot: "mug", name: "Lockfile Mug +12", rar: 5, ilvl: 100, ip: "6,431", pol: 12, locked: true, squashable: false }),
-    boots: item(2005, { slot: "boots", name: "Async Treads of Uptime of Rate Limiting +9", rar: 3, ilvl: 106, ip: "4,890", pol: 9, squashable: false }),
+    // "Treads of Uptime" is the tier-5 boots base (not an "of Uptime" suffix, which boots never roll)
+    boots: item(2005, { slot: "boots", name: "Typed Treads of Uptime +7", rar: 2, ilvl: 106, ip: "4,520", pol: 7, squashable: false }),
     sticker: item(2006, { slot: "sticker", name: "Microservice Badge +12", rar: 5, ilvl: 100, ip: "6,431", pol: 12, locked: true, squashable: false }),
   };
   const names = [
@@ -494,8 +497,8 @@ function adaGear(f = {}) {
     ["boots", "Treads of Uptime"], ["sticker", "Conference Badge"], ["weapon", "The Midnight Patch", "hotfixer"], ["weapon", "The Init Scripture", "forkbinder"],
     ["weapon", "The Clean Slate", "refactorer"], ["weapon", "The Duck Who Knew", "rubberducker"],
   ];
-  const pre = ["Memoized", "Linted", "Optimized", "Async", "Typed", "Robust", "Vectorized", "Blameless"];
-  const suf = ["of Caching", "of Uptime", "of Hot Reload", "of Idempotence", "of Tab Completion", "of the Green Build"];
+  // affixes a slot can roll (D§8.3), so every generated name is one items.itemName could produce
+  const pool = (slot, kind) => AFFIXES.filter((a) => a.kind === kind && a.slots.includes(slot)).map((a) => a.name);
   const all = [
     item(2101, { slot: "weapon", cls: "shellmancer", name: "Ten-X Keys Staff of Pure Functions", rar: 4, ilvl: 108, ip: "6,104", delta: bad("−2.2%"), isNew: true, squashable: false }),
   ];
@@ -504,6 +507,8 @@ function adaGear(f = {}) {
     const rar = [2, 3, 1, 2, 3, 2, 4, 1][i % 8];
     const ilvl = 100 + (i * 7) % 16;
     const usable = !cls || cls === "shellmancer";
+    const pre = pool(slot, "prefix");
+    const suf = pool(slot, "suffix");
     const nm = rar === 1 ? `${pre[i % pre.length]} ${b}` : rar === 4 ? `Hot-Reloading ${b}` : `${pre[(i + 3) % pre.length]} ${b} ${suf[i % suf.length]}`;
     all.push(item(2110 + i, { slot, cls, name: nm, rar, ilvl, ip: (Math.round(10 * ilvl * [1, 1.1, 1.22, 1.36, 1.52][rar] * (1 + 0.08 * [0, 1, 2, 3, 4][rar]))).toLocaleString("en-US"),
       usable, delta: usable ? bad(`−${(3 + (i * 13) % 40 / 4).toFixed(1)}%`) : null, locked: i % 11 === 4 }));
@@ -513,7 +518,7 @@ function adaGear(f = {}) {
   return {
     slots: slotsOf(eq, ADA),
     card: f.focus === 2101 ? cardOf(lts, {
-      sub: "LTS weapon · iLvl 108 · req Lv 105", stat: "Weapon damage 14,102",
+      sub: "LTS weapon · iLvl 108 · req Lv 100", stat: "Weapon damage 14,102",
       affixes: [
         { key: "2101:0", text: "+18.4% damage", reroll: rr(0) },
         { key: "2101:1", text: "+9.0% crit chance", reroll: rr(1) },
@@ -705,4 +710,77 @@ export function nextTick(vm) {
   for (const b of out.header.buffs) b.text = b.text.replace(/(\d+)s$/, (m, n) => `${Math.max(1, n - 1)}s`);
   if (out.gear) for (const it of out.gear.stash.items) if (it.delta) it.delta.text = it.delta.text.replace(/\.\d/, ".0");
   return out;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Previews of real demo worlds (game/demo.js) through game/view.js and the dialog roles:
+//   node --import ./tools/mock/register.mjs tools/vm-samples/sheet.mjs --views [--all] [--only kind] [--tab gear]
+//   node --import ./tools/mock/register.mjs tools/vm-samples/herd.mjs --views  [--all] [--only kind] [--tab stash]
+// → out/view-sheet-<kind>-<tab>.png / out/view-herd-<kind>-<tab>.png (deviceScaleFactor 2).
+
+const VIEW_SHOTS = {
+  sheet: [["mid", "gear"], ["mid", "skills"], ["mid", "stats"], ["mid", "career"], ["mid", "journal"], ["late", "gear"], ["late", "skills"],
+    ["late", "career"], ["first-day", "gear"], ["first-day", "career"], ["boss", "career"], ["blocked", "stats"], ["empty", "gear"]],
+  herd: [["mid", "upgrades"], ["mid", "stash"], ["mid", "tracker"], ["mid", "bosses"], ["mid", "roster"], ["mid", "digest"], ["mid", "settings"],
+    ["late", "upgrades"], ["late", "stash"], ["late", "tracker"], ["late", "bosses"], ["late", "roster"], ["late", "digest"], ["boss", "bosses"],
+    ["first-day", "stash"], ["first-day", "digest"], ["empty", "upgrades"]],
+};
+
+/** Render real demo worlds through sheetView / herdView and the role, then screenshot them. */
+export async function shootDialogViews(role, argv = []) {
+  const arg = (k, d) => (argv.includes(k) ? argv[argv.indexOf(k) + 1] : d);
+  const only = arg("--only", null);
+  const onlyTab = arg("--tab", null);
+  const M = await import("../mock/index.mjs");
+  const { View } = await import("gpui-kit");
+  const { shoot } = await import("../preview/shoot.mjs");
+  const { demoWorld, DEMO_KINDS } = await import("../../mods/mapledr/game/demo.js");
+  const V = await import("../../mods/mapledr/game/view.js");
+  const Role = (await import(role === "sheet" ? "../../mods/mapledr/ui/sheet.js" : "../../mods/mapledr/ui/herdpanel.js")).default;
+  const tabs = role === "sheet" ? ["gear", "skills", "stats", "career", "journal"] : ["upgrades", "stash", "tracker", "bosses", "roster", "digest", "settings"];
+  const list = argv.includes("--all") ? DEMO_KINDS.flatMap((k) => tabs.map((t) => [k, t])) : VIEW_SHOTS[role];
+  const now = Date.UTC(2026, 10, 24, 9, 30, 0);
+  const [W, H] = role === "sheet" ? [760, 500] : [760, 520];
+  const worlds = new Map();
+  const shots = [];
+  for (const [kind, tab] of list) {
+    if ((only && kind !== only) || (onlyTab && tab !== onlyTab)) continue;
+    if (!worlds.has(kind)) worlds.set(kind, demoWorld(kind, now).world);
+    const world = worlds.get(kind);
+    const herd = world.state.herd;
+    const hero = world.state.heroes[0];
+    // something to compare: the best-scoring stash item, else the hero's weapon
+    const sel = (herd.stash.find((it) => it.rar >= 3) || herd.stash[0] || (hero && hero.eq.find(Boolean)) || {}).uid ?? null;
+    M.resetState();
+    M.setFixture({ theme: "graphite" });
+    const host = {
+      world, version: 1, claim: () => true, command: () => ({ ok: true }),
+      view: (k, a) => (k === "sheet" ? V.sheetView(world, a) : k === "herd" ? V.herdView(world, a) : null),
+    };
+    const props = role === "sheet" ? { role, overlay: "o1", heroId: hero ? hero.id : 1, tab } : { role, overlay: "o2", tab };
+    class Wrap extends View {
+      init(_p, cx) {
+        this.r = new Role();
+        this.r.init(props, cx, host);
+        this.r.ui.tab = tab;
+        this.r.ui.selected = sel;
+      }
+      render(cx) { return this.r.render(cx); }
+    }
+    const mod = await M.mountView(Wrap, { props, nowMs: now });
+    mod.render();
+    mod.size(W, H);
+    mod.render();
+    for (const e of mod.errors) console.warn(`  ! ${kind}/${tab}: [${e.code}] ${e.message}`);
+    const name = `view-${role}-${kind}-${tab}`;
+    console.log(`${name}: ${mod.stats.elements} elements, ${mod.stats.lastRenderMs.toFixed(1)} ms`);
+    shots.push({ name, tree: mod.tree, width: W, height: H, userFacing: true, theme: M.resolveTheme("graphite") });
+  }
+  const files = await shoot(shots);
+  const { relative } = await import("node:path");
+  for (const f of files) console.log(`wrote ${relative(process.cwd(), f.file)}`);
+}
+
+if (typeof process !== "undefined" && process.argv[1] && /vm-samples[\\/]sheet\.mjs$/.test(process.argv[1]) && process.argv.includes("--views")) {
+  shootDialogViews("sheet", process.argv.slice(2)).catch((e) => { console.error(e); process.exit(1); });
 }

@@ -10,6 +10,9 @@ image, a missing file), the mock records an error. Built from herdr's source; se
 ```sh
 npm run check                 # = node --import ./tools/mock/register.mjs tools/check.mjs
 npm run preview               # = ... tools/preview/shoot.mjs   → out/*.png (+ .html)
+npm run windows -- --roles    # = ... tools/preview/windows.mjs → out/window-<kind>.png (real demo
+                              #   worlds through host.view and the renderers, 2×), out/real-*.png;
+                              #   --preview also writes preview.png (the mid window), --only mid,boss
 node --test test/mock.test.mjs
 ```
 
@@ -24,15 +27,22 @@ Exit 0 = pass, 1 = errors, 2 = `main.js` or the fixtures module is missing.
 ## Fixtures (`tools/fixtures.mjs`, owned by integration)
 
 ```js
-import { sampleFixture } from "./mock/samples.mjs";      // herdr's exact data shapes
+import { demoFixture, demoWorldOf, NOW } from "./fixtures.mjs";
 export const roles = [
-  { name: "stage-midgame", props: { role: "stage" }, fixture: sampleFixture(6),
-    world: async ({ nowMs, host, mod }) => (await mod.import("./game/demo.js")).demoWorld("mid", nowMs) },
-    // put on getHost().world before render; mod.import() loads from the mod's own module graph
-  { name: "nameplate-agent", props: { role: "nameplate", pane: "p1", terminal: "t1" }, fixture: sampleFixture(3) },
-  { name: "sheet", props: { role: "sheet", overlay: "o1", heroId: 1 }, height: 500 },
+  // live data = herdr's shapes built from demoWorld("mid", NOW).snapshot (agents, panes, terminals,
+  // spaces, focused, layout), so the 1 s pump keeps every hero bound and nameplates find theirs
+  { name: "stage-mid", props: { role: "stage" }, nowMs: NOW, fixture: demoFixture("mid"),
+    world: async ({ nowMs, mod }) => (await mod.import("./game/demo.js")).demoWorld("mid", nowMs).world },
+    // = demoWorldOf("mid"); put on getHost().world before render; mod.import() loads from the mod's own module graph
+  { name: "nameplate-agent", props: { role: "nameplate", pane: "p_t1", terminal: "t1" }, fixture: demoFixture("mid"), world: demoWorldOf("mid") },
+  { name: "sheet-gear", props: { role: "sheet", overlay: "o1", heroId: 1, tab: "gear" }, widths: [760], ... },
 ];
 ```
+
+The real file covers the stage × every demo kind, party (full, crowded, empty, rail), nameplates (agent
+panes, a Contractor, a shell pane, a mod pane, a hero pane while the save loads), the HUD, sheets
+(several heroes and tabs, a Contractor) and every Herd panel tab. `liveFromSnapshot(snap, extra)`
+turns any demo snapshot into live data. Fixtures are lazy getters, cached per demo kind.
 
 Role fields: `name`, `props`, `fixture` (live data, below), `world` (object or function),
 `setup({ mod, host, mock })`, `height`, `widths`, `zooms`, `nowMs`, `preview: {width, height}`.

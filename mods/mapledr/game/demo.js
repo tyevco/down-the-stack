@@ -452,6 +452,7 @@ const KINDS = {
     herd.quota["3-2"] = 17;
     herd.meter = 11.5;
     herd.bld = [2, 2, 1, 2, 1, 0];
+    herd.born = herd.day - 11; // the herd's day 12 (Campfire 2 opens on day 12, herd.buildingGate)
     seedReleases(world, 64);
     for (const id of ["first_commit", "fixed_it"]) awardBadge(world, id, null);
     return finish(world, cast, nowMs);
@@ -466,6 +467,7 @@ const KINDS = {
     const herd = world.state.herd;
     for (const m of ZONES[3].maps) herd.quota[m.id] = T.quotaPerMap;
     herd.meter = T.sprint[3];
+    herd.born = herd.day - 13; // the herd's day 14
     const spec = [{ L: 46, cls: "refactorer" }, { L: 45, cls: "shellmancer" }, { L: 45, cls: "rubberducker" }];
     boundHeroes(world).forEach((h, i) => grow(world, h, Object.assign({ rar: 2, pol: 4 }, spec[i])));
     seedReleases(world, 140);
@@ -520,6 +522,7 @@ const KINDS = {
       grow(world, h, { L, cls: classes[i % classes.length], rar: i < 3 ? 4 : 3, pol: 7, keepsake: i < 9 ? i : -1 });
     });
     herd.bld = [9, 8, 7, 8, 6, 5]; // vendor/ 8: 120 stash slots
+    herd.born = herd.day - 64; // a herd of two months: every Campfire level is open
     // a rich stash: drops from the late zones
     const finder = boundHeroes(world)[0];
     for (let k = 0; k < 60; k++) {

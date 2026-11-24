@@ -30,6 +30,7 @@ import { chooseMap, mapLevels, offerDrop } from "./autopilot.js";
 import { heroCtx, addBuff, unblockedTicks } from "./combat.js";
 
 const S = T.seals;
+const INBOX_PER_TICK = 1; // chest items offered per world.tick (queueDrop)
 const CLOSE_TICKS = T.taskCloseTicks; // 8
 const TITLE_MAX = 40;
 const NORM_MAX = 32;
@@ -361,7 +362,9 @@ function bindAgent(world, a, snap, ev) {
     }
   }
   if (!hero) hero = pickFreeHero(world, a, seat);
-  if (!hero) {
+  // a read-only world (a save from a newer version, never written back) binds for display only:
+  // no hires (a new agent plays as an unsaved Contractor), no chests, no XP (world.tick runs no steps)
+  if (!hero && !rt.readOnly) {
     const R = T.roster;
     if (hiredToday(state) < R.newPerDay) {
       if (state.heroes.length >= R.max) {
@@ -428,7 +431,7 @@ function firstSight(world, hero, live, a, snap, ev) {
     }
   } else if (s === "blocked") {
     live.blockedSince = tick;
-  } else if (s === "idle" && live.fast && hero.pend && hero.pend.length) {
+  } else if (s === "idle" && live.fast && hero.pend && hero.pend.length && !world.rt.readOnly) {
     openChests(world, hero, { reason: "seen" }, ev);
   }
 }
@@ -455,11 +458,11 @@ function goOffDuty(world, address, heroId, ev) {
   rt.live.delete(heroId);
   rt.roomsDirty = true;
   if (!hero) return;
-  if (live && live.task) closeTask(world, hero, live, "ended", ev);
+  if (live && live.task && !rt.readOnly) closeTask(world, hero, live, "ended", ev);
   if (live && live.maxHp > 0 && live.hp != null) hero.hpFrac = Math.max(0.05, Math.min(1, live.hp / live.maxHp));
   hero.seenAt = rt.nowMs;
   if (hero.contractor) {
-    openChests(world, hero, { reason: "unreviewed", all: true, noXp: true }, ev);
+    if (!rt.readOnly) openChests(world, hero, { reason: "unreviewed", all: true, noXp: true }, ev);
     rt.contractors.delete(address);
   }
 }
@@ -508,7 +511,7 @@ export function transition(world, hero, live, to, ev) {
   if (to === "working") {
     if (from === "blocked") {
       const blocked = live.blockedSince != null ? tick - live.blockedSince : live.blockedTicks || 0;
-      if (task && blocked >= T.unblocked.minBlockedSec && task.workSec >= T.unblocked.minTaskSec) grantUnblocked(world, hero, live, ev);
+      if (task && blocked >= T.unblocked.minBlockedSec && task.workSec >= T.unblocked.minTaskSec && !world.rt.readOnly) grantUnblocked(world, hero, live, ev);
     }
     if (task) task.closeCountdown = null; // continue the same task (resume, or back inside the 8 ticks)
     else task = openTask(live, tick);
@@ -529,7 +532,7 @@ export function transition(world, hero, live, to, ev) {
     live.blockedSince = null;
     live.blockedTicks = 0;
     live.bubbleShown = false;
-    if (from === "done" && to === "idle") openChests(world, hero, { reason: "seen" }, ev);
+    if (from === "done" && to === "idle" && !world.rt.readOnly) openChests(world, hero, { reason: "seen" }, ev);
   }
   live.state = heroState(live, tick);
 }
@@ -700,7 +703,7 @@ export function reconcile(world, snap, ev) {
     if (live.forklings.length) live.forkCount = stats(hero, statsCtx(world, hero)).forklingCount || T.forkling.counted;
     live.state = heroState(live, rt.tick);
     if (!hero.contractor) hero.seenAt = now;
-    if (active && live.focused && hero.pend && hero.pend.length) openChests(world, hero, { reason: FOCUS_SEEN }, ev);
+    if (active && live.focused && hero.pend && hero.pend.length && !rt.readOnly) openChests(world, hero, { reason: FOCUS_SEEN }, ev);
   }
   return state;
 }
@@ -946,10 +949,11 @@ export function openChests(world, hero, opts = {}, ev) {
     if (xp > 0 && (roster || hero.contractor) && !opts.noXp) {
       const r = grantXP(state, hero, xp, ev);
       if (r.levels > 0 && live) live.hp = live.maxHp;
+      if (live && live.tally) live.tally.chestXp = (live.tally.chestXp || 0) + xp;
       out.xp += xp;
     }
     for (const it of items) {
-      offerDrop(world, roster ? hero : null, it, ev);
+      queueDrop(state, roster ? hero : null, it);
       logDrop(world, hero, it, ev);
       out.items.push(it);
       if (ev) ev.fx?.("loot", { heroId: hero.id, rar: it.rar, value: it.uid });
@@ -966,6 +970,35 @@ export function openChests(world, hero, opts = {}, ev) {
   }
   if (!unreviewed && out.opened) awardBadge(world, "first_commit", ev);
   return out;
+}
+
+/**
+ * Chest items wait in herd.inbox ([finderId, item] pairs, saved) and are offered to the roster one
+ * per world.tick (drainInbox): offering one item scores up to 6 heroes (autopilot.offerDrop, ~0.1-3
+ * ms in V8 with 30 heroes, 20-50x that in QuickJS), so a big merged chest offered at once could
+ * blow herdr's 500 ms callback budget. The items are rolled (and logged) when the chest opens.
+ */
+export function queueDrop(state, finder, item) {
+  const herd = state.herd;
+  if (!Array.isArray(herd.inbox)) herd.inbox = [];
+  herd.inbox.push([finder ? finder.id : 0, item]);
+}
+
+/** Offers up to `max` queued chest items (oldest first): finder first, then the roster (D§8.7). */
+export function drainInbox(world, ev, max = INBOX_PER_TICK) {
+  const herd = world.state.herd;
+  const q = herd.inbox;
+  if (!Array.isArray(q) || !q.length) return 0;
+  let n = 0;
+  while (q.length && n < max) {
+    const [id, item] = q.shift();
+    n++;
+    if (!item || typeof item !== "object") continue;
+    const finder = id > 0 ? world.state.heroes.find((h) => h.id === id) || null : null;
+    offerDrop(world, finder, item, ev);
+  }
+  if (!q.length) delete herd.inbox;
+  return n;
 }
 
 /** Off-duty pending chests older than 24 h open Unreviewed (D§2.4). */

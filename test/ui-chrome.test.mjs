@@ -208,17 +208,53 @@ test("party: the off-duty group starts folded; its header unfolds it; off-duty r
   assert.ok(m.node("pr-h:4"));
 });
 
-test("party: hover shows the pin toggle (terminal.pin), which clears the hover", async () => {
+test("party: hover shows the pin toggle (terminal.pin); rows never move, so the hover stays", async () => {
   const { m } = await mount("party", P.scenarios.six);
   assert.equal(m.node("pn-h:1"), null);
   m.hover("pr-h:1");
   m.render();
   assert.ok(m.node("pn-h:1"));
+  const tip = (id) => m.node(id).methods.find((x) => x[0] === "tooltip")?.[1][0];
+  assert.equal(tip("pn-h:1"), "Unpin terminal");
   m.fire("pn-h:1");
   assert.deepEqual(runs("terminal.pin").map((c) => c.args), [{ terminal: "t1", pinned: false }]);
   assert.equal(runs("pane.focus").length, 0);
   m.render();
-  assert.equal(m.node("pn-h:1"), null);
+  assert.ok(m.node("pn-h:1"), "the row keeps its place and its hover");
+  m.hover("pr-h:2");
+  m.render();
+  assert.match(tip("pn-h:2"), /^Pin terminal/);
+});
+
+test("party: the Forkling chip shows its sub-agent (agent.focus) without focusing the row", async () => {
+  const { m, host } = await mount("party", P.scenarios.six);
+  m.fire("pc-c:1:fork");
+  assert.deepEqual(runs("agent.focus").map((c) => c.args), [{ terminal: "t1.2" }]);
+  assert.equal(runs("pane.focus").length, 0);
+  assert.deepEqual(host.commands, []);
+  assert.ok(m.ok, errorsOf(m).join());
+});
+
+test("party: slim rows (RowVM.slim) keep 30 heroes far under the element budget and behave like rows", async () => {
+  const vm = P.scenarios.crowded;
+  const { m, host } = await mount("party", vm);
+  assertClean(m, "crowded");
+  assert.ok(m.stats.elements < 360, `${m.stats.elements} elements`);
+  const row = m.node("pr-h:31");
+  assert.ok(row.methods.some((x) => x[0] === "h" && x[1][0] === 28), "28 px");
+  assert.ok(m.text().includes("vps"), "a remote agent names its machine");
+  m.fire("pr-h:33");
+  assert.deepEqual(host.commands.at(-1), ["markSeen", { heroId: 33 }]);
+  assert.deepEqual(runs("pane.focus").at(-1).args, { pane: "p33" });
+  m.fire("pp-h:33");
+  assert.deepEqual(overlays().at(-1).props, { role: "sheet", heroId: 33 });
+  m.hover("pr-h:31");
+  m.render();
+  assert.ok(m.node("pn-h:31") && m.node("ps-h:31"));
+  // unfolding off duty stays in budget
+  m.fire("pg-g:off");
+  m.render();
+  assertClean(m, "crowded + off duty");
 });
 
 test("party: footer Herd and settings buttons open the Herd panel (760×520); calm toggles the setting", async () => {
@@ -445,6 +481,15 @@ test("hud: a click anywhere opens the Herd panel; counts carry status colours", 
   assert.ok(!narrow.m.text().includes("Pyramid"), "and the sprint");
 });
 
+test("hud: the sprint shows only when the fixed parts leave it room (it never paints over the counts)", () => {
+  const big = { gold: "41.3M", snippets: "26.1k", release: "v7.8", sprint: { label: "The Backlog, floor 14", have: 23, need: 50 }, working: 8, blocked: 2, shipped: 2, digestDot: false };
+  assert.deepEqual(HudMod.hudFit(big, 420), { words: false, sprint: false, sprintLabel: false });
+  assert.deepEqual(HudMod.hudFit(big, 640), { words: false, sprint: true, sprintLabel: true });
+  assert.deepEqual(HudMod.hudFit(big, 1170), { words: true, sprint: true, sprintLabel: true });
+  assert.equal(HudMod.hudFit(H.scenarios.normal, 520).sprint, true);
+  assert.equal(HudMod.hudFit(H.scenarios.zeros, 1170).sprint, false, "no sprint, nothing to fit");
+});
+
 test("hud: loading and zeros render; the next tick keeps every id", async () => {
   const loading = await mount("hud", null, { width: 1170, height: 26 });
   assert.ok(loading.m.text().includes("loading"));
@@ -477,4 +522,12 @@ test("every chrome role answers mapledr.sheet / herd / calm the same way", async
     assert.deepEqual(overlays().map((s) => s.props), [{ role: "herd" }, { role: "sheet", heroId: 1 }], kind);
     assert.deepEqual(host.commands.at(-1), ["setting", { key: "calm", value: true }], kind);
   }
+});
+
+test("mapledr.calm reads calm from the cheap HUD view, never a whole party", async () => {
+  const { m, host } = await mount("party", P.scenarios.six, { extra: { hud: { ...H.scenarios.normal, calm: true } } });
+  host.views.length = 0;
+  assert.equal(m.view.role.command("calm"), true);
+  assert.deepEqual(host.views.map((v) => v[0]), ["hud"]);
+  assert.deepEqual(host.commands.at(-1), ["setting", { key: "calm", value: false }]);
 });

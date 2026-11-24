@@ -3,7 +3,8 @@
 // every visual state the renderer supports has a scenario. Ids and keys are stable strings.
 //
 // Shapes: PartyVM / RowVM as in ARCHITECTURE §5, plus the "VM additions" documented at the top of
-// ui/party.js (RowVM.pane, RowVM.colors, RowVM.levelUpAge; footer values are display strings).
+// ui/party.js (RowVM.pane, RowVM.colors, RowVM.levelUpAge, RowVM.slim, RowVM.machine; chip.tooltip
+// and the fork chip's terminal; footer values are display strings).
 
 const C = { working: "#4CC38A", blocked: "#F2A93B", done: "#FFD447", idle: "#8A8F98", hp: "#FF5A5F", xp: "#7FE9F5", fresh: "#A9B8FF", lts: "#FF9A2E" };
 
@@ -58,10 +59,14 @@ function row(id, o) {
     chestPending: !!o.chestPending,
     colors: o.colors ?? colorsFor(id, o.programIcon === undefined ? ICON.claude : o.programIcon, status),
     levelUpAge: o.levelUpAge ?? null,
+    slim: !!o.slim,
+    machine: o.machine ?? null,
   };
 }
 
-const chip = (id, kind, text, color) => ({ key: `c:${id}:${kind}`, kind, text, color });
+const chip = (id, kind, text, color, extra) => ({ key: `c:${id}:${kind}`, kind, text, color, ...extra });
+// The Forkling count: a click shows the first blocked (else working) sub-agent (agent.focus).
+const forkChip = (id, n, terminal) => chip(id, "fork", String(n), C.idle, { terminal, tooltip: `${n} Forklings · click to jump to one` });
 
 const FOOTER = { gold: "48.2k", snippets: "133", release: "v2.3", sprint: { label: "Pyramid of Doom", have: 7, need: 10 }, digestDot: true };
 
@@ -72,7 +77,7 @@ const kip = row(1, {
   name: "Kip the Idempotent", level: 14, careerTitle: "Junior Refactorer", clsName: "Refactorer",
   mapLabel: "2-2 Nested Tunnels", status: "working", focused: true, pinned: true,
   hpFrac: 0.82, xpFrac: 0.46, feFrac: 0.14,
-  chips: [chip(1, "fork", "2", C.idle)],
+  chips: [forkChip(1, 2, "t1.2")],
   tooltip: "Kip the Idempotent · Lv 14 Junior Refactorer\nQuest: Fix flaky auth test (12m)\nHP 1,204 / 1,468 · XP 46% · Fresh Eyes 42m\n+512 XP/min = working ×1 · Fresh Eyes ×1.5 · Party +12% · Herd +23%",
 });
 const rue = row(2, {
@@ -145,7 +150,7 @@ const blockedGroups = () => [
   {
     key: "g:s1", name: "herdr-app", offDuty: false, rows: [
       blockedRow(11, { name: "Rue Two-Spaces", level: 11, careerTitle: "Junior Rubberducker", clsName: "Rubberducker", mapLabel: "1-3 Warning Gate", programIcon: ICON.codex, hpFrac: 0.6, xpFrac: 0.7, chips: [chip(11, "blocked", "! 14m", C.blocked)], focused: true }),
-      blockedRow(12, { name: "Tess the Squashed", level: 19, careerTitle: "Junior Refactorer", clsName: "Refactorer", mapLabel: "2-3 Pyramid Steps", hpFrac: 0.35, xpFrac: 0.4, chips: [chip(12, "blocked", "! 1h+", C.blocked), chip(12, "fork", "3", C.idle)] }),
+      blockedRow(12, { name: "Tess the Squashed", level: 19, careerTitle: "Junior Refactorer", clsName: "Refactorer", mapLabel: "2-3 Pyramid Steps", hpFrac: 0.35, xpFrac: 0.4, chips: [chip(12, "blocked", "! 1h+", C.blocked), forkChip(12, 3, "t12.1")] }),
       blockedRow(13, { name: "Coda Hot-Reloaded", level: 8, careerTitle: "Intern", clsName: "Intern", mapLabel: "1-2 Whitespace Fields", programIcon: ICON.pi, hpFrac: 0.9, xpFrac: 0.55, chips: [chip(13, "blocked", "! 5m", C.blocked)] }),
     ],
   },
@@ -157,6 +162,38 @@ const blockedGroups = () => [
     ],
   },
 ];
+
+// ---------------------------------------------------------------------------------------------
+// crowded: 30 live heroes (game/view switches to slim rows above 12 live rows)
+
+const PROGS = [ICON.claude, ICON.codex, ICON.pi, ICON.gemini, ICON.opencode];
+const CLS = [["Refactorer", "Junior Refactorer"], ["Hotfixer", "Senior Hotfixer"], ["Shellmancer", "Staff Shellmancer"], ["Forkbinder", "Junior Forkbinder"], ["Rubberducker", "Senior Rubberducker"]];
+const STATUS_CYCLE = ["working", "working", "blocked", "working", "done", "idle", "working"];
+function crowdedGroups() {
+  const rows = [];
+  for (let i = 0; i < 30; i++) {
+    const id = 31 + i;
+    const status = STATUS_CYCLE[i % STATUS_CYCLE.length];
+    const [clsName, careerTitle] = CLS[i % CLS.length];
+    const chips = [];
+    if (status === "blocked") chips.push(chip(id, "blocked", i % 2 ? "! 12m" : "!", C.blocked));
+    if (status === "done") chips.push(chip(id, "chest", i % 3 ? "" : "×2", C.done));
+    if (i % 9 === 4) chips.push(chip(id, "boss", "BOSS 63%", C.hp));
+    if (i % 11 === 3) chips.push(forkChip(id, 2, `t${id}.1`));
+    rows.push(row(id, {
+      name: `Hero ${String.fromCharCode(65 + (i % 26))}${i >= 26 ? i : ""} the ${["Idempotent", "Rebased", "Linted", "Cached", "Deterministic"][i % 5]}`,
+      level: 20 + ((i * 7) % 70), careerTitle, clsName, mapLabel: `${1 + (i % 9)}-${1 + (i % 3)} Somewhere`, status,
+      programIcon: PROGS[i % PROGS.length], focused: i === 5, pinned: i === 0 || i === 17,
+      hpFrac: 1 - (i % 5) * 0.15, xpFrac: ((i * 13) % 100) / 100, feFrac: i % 4 === 0 ? 0.1 : 0,
+      chips, chestPending: status === "done", slim: true, machine: i === 8 ? "vps" : null, levelUpAge: i === 2 ? 0 : null,
+    }));
+  }
+  return [
+    { key: "g:s1", name: "herdr-app", offDuty: false, rows: rows.slice(0, 16) },
+    { key: "g:s3", name: "billing-service", offDuty: false, rows: rows.slice(16) },
+    { key: "g:off", name: "Off duty", offDuty: true, rows: [zed, lumi, brin].map((r) => ({ ...r, slim: true })) },
+  ];
+}
 
 // ---------------------------------------------------------------------------------------------
 
@@ -176,10 +213,12 @@ export const scenarios = {
   rail: party(sixGroups(), { compact: true }),
   /** Calm mode: no blinking faces, no shimmer. */
   calm: party(sixGroups(), { calm: true }),
+  /** 30 live heroes: slim 28 px rows (and a remote agent's machine label). */
+  crowded: party(crowdedGroups(), { footer: { gold: "9.81M", snippets: "12.4k", release: "v4.7", sprint: { label: "Bloatodon, the Heaviest Object", have: 41, need: 70 }, digestDot: false } }),
 };
 
 /** Block width (logical px) each scenario is meant to be seen at. */
-export const widths = { loading: 268, empty: 268, one: 268, six: 268, blocked: 268, rail: 52, calm: 268 };
+export const widths = { loading: 268, empty: 268, one: 268, six: 268, blocked: 268, rail: 52, calm: 268, crowded: 268 };
 
 /** The same VM one tick later (bars moved, a chip changed): ids must stay stable. */
 export function nextTick(vm) {

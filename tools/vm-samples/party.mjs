@@ -1,4 +1,4 @@
-// Sample PartyVMs (ARCHITECTURE §5 partyView) for the party sidebar role (mods/mapledr/ui/party.js).
+// Sample PartyVMs (ARCHITECTURE §5 partyView) for the party sidebar role (mods/down-the-stack/ui/party.js).
 // They are the spec game/view.js has to produce and the fixtures for tests and previews:
 // every visual state the renderer supports has a scenario. Ids and keys are stable strings.
 //
@@ -133,13 +133,20 @@ function party(groups, over = {}) {
     groups,
     footer: { ...FOOTER },
     agentOrder: rows.filter((r) => r.address).map((r) => r.address),
+    save: null,
     ...over,
   };
 }
 
+/** Save trouble (game/view saveCue of host.saveStatus(); D§13.1): the footer's cue. */
+const SAVE = {
+  title: "Not saving", short: "Not saving",
+  tooltip: "The save file can't be read (/home/you/.config/herdr-app/data/down-the-stack/save.json), so nothing is being saved. Fix or move it aside; saving resumes once it reads.\nClick for the Herd panel.",
+};
+
 const sixGroups = () => [
   { key: "g:s1", name: "herdr-app", offDuty: false, rows: [kip, rue, ada] },
-  { key: "g:s2", name: "mapledr", offDuty: false, rows: [juno, pax, ori] },
+  { key: "g:s2", name: "api-gateway", offDuty: false, rows: [juno, pax, ori] },
   { key: "g:off", name: "Off duty", offDuty: true, rows: [zed, lumi, brin] },
 ];
 
@@ -204,7 +211,7 @@ export const scenarios = {
   /** No agent has reported a status yet. */
   empty: party([], { count: 0, agentOrder: [], footer: { gold: "0", snippets: "0", release: "v0.1", sprint: null, digestDot: false } }),
   /** First day: one hero in one guild. */
-  one: party([{ key: "g:s1", name: "mapledr", offDuty: false, rows: [row(21, { name: "Nib the Linted", level: 3, careerTitle: "Intern", clsName: "Intern", mapLabel: "1-1 Squiggle Path", status: "working", focused: true, hpFrac: 0.9, xpFrac: 0.62 })] }],
+  one: party([{ key: "g:s1", name: "herdr-app", offDuty: false, rows: [row(21, { name: "Nib the Linted", level: 3, careerTitle: "Intern", clsName: "Intern", mapLabel: "1-1 Squiggle Path", status: "working", focused: true, hpFrac: 0.9, xpFrac: 0.62 })] }],
     { footer: { gold: "312", snippets: "4", release: "v0.1", sprint: { label: "Lint Meadows boss", have: 1, need: 6 }, digestDot: false } }),
   /** Six heroes in two guilds plus a collapsed off-duty group (statuses, chips, focus, pin, level-up). */
   six: party(sixGroups()),
@@ -214,12 +221,16 @@ export const scenarios = {
   rail: party(sixGroups(), { compact: true }),
   /** Calm mode: no blinking faces, no shimmer. */
   calm: party(sixGroups(), { calm: true }),
+  /** The save is not being written (D§13.1): a cue above the footer's gold row opens the Herd panel. */
+  saveTrouble: party(sixGroups(), { save: SAVE }),
+  /** The same on the rail: an amber dot above the Herd button. */
+  saveRail: party(sixGroups(), { compact: true, save: SAVE }),
   /** 30 live heroes: slim 28 px rows (and a remote agent's machine label). */
   crowded: party(crowdedGroups(), { footer: { gold: "9.81M", snippets: "12.4k", release: "v4.7", sprint: { label: "Bloatodon, the Heaviest Object", have: 41, need: 70 }, digestDot: false } }),
 };
 
 /** Block width (logical px) each scenario is meant to be seen at. */
-export const widths = { loading: 268, empty: 268, one: 268, six: 268, blocked: 268, rail: 52, calm: 268, crowded: 268 };
+export const widths = { loading: 268, empty: 268, one: 268, six: 268, blocked: 268, rail: 52, calm: 268, crowded: 268, saveTrouble: 268, saveRail: 52 };
 
 /** The same VM one tick later (bars moved, a chip changed): ids must stay stable. */
 export function nextTick(vm) {

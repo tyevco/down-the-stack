@@ -3,12 +3,12 @@
 // digest, waypoints.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import * as D from "../mods/mapledr/game/data.js";
-import * as F from "../mods/mapledr/game/formulas.js";
-import * as Hr from "../mods/mapledr/game/heroes.js";
-import * as I from "../mods/mapledr/game/items.js";
-import * as H from "../mods/mapledr/game/herd.js";
-import { newState, encodeState, saveSize } from "../mods/mapledr/game/save.js";
+import * as D from "../mods/down-the-stack/game/data.js";
+import * as F from "../mods/down-the-stack/game/formulas.js";
+import * as Hr from "../mods/down-the-stack/game/heroes.js";
+import * as I from "../mods/down-the-stack/game/items.js";
+import * as H from "../mods/down-the-stack/game/herd.js";
+import { newState, encodeState, saveSize } from "../mods/down-the-stack/game/save.js";
 
 const T0 = 1_790_000_000_000;
 
@@ -115,7 +115,8 @@ describe("gold and Snippets", () => {
     }
     // what the taper prevents: 120 lines with 30 heroes are over the budget
     const s30 = worst(30);
-    while (s30.herd.log.length < H.LOG_MAX) s30.herd.log.unshift(s30.herd.log[0].slice());
+    // (distinct texts: the save's string table would store 60 copies of one line once)
+    for (let i = 0; s30.herd.log.length < H.LOG_MAX; i++) s30.herd.log.unshift([T0 - i * 1000, "ship", 1 + (i % 3), `Fix flaky deploy test number ${i} in web/`, 2.4]);
     const flat = saveSize(encodeState(s30));
     t.diagnostic(`30 heroes, ${H.LOG_MAX} journal lines: ${flat.bytes} B`);
     assert.equal(flat.ok, false);
@@ -557,8 +558,8 @@ describe("digest (D§10.7)", () => {
 });
 
 test("items.js journal lines (stash-full deprecations) keep the same journal length as herd.js (logMax), not 60", async () => {
-  const I = await import("../mods/mapledr/game/items.js");
-  const D = await import("../mods/mapledr/game/demo.js");
+  const I = await import("../mods/down-the-stack/game/items.js");
+  const D = await import("../mods/down-the-stack/game/demo.js");
   const { world } = D.demoWorld("late", Date.UTC(2026, 10, 24, 9, 30));
   const s = world.state;
   while (s.herd.log.length < H.logMax(s)) s.herd.log.unshift(s.herd.log[0].slice());

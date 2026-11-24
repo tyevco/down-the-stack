@@ -9,11 +9,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ZONES, MOBS, ADDS, BOSSES, CLASSES, CHEST_TIERS, BACKLOG, ELITE, TRAITS } from "../mods/mapledr/game/data.js";
+import { ZONES, MOBS, ADDS, BOSSES, CLASSES, CHEST_TIERS, BACKLOG, ELITE, TRAITS } from "../mods/down-the-stack/game/data.js";
 import { generateAll, isMaskPath, intrinsicScale } from "../tools/gen-art.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const MOD = path.join(ROOT, "mods/mapledr");
+const MOD = path.join(ROOT, "mods/down-the-stack");
 const read = (rel) => fs.readFileSync(path.join(MOD, rel), "utf8");
 
 // ---------------------------------------------------------------------------------------------
@@ -26,7 +26,7 @@ const UI_ICONS = ["split-right", "split-down", "zoom", "unzoom", "close", "sheet
 const SLOTS = ["weapon", "hat", "hoodie", "mug", "boots", "sticker"];
 const FX = { "campfire": [24, 24], "bubble": [18, 20], "crate": [24, 16], "coin": [6, 6], "loot": [10, 10], "poof": [24, 24],
   "starburst": [20, 20], "door": [24, 40], "portal": [32, 48], "banner": [12, 18], "stamp-fixed": [80, 28], "mug": [12, 12],
-  "stink": [16, 12], "ribbon": [40, 10], "tent": [16, 14], "lanyard": [10, 12] };
+  "stink": [16, 12], "ribbon": [40, 10], "tent": [16, 14] };
 
 /** Map<relPath, [w, h] | {max: [w, h]}> of every required asset. */
 function expected() {
@@ -179,13 +179,13 @@ test("the intrinsic scale k gives each image() family headroom for its largest d
 });
 
 /**
- * Record the largest drawn / viewBox ratio of every mods/mapledr/art file drawn with image() in any
+ * Record the largest drawn / viewBox ratio of every mods/down-the-stack/art file drawn with image() in any
  * mock render while `body` runs. Every render counts, so both ends of a width/height transition do.
  */
 async function imageDraws(body) {
   await import("../tools/mock/register.mjs");
   const { Mounted, walkLive } = await import("../tools/mock/index.mjs");
-  const PREFIX = "mods/mapledr/";
+  const PREFIX = "mods/down-the-stack/";
   const worst = new Map(); // rel → { scale, at }
   const vbCache = new Map();
   const num = (args) => (Array.isArray(args) && typeof args[0] === "number" ? args[0] : null);
@@ -227,7 +227,7 @@ test("every image() draw of the stage scenarios, the FIXED stamp's slam included
     const M = await import("../tools/mock/index.mjs");
     const { View } = await import("gpui-kit");
     const { SCENARIOS, makeScenario } = await import("../tools/vm-samples/stage.mjs");
-    const Stage = (await import("../mods/mapledr/ui/stage.js")).default;
+    const Stage = (await import("../mods/down-the-stack/ui/stage.js")).default;
     const mount = async (vm, zoom) => {
       M.resetState();
       M.setFixture({ settings: { zoom }, layout: M.readLayout(), panes: [] });
@@ -330,6 +330,34 @@ test("the files on disk are exactly the generator's output (deterministic, nothi
   assert.deepEqual(onDisk.filter((r) => !a.has(r)), [], "files under art/ that the generator does not produce");
 });
 
+// Effect sprites are one-offs, not a family keyed by content ids, so one nothing draws is dead
+// weight in every install (fx/lanyard.svg was generated for a design idea the UI never used:
+// onboarding is the sheet's "New hire" chip). Each one must be named in the mod's code; the
+// chests are drawn through one template (ui/stage.js `fx/chest-${tier}…`).
+test("every effect sprite the generator writes is drawn by the mod", () => {
+  const src = [];
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) { if (e.name !== "art") walk(p); } else if (e.name.endsWith(".js")) src.push(fs.readFileSync(p, "utf8"));
+    }
+  };
+  walk(MOD);
+  const code = src.join("\n");
+  const tiers = new Set([...CHEST_TIERS.map((t) => t.id), "duck"]);
+  const unused = [];
+  for (const rel of generateAll().keys()) {
+    const m = /^art\/(fx\/([^/]+))\.svg$/.exec(rel);
+    if (!m) continue;
+    const chest = /^chest-(\w+?)(-open)?$/.exec(m[2]);
+    if (chest) {
+      assert.ok(tiers.has(chest[1]), `${rel}: not a chest tier`);
+      assert.ok(code.includes("`fx/chest-${"), "the chest template is gone from the mod");
+    } else if (!code.includes(`"${m[1]}.svg"`)) unused.push(rel);
+  }
+  assert.deepEqual(unused, [], "effect sprites that nothing in mods/down-the-stack draws");
+});
+
 // ---------------------------------------------------------------------------------------------
 // The sharing files herdr's own convention expects next to the layout (defaults/AGENTS.md
 // "Layouts and mods other people made"): RECIPE.md in its fixed section order with preview.png,
@@ -348,7 +376,7 @@ test("RECIPE.md follows herdr's recipe order and README.md gives the install tar
   assert.ok(layouts.length >= 1, "no layout file");
   const sections = Object.keys(JSON.parse(fs.readFileSync(path.join(ROOT, "keys.example.json"), "utf8")));
   const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
-  for (const s of [...layouts.map((f) => `layouts/${f}`), "mods/mapledr", "HERDR_APP_HOME", "XDG_CONFIG_HOME",
+  for (const s of [...layouts.map((f) => `layouts/${f}`), "mods/down-the-stack", "HERDR_APP_HOME", "XDG_CONFIG_HOME",
     "~/.config/herdr-app", "herdr-app check", "layout.switch", "keys.example.json", ...sections])
     assert.ok(readme.includes(s), `README.md does not mention ${s}`);
   for (const f of layouts) {
@@ -360,4 +388,77 @@ test("RECIPE.md follows herdr's recipe order and README.md gives the install tar
   const named = new Set([...(readme + recipe).matchAll(/`((?:layouts|mods|tools|docs|test)\/[^`\s*<>]+?)`/g)].map((m) => m[1]));
   const missing = [...named].filter((rel) => !fs.existsSync(path.join(ROOT, rel.replace(/\/$/, ""))));
   assert.deepEqual(missing, [], "README.md / RECIPE.md name paths that do not exist");
+});
+
+// The lists in RECIPE.md "Built from" and README.md are read off the code here, so a feature that
+// adds a herdr call, a command, a key or a save file cannot leave them behind (round 2 found the
+// nameplate's pane.split / pane.zoom / pane.close and save.unsaved missing).
+test("README.md and RECIPE.md name the herdr functions, commands, keys, save files and art the mod uses", () => {
+  const recipe = fs.readFileSync(path.join(ROOT, "RECIPE.md"), "utf8");
+  const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
+  const files = new Map();
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) { if (e.name !== "art") walk(p); } else if (e.name.endsWith(".js")) files.set(path.relative(MOD, p), fs.readFileSync(p, "utf8"));
+    }
+  };
+  walk(MOD);
+  // code lines only: a whole-line comment (//, /*, * …) may name a command it does not run
+  const codeOf = (src) => src.split("\n").filter((l) => !/^\s*(\/\/|\/\*|\*)/.test(l)).join("\n");
+  /** The text of a "- **label**" bullet of RECIPE.md, with its indented continuation lines. */
+  const bullet = (label) => {
+    const lines = recipe.split("\n");
+    const i = lines.findIndex((l) => l.startsWith(`- **${label}**`));
+    assert.ok(i >= 0, `RECIPE.md has no "${label}" bullet`);
+    let j = i + 1;
+    while (j < lines.length && lines[j].startsWith("  ")) j++;
+    return lines.slice(i, j).join("\n");
+  };
+  const ticked = (text) => [...text.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+  const sorted = (xs) => [...new Set(xs)].sort();
+
+  // herdr functions: every name imported from "herdr", no more, no less
+  const imported = [];
+  for (const src of files.values()) {
+    for (const m of src.matchAll(/import\s*\{([^}]*)\}\s*from\s*"herdr"/g)) {
+      for (const part of m[1].split(",")) { const name = part.trim().split(/\s+as\s+/)[0]; if (name) imported.push(name); }
+    }
+  }
+  assert.ok(imported.includes("notify") && imported.includes("readTextFile"), "the herdr import scan found nothing");
+  assert.deepEqual(sorted(ticked(bullet("herdr functions"))), sorted(imported), "RECIPE.md herdr functions vs the mod's imports");
+
+  // commands: every herdr app command the code names as a string literal (run(), the nameplate's
+  // buttons, the host's layout calls, the toast's mod.open action)
+  const app = new Set([...fs.readFileSync(path.join(ROOT, "tools/mock/herdr-commands.md"), "utf8").matchAll(/^## `([^`]+)`\s*$/gm)].map((m) => m[1]));
+  const used = [];
+  for (const src of files.values()) for (const m of codeOf(src).matchAll(/"([a-z]+\.[a-z_]+)"/g)) if (app.has(m[1])) used.push(m[1]);
+  assert.ok(used.includes("pane.focus") && used.includes("layout.hide"), "the command scan found nothing");
+  const cmds = bullet("Commands run");
+  const listed = ticked(cmds).map((t) => t.split(/\s/)[0]).filter((t) => app.has(t));
+  assert.deepEqual(sorted(listed), sorted(used), "RECIPE.md Commands run vs the commands the mod's code names");
+  assert.ok(files.get("host.js").includes("run(`${MOD}.tick`)") && cmds.includes("`down-the-stack.tick`"), "the host's own tick broadcast");
+
+  // keys: README's table row per key with its action; RECIPE names every key
+  const keys = JSON.parse(fs.readFileSync(path.join(ROOT, "keys.example.json"), "utf8"));
+  for (const [section, map] of Object.entries(keys)) {
+    for (const [key, action] of Object.entries(map)) {
+      assert.ok(readme.split("\n").some((l) => l.trim().startsWith("|") && l.includes(`\`${key}\``) && l.includes(`\`${action}\``)),
+        `README.md has no key table row "${key}" → ${action} (${section})`);
+      assert.ok(recipe.includes(`\`${key}\``), `RECIPE.md does not name the key ${key}`);
+    }
+  }
+
+  // save files: every save.<x> host.js builds in its data folder (`${dir}/save.json` …)
+  const saves = sorted([...codeOf(files.get("host.js")).matchAll(/\}\/(save\.[a-z]+)\b/g)].map((m) => m[1]));
+  assert.deepEqual(saves, ["save.bak", "save.broken", "save.json", "save.unsaved"], "host.js save files (update this list and the docs together)");
+  for (const f of saves) {
+    assert.ok(readme.includes(`\`${f}\``), `README.md does not name ${f}`);
+    assert.ok(recipe.includes(`\`${f}\``), `RECIPE.md does not name ${f}`);
+  }
+
+  // the art count RECIPE.md "Built from" gives is the generator's (preview.svg counted apart)
+  const artCount = [...generateAll().keys()].filter((r) => r.startsWith("art/")).length;
+  const said = /\*\*Art\*\*: (\d+) SVGs/.exec(recipe);
+  assert.equal(said ? Number(said[1]) : null, artCount, "RECIPE.md Art: the number of SVGs gen-art.mjs writes under art/");
 });

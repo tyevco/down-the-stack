@@ -9,12 +9,18 @@ import assert from "node:assert/strict";
 const M = await import("../tools/mock/index.mjs");
 const { View } = await import("gpui-kit");
 const { SCENARIOS, makeScenario, scenarios } = await import("../tools/vm-samples/stage.mjs");
-const stageMod = await import("../mods/mapledr/ui/stage.js");
+const stageMod = await import("../mods/down-the-stack/ui/stage.js");
 const Stage = stageMod.default;
-const { renderTermling, renderForkling, shade } = await import("../mods/mapledr/ui/termling.js");
+const { renderTermling, renderForkling, shade, termlingCost } = await import("../mods/down-the-stack/ui/termling.js");
+const { _budget: B } = stageMod;
 
 const WIDTHS = [360, 960, 1600, 2400];
+const WIDE = [2800, 3200, 3600, 4000];
 const ZOOMS = [1, 2];
+// Wall-clock bounds: herdr's real budget with PERF=1; under a loaded CI machine only a generous
+// bound (a hang or a runaway loop), and the measured numbers always go to the test output.
+const PERF = process.env.PERF === "1";
+const RENDER_MS = PERF ? 50 : 500;
 
 /** A fake GameHost per the UI role contract; `ref.vm` is what host.view() returns. */
 function fakeHost(ref, extra = {}) {
@@ -54,14 +60,35 @@ async function mountStage(vm, { width = vm?.width ?? 960, height = vm?.height ??
   return { mod, host, ref, stage: mod.view.stage };
 }
 
+// The mock's "budget" errors (a render over 50 ms, a handler over 500 ms, each timed as the lower
+// of wall and CPU time, tools/mock/state.mjs stopwatch()) count only with PERF=1: a loaded machine
+// can still stretch a 5 ms V8 render's CPU time past them (the numbers are printed).
 const problems = (mod) => [
-  ...mod.errors.map((e) => `${e.code}: ${e.message}`),
+  ...mod.errors.filter((e) => PERF || e.code !== "budget").map((e) => `${e.code}: ${e.message}`),
   ...mod.warnings.filter((w) => ["duplicate-id", "many-elements", "transition-no-id", "loop-replaced", "tooltip-on-image", "frames-children"].includes(w.code)).map((w) => `${w.code}: ${w.message}`),
 ];
 const methodsOf = (node, name) => node.methods.filter((m) => m[0] === name).map((m) => m[1]);
 const ids = (mod) => new Set(mod.findAll((n) => n.id != null).map((n) => n.id));
+const ANIM = new Set(["loop", "transition", "frames", "spring"]);
+/** Nodes that animate (D§11.9.7 counts them: ~150 per stage render). */
+const animated = (mod) => mod.findAll((n) => n.type !== "text" && n.methods.some((m) => ANIM.has(m[0]))).length;
+/** The detail level the role's last render held (ui/stage.js detail(); 0 = full detail). */
+const levelOf = (stage) => stage.ui?.detail?.level ?? 0;
 
-test("every scenario renders cleanly at every width and zoom, under the element budget", async () => {
+/** Every status cue the VM asks for is drawn: heroes, plates, "!" bubbles, chests (D§11.9.7 ladder). */
+function statusKept(mod, vm, where) {
+  const compact = (vm.height ?? 200) < 100;
+  for (const h of vm.heroes) {
+    if (!compact) assert.ok(mod.node(h.key), `${where}: hero ${h.key}`);
+    if (h.nameplate) assert.ok(mod.node(`${h.key}/plate`), `${where}: plate ${h.key}`);
+    if (h.bubble) assert.ok(mod.node(`${h.key}/bubble`), `${where}: "!" of ${h.key}`);
+  }
+  for (const c of vm.chests) assert.ok(mod.node(c.key), `${where}: chest ${c.key}`);
+  if (vm.overflow) assert.ok(mod.node(vm.overflow.key), `${where}: camp chip`);
+}
+
+test("every scenario renders cleanly at every width and zoom, under the element budget", async (t) => {
+  let worst = { ms: 0, at: "" };
   for (const name of SCENARIOS) {
     for (const width of WIDTHS) {
       const vm = makeScenario(name, { width });
@@ -72,9 +99,35 @@ test("every scenario renders cleanly at every width and zoom, under the element 
         assert.ok(mod.tree, `${where}: no tree`);
         assert.equal(mod.tree.id, "stage", where);
         assert.ok(mod.stats.elements < 400, `${where}: ${mod.stats.elements} elements`);
-        assert.ok(mod.stats.lastRenderMs < 50, `${where}: render ${mod.stats.lastRenderMs.toFixed(1)} ms`);
+        assert.ok(animated(mod) <= 150, `${where}: ${animated(mod)} animated`);
+        if (mod.stats.maxRenderMs > worst.ms) worst = { ms: mod.stats.maxRenderMs, at: where };
+        assert.ok(mod.stats.maxRenderMs < RENDER_MS, `${where}: render ${mod.stats.maxRenderMs.toFixed(1)} ms`);
       }
     }
+  }
+  t.diagnostic(`slowest V8 render: ${worst.ms.toFixed(1)} ms (${worst.at}); bound ${RENDER_MS} ms${PERF ? " (PERF=1)" : ""}`);
+});
+
+test("budget: every scenario on a 2800–4000 px stage holds ~400 elements and ~150 animated, status kept", async (t) => {
+  const seen = [];
+  for (const name of SCENARIOS) {
+    for (const width of WIDE) {
+      const vm = makeScenario(name, { width });
+      const { mod, stage } = await mountStage(vm, { width });
+      const where = `${name} @${width}px`;
+      assert.deepEqual(problems(mod), [], where);
+      assert.ok(mod.stats.elements <= 400, `${where}: ${mod.stats.elements} elements`);
+      assert.ok(animated(mod) <= 150, `${where}: ${animated(mod)} animated`);
+      if (!vm.empty) statusKept(mod, vm, where);
+      if (name === "throng" || name === "squeeze") seen.push(`${where}: ${vm.heroes.length} slots, level ${levelOf(stage)}, ${mod.stats.elements} el, ${animated(mod)} animated`);
+    }
+  }
+  for (const line of seen) t.diagnostic(line);
+  // the ultrawide crowds really need the ladder: they would be ~2× over at full detail
+  for (const name of ["throng", "squeeze"]) {
+    const vm = makeScenario(name, { width: 4000 });
+    const full = B.sceneCost(vm, vm.rooms, vm.heroes, { W: 4000, H: 200, vm }, B.atLevel(0));
+    assert.ok(full.el > 600, `${name}: ${full.el} elements at full detail`);
   }
 });
 
@@ -118,7 +171,7 @@ test("clicks: hero shows its pane (pane.focus) + marks seen, double-click and na
 
   r = mod.fire(kip.key, { click_count: 2 });
   const sheet = M.calls().openOverlay.at(-1).spec;
-  assert.deepEqual(sheet, { mod: "mapledr", kind: "dialog", width: 760, height: 500, props: { role: "sheet", heroId: 1 } });
+  assert.deepEqual(sheet, { mod: "down-the-stack", kind: "dialog", width: 760, height: 500, props: { role: "sheet", heroId: 1 } });
 
   const before = M.calls().openOverlay.length;
   mod.fire(`${kip.key}/plate`);
@@ -213,24 +266,29 @@ test("the next tick's VM reuses the same ids (transitions keep their state)", as
   for (const name of SCENARIOS) {
     const vm0 = makeScenario(name);
     const vm1 = makeScenario(name, { tick: 1 });
-    const { mod, ref } = await mountStage(vm0);
+    const { mod, ref, stage } = await mountStage(vm0);
     const before = ids(mod);
     ref.vm = vm1;
     mod.render();
     const after = ids(mod);
     assert.deepEqual(problems(mod), [], name);
     const compact = (vm0.height ?? 200) < 100; // compact shows no sprites, only plates and chests
+    // a crowded stage keeps the front of each lane only (its detail level, held across the ticks)
+    const lanes = B.atLevel(levelOf(stage)).mobLanes;
     const stable = [
       ...vm1.rooms.map((r) => r.key), ...vm1.chests.map((c) => c.key),
       ...vm1.heroes.filter((h) => h.nameplate).map((h) => `${h.key}/plate`),
-      ...(compact ? [] : [...vm1.heroes.map((h) => h.key), ...vm1.mobs.map((m) => m.key), ...(vm1.boss ? [vm1.boss.key] : [])]),
+      ...(compact ? [] : [...vm1.heroes.map((h) => h.key), ...vm1.mobs.filter((m) => (m.lane ?? 0) < lanes).map((m) => m.key), ...(vm1.boss ? [vm1.boss.key] : [])]),
     ];
     for (const k of stable) {
       assert.ok(before.has(k), `${name}: ${k} missing at tick 0`);
       assert.ok(after.has(k), `${name}: ${k} missing at tick 1`);
     }
-    // age-0 effects are still there at tick 1 (same id), faded out and moved by (dx, dy)
+    // age-0 effects are still there at tick 1 (same id), faded out and moved by (dx, dy): those the
+    // budget keeps at tick 1 (a crowded stage keeps status floats, then the newest)
+    const kept1 = new Set(stageMod.stageDetail(vm1, vm1.rooms, vm1.heroes, { W: vm1.width, H: vm1.height ?? 200, vm: vm1 }).fxKept.map((f) => f.key));
     for (const f of compact ? [] : vm0.fx.filter((x) => x.age === 0 && x.kind !== "levelup" && x.kind !== "pillar" && x.kind !== "stamp")) {
+      if (!kept1.has(f.key)) continue;
       if (vm0.calm || (["num", "crit", "heal", "miss", "inv", "abs", "incoming"].includes(f.kind) && vm0.nums === "off")) continue;
       const f1 = vm1.fx.find((x) => x.key === f.key);
       assert.ok(f1 && f1.age === 1, `${name}: ${f.key} should be age 1 next tick`);
@@ -273,7 +331,7 @@ test("calm mode: no loops, no frames, no damage numbers, 60% stage", async () =>
   const chest = mod.node(vm.chests[0].key);
   assert.ok(chest);
   assert.equal(opacityChain(chest), 1, "the chest is not dimmed");
-  const fkBubbles = mod.findAll((n) => n.src === "mods/mapledr/art/fx/bubble.svg" && methodsOf(n, "w").at(-1)?.[0] === 9);
+  const fkBubbles = mod.findAll((n) => n.src === "mods/down-the-stack/art/fx/bubble.svg" && methodsOf(n, "w").at(-1)?.[0] === 9);
   assert.ok(fkBubbles.length >= 1, "the blocked forkling's small bubble");
   for (const n of fkBubbles) assert.equal(opacityChain(n), 1, "the forkling's bubble is not dimmed");
   // a hero is (60 %)
@@ -363,14 +421,91 @@ test("clicks: a loot pillar opens the finder's sheet on that item (through the h
   const pillar = vm.fx.find((f) => f.kind === "pillar" && f.sheet);
   assert.ok(pillar);
   let { mod } = await mountStage(vm);
-  assert.ok(mod.fire(pillar.key).stopped);
+  assert.ok(mod.fire(`${pillar.key}/hit`).stopped);
   assert.deepEqual(M.calls().openOverlay.at(-1).spec.props, { role: "sheet", heroId: pillar.sheet.heroId, focus: pillar.sheet.itemUid });
+  assert.equal(mod.fire(pillar.key).called, 0, "the light column itself has no handler");
   const opened = [];
   ({ mod } = await mountStage(vm, { host: { openSheet: (heroId, opts) => { opened.push([heroId, opts]); return "ov1"; } } }));
   const before = M.calls().openOverlay.length;
-  mod.fire(pillar.key);
+  mod.fire(`${pillar.key}/hit`);
   assert.deepEqual(opened, [[pillar.sheet.heroId, { focus: pillar.sheet.itemUid }]]);
   assert.equal(M.calls().openOverlay.length, before, "the host opens it (one sheet at a time)");
+});
+
+test("a loot pillar on a short stage (120 px) starts below the header band, its rarity name on screen", async () => {
+  for (const height of [200, 120]) {
+    const vm = makeScenario("boss-won", { height });
+    const p = vm.fx.find((f) => f.kind === "pillar");
+    const { mod } = await mountStage(vm, { height });
+    const ground = height - 200 + 160;
+    for (const id of [p.key, `${p.key}/hit`]) {
+      const n = mod.node(id);
+      const top = methodsOf(n, "top").at(-1)[0];
+      const h = methodsOf(n, "h").at(-1)[0];
+      assert.ok(top >= 18 && Math.abs(top + h - ground) < 0.01, `${id} @${height}: ${top}..${top + h}, ground ${ground}`);
+    }
+    const label = methodsOf(mod.node(`${p.key}/t`), "top").at(-1)[0];
+    assert.ok(label >= 18 && label + 12 <= ground, `label @${height}: ${label}`);
+    if (height === 200) assert.equal(label, 24, "unchanged on a 200 px stage");
+  }
+});
+
+/**
+ * GPUI's click dispatch over the last render: every element under (x, y) with an on_click, the
+ * topmost (last painted) first, until one stops propagation (gpui window.rs dispatch_mouse_event:
+ * bubble phase in reverse paint order; herdr-notes gpui-api.md §2.8). Absolute boxes only.
+ */
+function clickAt(mod, x, y) {
+  const hits = [];
+  const walk = (n, ox, oy) => {
+    if (n.type === "text") return;
+    const v = (name) => { const m = methodsOf(n, name).at(-1); return m && typeof m[0] === "number" ? m[0] : null; };
+    const abs = n.methods.some((m) => m[0] === "absolute");
+    const left = abs ? ox + (v("left") ?? 0) : ox;
+    const top = abs ? oy + (v("top") ?? 0) : oy;
+    const w = v("w"), h = v("h");
+    if (abs && w != null && h != null && (n.handlers.on_click ?? []).length && x >= left && x < left + w && y >= top && y < top + h) hits.push(n);
+    for (const c of n.children) walk(c, left, top);
+  };
+  walk(mod.live, 0, 0);
+  const fired = [];
+  for (const n of hits.reverse()) {
+    const r = mod.fire(n, undefined);
+    fired.push(n.id);
+    if (r.stopped) break;
+  }
+  return fired;
+}
+
+test("clicks: the finder standing in its loot pillar's light gets its own clicks (the pillar takes the rest)", async () => {
+  // throng: the pillar stands where game/view/stage.js puts one, 26 px right of its finder, so
+  // its 48 px column covers the finder's right half for both ticks it lives
+  const vm = scenarios.throng;
+  const pillar = vm.fx.find((f) => f.kind === "pillar" && f.sheet);
+  const finder = vm.heroes.find((h) => h.heroId === pillar.sheet.heroId);
+  assert.ok(pillar && finder);
+  const { mod, host, ref } = await mountStage(vm);
+  for (const tick of [0, 1]) {
+    ref.vm = makeScenario("throng", { tick });
+    mod.render();
+    const p = ref.vm.fx.find((f) => f.key === pillar.key);
+    assert.ok(p && mod.node(p.key), `tick ${tick}: the pillar is drawn`);
+    const body = mod.node(finder.key);
+    const [bl, bt, bw, bh] = ["left", "top", "w", "h"].map((k) => methodsOf(body, k).at(-1)[0]);
+    const x = p.x - 24 + 4; // inside the column and inside the hero
+    assert.ok(x > bl && x < bl + bw, `tick ${tick}: the column covers the hero (${x} in ${bl}..${bl + bw})`);
+    const n = host.log.commands.length;
+    const fired = clickAt(mod, x, bt + bh / 2);
+    assert.equal(fired[0], finder.key, `tick ${tick}: ${fired.join(" → ")}`);
+    assert.deepEqual(host.log.commands.slice(n), [{ name: "markSeen", args: { heroId: finder.heroId } }]);
+    assert.deepEqual(lastRun(), { name: "pane.focus", args: { terminal: finder.address } });
+    // the rest of the column (above the head) opens the sheet on the item
+    const before = M.calls().openOverlay.length;
+    assert.deepEqual(clickAt(mod, p.x, bt - 30), [`${p.key}/hit`], `tick ${tick}: above the head`);
+    assert.equal(M.calls().openOverlay.length, before + 1);
+    assert.deepEqual(M.calls().openOverlay.at(-1).spec.props, { role: "sheet", heroId: finder.heroId, focus: p.sheet.itemUid });
+  }
+  assert.deepEqual(problems(mod), []);
 });
 
 test("review end: the Promotion banner (12 confetti) and the Postmortem card in their slots; calm keeps the card", async () => {
@@ -566,7 +701,7 @@ test("role commands: sheet for the focused agent's hero, herd panel, calm toggle
   stage.command("sheet");
   assert.deepEqual(M.calls().openOverlay.at(-1).spec.props, { role: "sheet", heroId: 2 });
   stage.command("herd");
-  assert.deepEqual(M.calls().openOverlay.at(-1).spec, { mod: "mapledr", kind: "dialog", width: 760, height: 520, props: { role: "herd" } });
+  assert.deepEqual(M.calls().openOverlay.at(-1).spec, { mod: "down-the-stack", kind: "dialog", width: 760, height: 520, props: { role: "herd" } });
   stage.command("calm");
   assert.deepEqual(host.log.commands.at(-1), { name: "setting", args: { key: "calm", value: true } });
 });
@@ -579,7 +714,8 @@ test("termling: tier-5 weapons get the cyan edge; tinted icons are masks; forkli
     render() {
       const el = renderTermling({ ...h, weapon: { ...h.weapon, edge: true }, programIcon: { path: "icons/codex.svg", tint: true, color: "#E6E6E6" } }, { zoom: 1 });
       const fk = renderForkling({ key: "fork:x", address: "x", x: 50, y: 160, face: ">_", status: "working" }, h, { zoom: 1 });
-      return el.child(fk);
+      const tiny = renderForkling({ key: "fork:y", address: "y", x: 70, y: 160, face: "o_o", status: "blocked" }, h, { zoom: 1 }, { tiny: true });
+      return el.child(fk).child(tiny);
     }
   }
   const mod = await M.mountView(T, {});
@@ -593,26 +729,190 @@ test("termling: tier-5 weapons get the cyan edge; tinted icons are masks; forkli
   assert.equal(edge.length, 1);
   assert.equal(iconType, "svg");
   assert.equal(forkCount, 3);
+  const tinyFork = mod.node("fork:y");
+  assert.equal(walk(tinyFork), 1, "a tiny Forkling is one element");
+  assert.equal(methodsOf(tinyFork, "text_color").at(-1)[0], "#F2A93B", "its blocked face stays amber");
   assert.equal(shade("#808080", -0.5), "#404040");
   assert.equal(shade("#000000", 0.5), "#808080");
 });
 
-test("the element estimate that picks scenery detail tracks the real count", async () => {
+test("the estimate that picks the detail level counts elements and animated nodes exactly", async () => {
   const { stageDetail } = stageMod;
+  const off = [];
+  const levels = new Set();
   for (const name of SCENARIOS) {
-    for (const width of WIDTHS) {
-      const vm = makeScenario(name, { width });
-      if (vm.empty || vm.height < 100) continue;
-      const { mod } = await mountStage(vm, { width });
-      const d = stageDetail(vm, vm.rooms, vm.heroes, { compact: false, W: width });
-      assert.ok(Math.abs(d.estimate - mod.stats.elements) <= 30, `${name} @${width}: estimate ${Math.round(d.estimate)} vs ${mod.stats.elements}`);
+    // swamped: 2400 / 2600 / 2800+ px reach the last three levels (lean marks, dim in the room, fork counters)
+    for (const width of [...WIDTHS, ...WIDE, ...(name === "swamped" ? [2600] : [])]) {
+      for (const height of name === "midgame" || name === "squeeze" || name === "swamped" ? [200, 120, 64] : [undefined]) {
+        const vm = makeScenario(name, { width, height });
+        if (vm.empty) continue;
+        const H = vm.height ?? 200;
+        const { mod, stage } = await mountStage(vm, { width, height: H });
+        const d = stageDetail(vm, vm.rooms, vm.heroes, { compact: H < 100, W: width, H, vm });
+        assert.equal(d.level, levelOf(stage), `${name} @${width}×${H}: a fresh render picks the same level`);
+        levels.add(d.level);
+        // a header note that finds no header with room is not drawn: the estimate may count it
+        const slack = vm.headerNote ? 1 : 0;
+        const de = d.estimate - mod.stats.elements;
+        const da = d.animated - animated(mod);
+        if (de < 0 || de > slack || da !== 0) off.push(`${name} @${width}×${H} (level ${d.level}): estimate ${d.estimate}/${d.animated} vs ${mod.stats.elements}/${animated(mod)}`);
+      }
     }
   }
-  // the crowd needs the lean levels; a dozen heroes at 2400 px keep full detail
+  assert.deepEqual(off, []);
+  // the samples reach the coarse levels too, the last three (swamped) included
+  for (const k of [10, 11, 12, 13, B.levels() - 2, B.levels() - 1, B.levels()]) assert.ok(levels.has(k), `level ${k} is exercised by a sample`);
+  // the crowd needs the lean levels; a dozen heroes at 2400 px keep everything but the ground tiles
   const crowd = scenarios.crowd;
-  const dc = stageDetail(crowd, crowd.rooms, crowd.heroes, { compact: false, W: crowd.width });
+  const dc = stageDetail(crowd, crowd.rooms, crowd.heroes, { compact: false, W: crowd.width, vm: crowd });
   assert.equal(dc.groundTiles, false);
+  assert.equal(dc.tinyRig, false);
   const wide = scenarios["late-wide"];
-  const dw = stageDetail(wide, wide.rooms, wide.heroes, { compact: false, W: wide.width });
-  assert.deepEqual([dw.groundTiles, dw.farTiles, dw.leanRig], [true, true, false]);
+  const dw = stageDetail(wide, wide.rooms, wide.heroes, { compact: false, W: wide.width, vm: wide });
+  assert.ok(dw.level <= 1, `late-wide: level ${dw.level}`);
+  assert.deepEqual([dw.farTiles, dw.leanRig, dw.still], [true, false, false]);
+});
+
+test("the last levels merge status into fewer elements and never drop it (swamped: lean marks, dim in the room, fork counters)", async () => {
+  const { stageDetail } = stageMod;
+  const seen = new Set();
+  for (const width of [2400, 2600, 3200]) {
+    const vm = makeScenario("swamped", { width });
+    const { mod, stage } = await mountStage(vm, { width });
+    const L = levelOf(stage);
+    const d = B.atLevel(L);
+    seen.add(L);
+    const where = `swamped @${width} (level ${L})`;
+    assert.ok(L >= 15, where);
+    assert.deepEqual(problems(mod), [], where);
+    assert.ok(mod.stats.elements <= 400 && animated(mod) <= 150, `${where}: ${mod.stats.elements} / ${animated(mod)}`);
+    statusKept(mod, vm, where);
+    const kidsOf = (n) => n.children.filter((c) => c.type !== "text");
+    const textOf = (n) => n.children.filter((c) => c.type === "text").map((c) => c.text).join("");
+    for (const h of vm.heroes) {
+      // the "!" bubble: one drawn element (no art child), still a click target with the label
+      if (h.bubble) {
+        const b = mod.node(`${h.key}/bubble`);
+        assert.equal(kidsOf(b).length, 0, `${where}: ${h.key} bubble is one element`);
+        assert.equal(textOf(b), "!");
+        assert.ok((b.handlers.on_click ?? []).length && methodsOf(b, "tooltip").length, `${where}: ${h.key} bubble click + tooltip`);
+      }
+      // the reboot bar: one element, the done part a cream left border
+      if (h.state === "crashed") {
+        const r = mod.node(`${h.key}/reboot`);
+        assert.equal(kidsOf(r).length, 0);
+        assert.equal(methodsOf(r, "border_l").at(-1)[0], Math.round(28 * h.rebootFrac));
+      }
+    }
+    // chests: the SHIPPED ribbon and the "×n" are one label that still reads over the hero in front
+    const closed = vm.chests.filter((c) => !c.open && c.tier !== "duck");
+    const labels = mod.findAll((n) => n.type !== "text" && textOf(n).startsWith("SHIPPED ×")).map(textOf).sort();
+    assert.deepEqual(labels, closed.filter((c) => c.count > 1).map((c) => `SHIPPED ×${c.count}`).sort(), `${where}: labels`);
+    const ribbons = mod.findAll((n) => n.src === "mods/down-the-stack/art/fx/ribbon.svg").length;
+    assert.equal(ribbons, closed.filter((c) => !(c.count > 1)).length, `${where}: ribbons`);
+    assert.equal(mod.findAll((n) => n.type !== "text" && /^×\d/.test(textOf(n))).length, 0, `${where}: no separate count badges`);
+    // painted after the heroes (over the one standing in front of its chest)
+    const heroKeys = new Set(vm.heroes.map((h) => h.key));
+    const order = mod.findAll((n) => heroKeys.has(n.id) || (n.type !== "text" && textOf(n).startsWith("SHIPPED ×"))).map((n) => (heroKeys.has(n.id) ? "hero" : "label"));
+    assert.ok(order.lastIndexOf("hero") < order.indexOf("label"), `${where}: labels over the heroes`);
+    // dim in the room: a blocked hero alone in its room has no overlay element, the room is darker
+    const overlays = mod.findAll((n) => methodsOf(n, "bg").at(-1)?.[0] === "#00000033").length;
+    const waiting = vm.heroes.filter((h) => h.state === "waiting" && h.slot);
+    const alone = waiting.filter((h) => vm.rooms.some((r) => Math.abs(r.x - h.slot.x) < 0.6 && Math.abs(r.w - h.slot.w) < 0.6));
+    assert.ok(alone.length > 0);
+    assert.equal(overlays, d.dimInRoom ? waiting.length - alone.length : waiting.length, `${where}: overlays`);
+    if (d.dimInRoom) {
+      for (const h of alone) {
+        const r = vm.rooms.find((x) => Math.abs(x.x - h.slot.x) < 0.6);
+        const bg = methodsOf(mod.node(r.key), "bg").at(-1)[0];
+        const lum = (c) => [1, 3, 5].reduce((a, i) => a + parseInt(c.slice(i, i + 2), 16), 0);
+        assert.ok(/^#[0-9a-f]{6}$/i.test(bg) && lum(bg) < lum(r.skyBands[0]), `${where}: ${r.key} dimmed (${bg} vs ${r.skyBands[0]})`);
+      }
+    }
+    // fork counters: no Forkling bodies, one "+n" per hero with sub-agents, amber "!" when one is blocked
+    const withForks = vm.heroes.filter((h) => h.forklings.length);
+    assert.ok(withForks.length > 0);
+    for (const h of withForks) {
+      const fkDrawn = h.forklings.filter((f) => mod.node(f.key)).length;
+      const counter = mod.node(`${h.key}/forks`);
+      if (!d.forkCounter) { assert.ok(fkDrawn >= 1 && !counter, `${where}: ${h.key} Forklings drawn`); continue; }
+      assert.equal(fkDrawn, 0, `${where}: ${h.key} no Forkling bodies`);
+      const n = h.forklings.length + h.forklingExtra;
+      const blocked = h.forklings.find((f) => f.bubble);
+      assert.equal(textOf(counter), blocked ? `+${n} !` : `+${n}`);
+      assert.equal(methodsOf(counter, "text_color").at(-1)[0], blocked ? "#F2A93B" : methodsOf(counter, "text_color").at(-1)[0]);
+      assert.ok(mod.fire(counter).stopped);
+      assert.deepEqual(lastRun(), { name: "terminal.peek", args: { terminal: (blocked ?? h.forklings[0]).address } });
+    }
+    // and the estimate still counts it all exactly
+    const de = stageDetail(vm, vm.rooms, vm.heroes, { W: width, H: 200, vm });
+    assert.deepEqual([de.level, de.estimate, de.animated], [L, mod.stats.elements, animated(mod)], where);
+  }
+  assert.deepEqual([...seen].sort((a, b) => a - b), [15, 16, 17]);
+});
+
+test("the detail level holds against a mob or two (hysteresis) and steps back only with room to spare", async () => {
+  const { stageDetail } = stageMod;
+  const W = 2800;
+  const vmA = makeScenario("throng", { width: W });
+  const ctx = (vm, ui) => ({ W, H: 200, vm, ui });
+  const ui = {};
+  const L = stageDetail(vmA, vmA.rooms, vmA.heroes, ctx(vmA, ui)).level;
+  assert.ok(L >= 2, `throng @${W}: level ${L}`);
+  const finer = (vm) => B.sceneCost(vm, vm.rooms, vm.heroes, ctx(vm), B.atLevel(L - 1));
+  const fits = (c, m) => c.el + B.FX_RESERVE.el + m.el <= B.BUDGET && c.an + B.FX_RESERVE.an + m.an <= B.ANIM_BUDGET;
+  // drop lane mobs one by one: first the finer level fits, but without MARGIN to spare...
+  const mobs = vmA.mobs.slice();
+  const less = () => ({ ...vmA, mobs: mobs.slice() });
+  while (mobs.length && !fits(finer(less()), { el: 0, an: 0 })) mobs.pop();
+  const vmB = less();
+  assert.ok(fits(finer(vmB), { el: 0, an: 0 }) && !fits(finer(vmB), B.MARGIN), "a state just inside the finer level");
+  assert.equal(stageDetail(vmB, vmB.rooms, vmB.heroes, ctx(vmB)).level, L - 1, "a fresh render would step back");
+  assert.equal(stageDetail(vmB, vmB.rooms, vmB.heroes, ctx(vmB, ui)).level, L, "the held level stays");
+  // ...then with room to spare it steps back
+  while (mobs.length && !fits(finer(less()), B.MARGIN)) mobs.pop();
+  const vmC = less();
+  assert.equal(stageDetail(vmC, vmC.rooms, vmC.heroes, ctx(vmC, ui)).level, L - 1);
+  // another size decides afresh
+  assert.equal(stageDetail(vmA, vmA.rooms, vmA.heroes, { ...ctx(vmA, ui), W: W + 1 }).level, L);
+  // and the role keeps it across its own renders
+  const { mod, ref, stage } = await mountStage(vmA);
+  assert.equal(levelOf(stage), L);
+  ref.vm = vmB;
+  mod.render();
+  assert.equal(levelOf(stage), L);
+  assert.ok(mod.stats.elements <= 400);
+});
+
+test("termling: the rig's cost function matches what it builds, full, lean, small and tiny", async () => {
+  M.resetState();
+  const heroes = SCENARIOS.flatMap((n) => makeScenario(n).heroes);
+  const modes = [{}, { lean: true }, { lean: true, small: true }, { tiny: true }, { blink: true }, { tiny: true, blink: true }];
+  const off = [];
+  class T extends View {
+    render() {
+      const root = div().id("root");
+      heroes.forEach((h, i) => modes.forEach((o, k) => root.child(renderTermling({ ...h, key: `h${i}.${k}` }, { zoom: 1 }, o))));
+      return root;
+    }
+  }
+  const { div } = await import("gpui-kit");
+  const mod = await M.mountView(T, {});
+  mod.render();
+  assert.deepEqual(problems(mod).filter((p) => !p.startsWith("many-elements")), []); // every rig of every sample at once
+  const walk = (n) => (n.type === "text" ? [0, 0] : n.children.reduce((a, c) => { const [e, x] = walk(c); return [a[0] + e, a[1] + x]; }, [1, n.methods.some((m) => ANIM.has(m[0])) ? 1 : 0]));
+  heroes.forEach((h, i) => modes.forEach((o, k) => {
+    const [el, an] = walk(mod.node(`h${i}.${k}`));
+    const c = termlingCost(h, o);
+    if (c.el !== el || c.an !== an) off.push(`${h.key} ${JSON.stringify(o)}: cost ${c.el}/${c.an}, built ${el}/${an}`);
+  }));
+  assert.deepEqual(off, []);
+  // the tiny rig is one element that still shows the face in its status ink, framed by the hoodie
+  const wi = heroes.findIndex((x) => x.state === "waiting");
+  const h = heroes[wi];
+  const tiny = mod.node(`h${wi}.3`);
+  assert.equal(tiny.children.filter((c) => c.type !== "text").length, 0);
+  assert.equal(tiny.children.find((c) => c.type === "text")?.text, h.face);
+  assert.equal(methodsOf(tiny, "text_color").at(-1)[0], h.colors.faceInk);
+  assert.equal(methodsOf(tiny, "border_color").at(-1)[0], h.colors.hoodie);
 });

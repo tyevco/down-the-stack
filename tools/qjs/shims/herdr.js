@@ -3,6 +3,14 @@
 // tools/mock/herdr.mjs (itself built from herdr's source): live reads return fresh copies, IO is
 // promise-based with the expected-text discipline, checking() makes reads never resolve and
 // props() null.
+//
+// Host async calls and builds (the reload phase): herdr runs readTextFile / writeTextFile as tasks
+// of the calling frame's build (host_modules.rs host_async_call → scheduler awaiting_cancellable).
+// Releasing that build (a hot reload, watch.rs reload → release_application_generation) cancels
+// them: the work may have happened, but the continuation never runs. The driver names the frame
+// (__ctl.setFrame(copy), the copy whose callback runs); a released copy's calls never settle. With
+// __ctl.setHold(true) results wait for __ctl.settle() (one at a time, in the caller's frame), so a
+// write can be in flight across a reload. Neither is used by the other phases (no frame, no hold: plain resolved promises).
 
 const S = {
   fixture: {},
@@ -12,6 +20,9 @@ const S = {
   calls: { run: 0, tick: 0, openOverlay: 0, closeOverlay: 0, setAgentOrder: 0, setShared: 0, writeTextFile: 0, readTextFile: 0, writes: [] },
   shared: new Map(),
   overlay: 0,
+  frame: null,  // the copy whose callback runs ({released}), or null
+  hold: false,  // results wait for __ctl.settle()
+  held: [],
 };
 const clone = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
 const never = () => new Promise(() => {});
@@ -22,7 +33,39 @@ export const __ctl = {
   setChecking(on) { S.checking = !!on; },
   setProps(p) { S.props = p == null ? null : p; },
   resetCalls() { S.calls = { run: 0, tick: 0, openOverlay: 0, closeOverlay: 0, setAgentOrder: 0, setShared: 0, writeTextFile: 0, readTextFile: 0, writes: [] }; },
+  setFrame(f) { S.frame = f || null; },
+  setHold(on) { S.hold = !!on; },
+  /**
+   * Deliver the oldest held result (or the oldest whose frame passes `only(frame)`: the others
+   * answer later) in its own frame, as herdr resumes a task in the scope that made the call; a
+   * released frame's never settles. Returns 1, or 0 when nothing (matching) is held. The caller
+   * drains the job queue after each, so the continuation's own calls carry that frame too.
+   */
+  settle(only) {
+    const i = typeof only === "function" ? S.held.findIndex((h) => only(h.frame)) : S.held.length ? 0 : -1;
+    if (i < 0) return 0;
+    const h = S.held.splice(i, 1)[0];
+    S.frame = h.frame;
+    h.deliver();
+    return 1;
+  },
 };
+
+/** A host async call whose work `p` already ran: settles for its frame's build only (see above). */
+function hostCall(p) {
+  const frame = S.frame;
+  if (!frame && !S.hold) return p;
+  const out = p.then((v) => ({ v }), (e) => ({ e, failed: true }));
+  return new Promise((res, rej) => {
+    const deliver = () => out.then((r) => {
+      if (frame && frame.released) return; // cancelled with its build: never settles
+      if (r.failed) rej(r.e);
+      else res(r.v);
+    });
+    if (S.hold) S.held.push({ frame, deliver });
+    else deliver();
+  });
+}
 
 export function props() { return S.checking ? null : clone(S.props); }
 export function checking() { return S.checking; }
@@ -33,12 +76,18 @@ export function readTextFile(p) {
   S.calls.readTextFile++;
   if (typeof p !== "string") throw new TypeError("readTextFile(path) expects a string path");
   if (S.checking) return never();
+  return hostCall(readNow(p));
+}
+function readNow(p) {
   const t = S.files.get(p);
   if (t !== undefined && t.length > 1024 * 1024) return Promise.reject(new Error(`readTextFile: ${p} is larger than 1 MiB`));
   return Promise.resolve(t === undefined ? null : t);
 }
 
 export function writeTextFile(p, text, expected) {
+  return hostCall(writeNow(p, text, expected));
+}
+function writeNow(p, text, expected) {
   S.calls.writeTextFile++;
   if (typeof text !== "string") return Promise.reject(new TypeError("text must be a string"));
   if (expected !== null && typeof expected !== "string") return Promise.reject(new TypeError("expected must be the file's current text or null"));
@@ -50,7 +99,7 @@ export function writeTextFile(p, text, expected) {
     return Promise.reject(new Error("The file changed outside Herdr. Reload before saving; your draft is still here."));
   }
   S.files.set(p, text);
-  S.calls.writes.push({ path: p, bytes: text.length });
+  S.calls.writes.push({ path: p, bytes: text.length, seq: S.calls.writeTextFile, by: S.frame ? S.frame.name || null : null });
   if (S.calls.writes.length > 50) S.calls.writes.shift();
   return Promise.resolve(null);
 }
@@ -58,7 +107,7 @@ export function writeTextFile(p, text, expected) {
 export function run(name, args) {
   if (typeof name !== "string") throw new TypeError("run(name, args) expects a command name string");
   S.calls.run++;
-  if (name === "mapledr.tick") S.calls.tick++;
+  if (name === "down-the-stack.tick") S.calls.tick++;
   return null;
 }
 export function nextCommand() { return never(); }

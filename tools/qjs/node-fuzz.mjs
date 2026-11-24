@@ -5,7 +5,7 @@ import path from "node:path";
 import { register } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-process.env.QJS_MOD_DIR_URL = pathToFileURL(path.join(REPO, "mods", "mapledr") + "/").href;
+process.env.QJS_MOD_DIR_URL = pathToFileURL(path.join(REPO, "mods", "down-the-stack") + "/").href;
 register("./node-hooks.mjs", import.meta.url);
 const LAYOUT_FILE = fs.readdirSync(path.join(REPO, "layouts")).filter((f) => f.endsWith(".json")).sort()[0];
 const LAYOUT = JSON.parse(fs.readFileSync(path.join(REPO, "layouts", LAYOUT_FILE), "utf8"));

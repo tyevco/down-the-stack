@@ -1,4 +1,4 @@
-// Static scan of mods/mapledr for QuickJS-ng / herdr-sandbox hazards (acorn AST, no execution).
+// Static scan of mods/down-the-stack for QuickJS-ng / herdr-sandbox hazards (acorn AST, no execution).
 import fs from "node:fs";
 import path from "node:path";
 import * as acorn from "acorn";

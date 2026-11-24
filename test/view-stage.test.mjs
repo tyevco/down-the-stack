@@ -13,19 +13,27 @@ import assert from "node:assert/strict";
 const M = await import("../tools/mock/index.mjs");
 const { View } = await import("gpui-kit");
 const { SCENARIOS, makeScenario } = await import("../tools/vm-samples/stage.mjs");
-const Stage = (await import("../mods/mapledr/ui/stage.js")).default;
-const { renderStage } = await import("../mods/mapledr/ui/stage.js");
-const { stageView } = await import("../mods/mapledr/game/view.js");
-const { _resetStageMemo, whyText } = await import("../mods/mapledr/game/view/stage.js");
-const { demoWorld, demoSnapshot, DEMO_KINDS } = await import("../mods/mapledr/game/demo.js");
-const { tick, command, createWorld } = await import("../mods/mapledr/game/world.js");
-const { careerOf } = await import("../mods/mapledr/game/heroes.js");
-const { canChallenge } = await import("../mods/mapledr/game/boss.js");
-const { BOSSES, ZONES } = await import("../mods/mapledr/game/data.js");
+const Stage = (await import("../mods/down-the-stack/ui/stage.js")).default;
+const { renderStage } = await import("../mods/down-the-stack/ui/stage.js");
+const { stageView } = await import("../mods/down-the-stack/game/view.js");
+const { _resetStageMemo, whyText } = await import("../mods/down-the-stack/game/view/stage.js");
+const { demoWorld, demoSnapshot, DEMO_KINDS } = await import("../mods/down-the-stack/game/demo.js");
+const { tick, command, createWorld } = await import("../mods/down-the-stack/game/world.js");
+const { careerOf } = await import("../mods/down-the-stack/game/heroes.js");
+const { canChallenge } = await import("../mods/down-the-stack/game/boss.js");
+const { BOSSES, ZONES } = await import("../mods/down-the-stack/game/data.js");
 
 const NOW = Date.UTC(2026, 10, 24, 9, 30, 0);
 const WIDTHS = [360, 960, 1600, 2400];
+const WIDE = [2800, 3200, 3600, 4000];
 const ZOOMS = [1, 2];
+// Wall-clock bounds: the strict ones only with PERF=1 (a loaded machine stretches V8 timings many
+// times over); otherwise generous bounds that still catch a runaway loop. The measured numbers
+// always go to the test output.
+const PERF = process.env.PERF === "1";
+const RENDER_MS = PERF ? 50 : 500;
+const ANIM = new Set(["loop", "transition", "frames", "spring"]);
+const animatedIn = (mod) => mod.findAll((n) => n.type !== "text" && n.methods.some((m) => ANIM.has(m[0]))).length;
 
 // Demo worlds are deterministic per (kind, nowMs); build each once and clone by rebuilding when a
 // test mutates one.
@@ -238,28 +246,35 @@ async function mountStage(vm, { width = vm.width, height = vm.height, zoom = 1 }
   return { mod, ref, log, stage: mod.view.stage };
 }
 
+// The mock's "budget" errors (a render over 50 ms, a handler over 500 ms, each timed as the lower
+// of wall and CPU time, tools/mock/state.mjs stopwatch()) count only with PERF=1: a loaded machine
+// can still stretch a 5 ms V8 render's CPU time past them (the numbers are printed).
 const problems = (mod) => [
-  ...mod.errors.map((e) => `${e.code}: ${e.message}`),
+  ...mod.errors.filter((e) => PERF || e.code !== "budget").map((e) => `${e.code}: ${e.message}`),
   ...mod.warnings.filter((w) => ["duplicate-id", "many-elements", "transition-no-id", "loop-replaced", "tooltip-on-image", "frames-children"].includes(w.code)).map((w) => `${w.code}: ${w.message}`),
 ];
 
-test("render: every demo world renders cleanly at every width, zoom and height", async () => {
+test("render: every demo world renders cleanly at every width, zoom and height", async (t) => {
+  let worst = { ms: 0, at: "" };
   for (const kind of DEMO_KINDS) {
     const w = world(kind);
-    for (const width of WIDTHS) {
+    for (const width of [...WIDTHS, ...WIDE]) {
       for (const height of width === 960 ? [200, 120, 64] : [200]) {
         const vm = stageView(w, { width, height, nowMs: NOW });
-        for (const zoom of ZOOMS) {
+        for (const zoom of width > 2400 ? [1] : ZOOMS) {
           const { mod } = await mountStage(vm, { zoom });
           const where = `${kind} @${width}×${height} ×${zoom}`;
           assert.deepEqual(problems(mod), [], where);
           assert.equal(mod.tree.id, "stage", where);
           assert.ok(mod.stats.elements <= 400, `${where}: ${mod.stats.elements} elements`);
-          assert.ok(mod.stats.lastRenderMs < 50, `${where}: ${mod.stats.lastRenderMs.toFixed(1)} ms`);
+          assert.ok(animatedIn(mod) <= 150, `${where}: ${animatedIn(mod)} animated`);
+          if (mod.stats.maxRenderMs > worst.ms) worst = { ms: mod.stats.maxRenderMs, at: where };
+          assert.ok(mod.stats.maxRenderMs < RENDER_MS, `${where}: ${mod.stats.maxRenderMs.toFixed(1)} ms`);
         }
       }
     }
   }
+  t.diagnostic(`slowest V8 render: ${worst.ms.toFixed(1)} ms (${worst.at}); bound ${RENDER_MS} ms${PERF ? " (PERF=1)" : ""}`);
 });
 
 test("render: twelve working heroes on 2400 px stay within 400 elements", async () => {
@@ -426,8 +441,8 @@ async function fightWorld(kind) {
   if (FIGHT_WORLDS.has(kind)) return FIGHT_WORLDS.get(kind);
   const w = fresh(kind);
   if (!w.rt.fights.some((f) => f.kind !== "review")) {
-    const { startFight } = await import("../mods/mapledr/game/boss.js");
-    const { BOSSES } = await import("../mods/mapledr/game/data.js");
+    const { startFight } = await import("../mods/down-the-stack/game/boss.js");
+    const { BOSSES } = await import("../mods/down-the-stack/game/data.js");
     const ids = [...w.rt.live].filter(([, l]) => l.state === "questing").map(([id]) => id).slice(0, 4);
     const silent = { fx() {}, note() {}, banner() {}, major() {}, journal() {} };
     startFight(w, "boss", BOSSES.findIndex((b) => b.id === "bloatodon"), ids, silent);
@@ -549,6 +564,26 @@ test("settings: calm drops numbers and celebrations; nums 'crits' keeps only cri
   assert.ok(vm.fx.every((f) => !["num", "heal", "miss", "inv", "abs", "incoming"].includes(f.kind)));
 });
 
+test("settings: loot glow minimum rarity hides the loot glows and pillars below it (D§11.15)", () => {
+  const w = fresh("mid");
+  const rt = w.rt;
+  const ids = [...rt.live.keys()].filter((id) => id > 0).slice(0, 6);
+  ids.forEach((heroId, i) => rt.fx.push({ kind: "loot", heroId, rar: i, text: "", value: 0, key: `fx:${rt.tick}:loot${i}`, bornTick: rt.tick }));
+  rt.fx.push({ kind: "pillar", heroId: ids[0], rar: 4, text: "LTS", value: 0, key: `fx:${rt.tick}:p4`, bornTick: rt.tick });
+  rt.fx.push({ kind: "pillar", heroId: ids[1], rar: 5, text: "Keepsake", value: 0, key: `fx:${rt.tick}:p5`, bornTick: rt.tick });
+  rt.version++;
+  const shown = (vm) => vm.fx.filter((f) => f.kind === "loot" || f.kind === "pillar").map((f) => f.key.split(":")[2]).sort();
+  const at = (glow) => {
+    if (glow != null) assert.equal(command(w, "setting", { key: "glow", value: glow }, NOW).ok, true);
+    return shown(stageView(w, { width: 1600, height: 200, nowMs: NOW }));
+  };
+  // the default keeps today's behaviour: every drop glows, LTS and Keepsake raise pillars
+  assert.deepEqual(at(null), ["loot0", "loot1", "loot2", "loot3", "loot4", "loot5", "p4", "p5"]);
+  assert.deepEqual(at("release"), ["loot3", "loot4", "loot5", "p4", "p5"]);
+  assert.deepEqual(at("keepsake"), ["loot5", "p5"]);
+  assert.deepEqual(at(0), ["loot0", "loot1", "loot2", "loot3", "loot4", "loot5", "p4", "p5"]);
+});
+
 test("memo: the same version and size return the same VM; a new tick builds a new one", () => {
   const w = fresh("mid");
   const a = stageView(w, { width: 1200, height: 200, nowMs: NOW });
@@ -622,8 +657,8 @@ test("names: two live heroes sharing a first name get an epithet initial on thei
 });
 
 test("Duck Chest: a Holo Rubber Duck's kill pops a Duck Chest where it stood, open the next tick", async () => {
-  const COMBAT = await import("../mods/mapledr/game/combat.js");
-  const { MOB_BY_ID } = await import("../mods/mapledr/game/data.js");
+  const COMBAT = await import("../mods/down-the-stack/game/combat.js");
+  const { MOB_BY_ID } = await import("../mods/down-the-stack/game/data.js");
   const w = fresh("first-day");
   const ref = { now: NOW };
   const view = () => stageView(w, { width: 960, height: 200, nowMs: ref.now });
@@ -755,7 +790,7 @@ test("clicks in the VM: room pin, boss door challenge, boss retreat and loot pil
 // (4) Performance (V8; QuickJS is ~20-50x slower, the render budget there is 50 ms)
 // ---------------------------------------------------------------------------------------------
 
-test("perf: view and view + render stay fast for the biggest demo world", async () => {
+test("perf: view and view + render stay fast for the biggest demo world", async (t) => {
   const w = world("late");
   const env = { width: 2400, height: 200, zoom: 1, theme: {}, host: null, act: () => {} };
   let viewMs = 0;
@@ -779,13 +814,16 @@ test("perf: view and view + render stay fast for the biggest demo world", async 
   }
   const mod = await M.mountView(P, {});
   for (let i = 0; i < N; i++) mod.render();
-  assert.deepEqual(mod.errors.map((e) => e.message), []);
-  assert.ok(viewMs / N < 8, `stageView ${(viewMs / N).toFixed(2)} ms`);
-  assert.ok(allMs / N < 25, `view + render ${(allMs / N).toFixed(2)} ms`);
+  assert.deepEqual(problems(mod), []);
+  // strict with PERF=1; under load only a hang fails (×10)
+  const k = PERF ? 1 : 10;
+  t.diagnostic(`stageView ${(viewMs / N).toFixed(2)} ms, view + render ${(allMs / N).toFixed(2)} ms (bounds ${8 * k} / ${25 * k} ms${PERF ? ", PERF=1" : ""})`);
+  assert.ok(viewMs / N < 8 * k, `stageView ${(viewMs / N).toFixed(2)} ms`);
+  assert.ok(allMs / N < 25 * k, `view + render ${(allMs / N).toFixed(2)} ms`);
 });
 
 test("cues: a promotion review in the hero's own slot, a crash, a supervisor", async () => {
-  const { startFight } = await import("../mods/mapledr/game/boss.js");
+  const { startFight } = await import("../mods/down-the-stack/game/boss.js");
   const w = fresh("mid");
   const silent = { fx() {}, note() {}, banner() {}, major() {}, journal() {} };
   // Echo (Lv 33, questing) takes the Senior Review in its own slot
@@ -859,4 +897,263 @@ test("fx: text floats of one tick never overlap, also on short stages, and stay 
     }
   }
   assert.ok(seen > 20, `only ${seen} floats seen`);
+});
+
+// ---------------------------------------------------------------------------------------------
+// (5) The element and animation budget on ultrawide stages (D§11.9.7: ~400 elements, ~150
+//     animated): 30 to 60 heroes, the tools/qjs "stress30" recipe
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * tools/qjs/driver.js stressWorld for n agents (30 hired over five days; past the roster, and past
+ * a day's six hires, Contractors): three spaces, every sixth agent with three sub-agents, high
+ * levels and rare gear, the late zones open; `boss` starts a zone boss fight. G holds the game
+ * modules (the mod's own graph when mounted through main.js, so the host runs the same code).
+ */
+function stressWorld(G, nowMs, n, { boss = false } = {}) {
+  const { Demo, W, liveHeroes, addGold, addSnippets } = G;
+  const SEC = 1000, DAY = 24 * 3600 * SEC;
+  const t0 = nowMs - 5 * DAY - 10 * 60 * SEC;
+  const plans = [[["working", 3000]], [["working", 1500], ["done", 300]], [["working", 600], ["blocked", 90], ["working", 900]], [["idle", 600], ["working", 1200]], [["working", 2000], ["done", 120], ["idle", 200]]];
+  const progs = ["claude", "codex", "pi", "opencode"];
+  const ags = [];
+  for (let k = 0; k < n; k++) {
+    const sp = k % 3;
+    const subs = k % 6 === 0 ? [0, 1, 2].map((j) => ({ address: `t${k + 1}s${j}`, plan: [["working", 400 + 50 * j], ["done", 60]], title: `sub ${j}` })) : [];
+    ags.push(Demo.makeAgent({
+      address: `t${k + 1}`, program: progs[k % progs.length], space: `spc_${sp + 1}`, spaceName: ["herdr-app", "infra", "api-gateway"][sp],
+      tab: `tab_${sp}_${k >> 3}`, tabIndex: k >> 3, tabName: `t${k >> 3}`, plan: plans[k % plans.length], start: (k * 137) % 1500, titleIdx: k,
+      from: t0 + Math.floor(Math.min(k, 29) / 6) * DAY, subs,
+    }));
+  }
+  const cast = Demo.makeCast(ags, { focus: "t3" });
+  const world = W.createWorld({ nowMs: t0, seed: 7 });
+  Demo.runCast(world, cast, t0 + SEC);
+  for (let d = 1; d <= 5; d++) {
+    Demo.advanceCast(cast, (t0 + d * DAY - world.state.herd.lastMs) / SEC);
+    W.tick(world, Demo.castSnapshot(cast, t0 + d * DAY));
+  }
+  Demo._internal.clearZones(world, 8, { kills: 4 });
+  const classes = ["refactorer", "hotfixer", "shellmancer", "forkbinder", "rubberducker"];
+  liveHeroes(world).map((p) => p[0]).filter((h) => h.id > 0)
+    .forEach((h, i) => Demo._internal.grow(world, h, { L: 95 - (i % 10) * 3, cls: classes[i % classes.length], rar: i % 3 === 0 ? 4 : 3, pol: 6, keepsake: i < 9 ? i : -1 }));
+  addGold(world.state, 9e7);
+  addSnippets(world.state, 40000);
+  if (boss) {
+    Demo.runCast(world, cast, nowMs - 30 * SEC);
+    world.rt.demo = { cast };
+    assert.equal(W.command(world, "challenge", { kind: "boss", idx: 7 }, nowMs - 30 * SEC).ok, true, "the stress world's boss fight starts");
+  }
+  Demo.runCast(world, cast, nowMs);
+  world.rt.demo = { cast };
+  return { world, snapshot: Demo.castSnapshot(cast, nowMs) };
+}
+
+/** Every status cue the VM asks for is drawn (the ladder never hides status). */
+function statusKept(mod, vm, where) {
+  for (const h of vm.heroes) {
+    if ((vm.height ?? 200) >= 100) assert.ok(mod.node(h.key), `${where}: hero ${h.key}`);
+    if (h.nameplate) assert.ok(mod.node(`${h.key}/plate`), `${where}: plate ${h.key}`);
+    if (h.bubble) assert.ok(mod.node(`${h.key}/bubble`), `${where}: "!" of ${h.key}`);
+    if (h.tag?.text) assert.ok(mod.text().includes(h.tag.text), `${where}: tag ${h.tag.text}`);
+  }
+  for (const c of vm.chests) assert.ok(mod.node(c.key), `${where}: chest ${c.key}`);
+  if (vm.overflow) assert.ok(mod.node(vm.overflow.key), `${where}: camp chip`);
+}
+
+test("budget: 30 and 60 heroes through main.js on 2800–4000 px stages hold ~400 elements and ~150 animated", async (t) => {
+  const FX = await import("../tools/fixtures.mjs");
+  const MAIN = new URL("../mods/down-the-stack/main.js", import.meta.url).pathname;
+  for (const [n, boss] of [[30, false], [60, false], [60, true]]) {
+    M.resetState();
+    const mod = await M.mountMod(MAIN, { props: { role: "stage" }, fixture: FX.demoFixture("late"), nowMs: FX.NOW });
+    const host = (await mod.import("./host.js")).getHost();
+    await M.tickAll(1500);
+    const G = {
+      Demo: await mod.import("./game/demo.js"), W: await mod.import("./game/world.js"),
+      liveHeroes: (await mod.import("./game/agents.js")).liveHeroes, ...(await mod.import("./game/herd.js")),
+    };
+    const { world, snapshot } = stressWorld(G, FX.NOW, n, { boss });
+    M.setFixture(FX.liveFromSnapshot(snapshot));
+    host.world = world;
+    const live = world.rt.live.size;
+    assert.ok(live >= n, `${n} agents → ${live} live heroes (Contractors past the roster)`);
+    for (const width of WIDE) {
+      mod.size(width, 200);
+      let el = 0, an = 0, slots = 0;
+      for (let s = 0; s < 3; s++) {
+        await M.tickAll(1000);
+        mod.render();
+        const where = `${n}${boss ? "+boss" : ""} @${width}px tick ${s}`;
+        el = Math.max(el, mod.stats.elements);
+        an = Math.max(an, animatedIn(mod));
+        assert.ok(mod.stats.elements <= 400, `${where}: ${mod.stats.elements} elements`);
+        assert.ok(animatedIn(mod) <= 150, `${where}: ${animatedIn(mod)} animated`);
+        const vm = host.view("stage", { width, height: 200, nowMs: M.mockNow() });
+        slots = vm.heroes.length;
+        statusKept(mod, vm, where);
+      }
+      t.diagnostic(`${n} heroes${boss ? " + boss" : ""} @${width}px: ${slots} slots, max ${el} elements, ${an} animated, render max ${mod.stats.maxRenderMs.toFixed(1)} ms`);
+    }
+    assert.deepEqual(problems(mod), []);
+  }
+});
+
+test("budget: most of 60 heroes blocked or holding chests: 30 slots at most, every '!' and chest drawn within budget", async (t) => {
+  const G = {
+    Demo: await import("../mods/down-the-stack/game/demo.js"), W: await import("../mods/down-the-stack/game/world.js"),
+    liveHeroes: (await import("../mods/down-the-stack/game/agents.js")).liveHeroes, ...(await import("../mods/down-the-stack/game/herd.js")),
+  };
+  const { findHero } = await import("../mods/down-the-stack/game/combat.js");
+  const { MAX_SLOTS } = (await import("../mods/down-the-stack/game/view/stage.js"))._internal;
+  const { world: w } = stressWorld(G, NOW, 60);
+  // a quarter blocked, half holding two chests each (resting or still questing), a quarter free
+  let i = 0;
+  const blocked = new Set();
+  for (const [id, live] of w.rt.live) {
+    const k = i++ % 4;
+    if (k === 0) { live.state = "waiting"; live.bubbleShown = true; live.blockedSince = w.rt.tick - 300; blocked.add(id); } else if (k < 3) {
+      findHero(w, id).pend = [{ min: 30, fmin: 0, title: "Bump deps", at: NOW - 60000, sealFactor: 1 }, { min: 12, fmin: 0, title: "Fix it", at: NOW - 30000, sealFactor: 1 }];
+      if (k === 1) live.state = "resting";
+    }
+  }
+  w.rt.version++;
+  assert.equal(MAX_SLOTS, 30);
+  for (const width of [1600, ...WIDE]) {
+    for (const height of [200, 120, 64]) {
+      const vm = stageView(w, { width, height, nowMs: NOW });
+      const where = `@${width}×${height}`;
+      assert.ok(vm.heroes.length <= MAX_SLOTS, `${where}: ${vm.heroes.length} slots`);
+      for (const h of vm.heroes) assert.ok(h.slot.w >= 90 - 0.01, `${where}: a ${h.slot.w} px slot`);
+      // blocked heroes fold last: with 15 of them every one keeps its slot from 1600 px up
+      for (const id of blocked) assert.ok(vm.heroes.some((h) => h.heroId === id), `${where}: blocked hero ${id} folded`);
+      assert.equal(vm.heroes.length + vm.overflow.count, w.rt.live.size);
+      const { mod, stage } = await mountStage(vm, { width, height });
+      assert.deepEqual(problems(mod), [], where);
+      assert.ok(mod.stats.elements <= 400, `${where}: ${mod.stats.elements} elements`);
+      assert.ok(animatedIn(mod) <= 150, `${where}: ${animatedIn(mod)} animated`);
+      statusKept(mod, vm, where);
+      if (height === 200) t.diagnostic(`${where}: ${vm.heroes.length} slots (${vm.heroes[0].slot.w} px), ${vm.overflow.count} at camp, level ${stage.ui.detail?.level}, ${mod.stats.elements} elements, ${animatedIn(mod)} animated`);
+    }
+  }
+  // 30 slots at 4000 px: the squeeze stops at the slot cap, not at 90 px
+  const vm = stageView(w, { width: 4000, height: 200, nowMs: NOW });
+  assert.equal(vm.heroes.length, MAX_SLOTS);
+  assert.ok(vm.heroes[0].slot.w > 120);
+  // past 4650 px 31 heroes would fit at 150 px each: the cap still holds, the rest camp
+  const vw = stageView(w, { width: 6000, height: 200, nowMs: NOW });
+  assert.equal(vw.heroes.length, MAX_SLOTS);
+  assert.equal(vw.overflow.count, w.rt.live.size - MAX_SLOTS);
+  assert.ok(vw.overflow.x + vw.overflow.w <= 6000.5);
+});
+
+test("budget: a long day's herd (every slot holding status at once) holds ~400 elements and ~150 animated from 360 to 4000 px, every '!' and chest drawn", async (t) => {
+  const G = {
+    Demo: await import("../mods/down-the-stack/game/demo.js"), W: await import("../mods/down-the-stack/game/world.js"),
+    liveHeroes: (await import("../mods/down-the-stack/game/agents.js")).liveHeroes, ...(await import("../mods/down-the-stack/game/herd.js")),
+  };
+  const { findHero } = await import("../mods/down-the-stack/game/combat.js");
+  const pend = () => [{ min: 30, fmin: 0, title: "Bump deps", at: NOW - 60000, sealFactor: 1 }, { min: 12, fmin: 0, title: "Fix it", at: NOW - 30000, sealFactor: 1 }];
+  const forks = (id, blocked) => [0, 1, 2].map((j) => ({ address: `day${id}s${j}`, status: blocked && j === 0 ? "blocked" : "working", title: `sub ${j}`, since: 0 }));
+  // chests pile up over a day left running (D§13 as built: 121 pending for 30 heroes after 40,000 s),
+  // then lunch: everyone asks for permission; sub-agents wait too; some crash in hard zones
+  const RECIPES = {
+    lunch: (w, id, live, k) => { live.state = "waiting"; live.bubbleShown = true; live.blockedSince = w.rt.tick - 300; if (k % 2 === 0) findHero(w, id).pend = pend(); },
+    "blocked+chests": (w, id, live) => { live.state = "waiting"; live.bubbleShown = true; live.blockedSince = w.rt.tick - 300; findHero(w, id).pend = pend(); },
+    "blocked+chests+sub-agents": (w, id, live) => { live.state = "waiting"; live.bubbleShown = true; live.blockedSince = w.rt.tick - 300; findHero(w, id).pend = pend(); live.forklings = forks(id, true); },
+    "crashed+chests": (w, id, live) => { live.state = "crashed"; live.crashedUntil = w.rt.tick + 3; findHero(w, id).pend = pend(); },
+  };
+  const levels = new Set();
+  for (const [n, boss] of [[30, false], [60, false], [60, true]]) {
+    for (const [name, recipe] of Object.entries(RECIPES)) {
+      const { world: w } = stressWorld(G, NOW, n, { boss });
+      const fighters = new Set(w.rt.fights.flatMap((f) => f.heroIds ?? []));
+      let k = 0;
+      for (const [id, live] of w.rt.live) if (!fighters.has(id)) recipe(w, id, live, k++);
+      w.rt.version++;
+      let worst = { el: 0, an: 0, level: 0 };
+      for (const width of [360, 1600, 2400, ...WIDE]) {
+        for (const height of [200, 120]) {
+          const vm = stageView(w, { width, height, nowMs: NOW });
+          const where = `${n}${boss ? "+boss" : ""} ${name} @${width}×${height}`;
+          const { mod, stage } = await mountStage(vm, { width, height });
+          assert.deepEqual(problems(mod), [], where);
+          const an = animatedIn(mod);
+          assert.ok(mod.stats.elements <= 400, `${where}: ${mod.stats.elements} elements`);
+          assert.ok(an <= 150, `${where}: ${an} animated`);
+          statusKept(mod, vm, where);
+          // a blocked sub-agent keeps its "!": its Forkling's bubble, or its hero's counter
+          for (const h of vm.heroes) {
+            if (!h.forklings.some((f) => f.bubble)) continue;
+            const c = mod.node(`${h.key}/forks`);
+            const text = c ? c.children.filter((x) => x.type === "text").map((x) => x.text).join("") : "";
+            assert.ok(c ? text.includes("!") : h.forklings.some((f) => f.bubble && mod.node(f.key)), `${where}: ${h.key} blocked sub-agent`);
+          }
+          const level = stage.ui.detail?.level ?? 0;
+          levels.add(level);
+          if (mod.stats.elements > worst.el) worst = { el: mod.stats.elements, an, level, at: `${width}×${height}` };
+        }
+      }
+      t.diagnostic(`${n}${boss ? " + boss" : ""} ${name}: max ${worst.el} elements (${worst.an} animated, level ${worst.level}) at ${worst.at}`);
+    }
+  }
+  // these states need the last levels (merged marks, dim in the room, fork counters)
+  for (const k of [15, 16, 17]) assert.ok(levels.has(k), `level ${k} reached (${[...levels].sort((a, b) => a - b)})`);
+});
+
+test("clicks: the finder of a loot pillar keeps its own click where the pillar's light covers it", async () => {
+  const w = fresh("mid");
+  const live = [...w.rt.live.values()].find((l) => l.state === "questing");
+  w.rt.fx.push({ key: `fx:${w.rt.tick}:998`, kind: "pillar", heroId: live.heroId, roomId: null, rar: 5, value: 4243, text: "Keepsake", bornTick: w.rt.tick });
+  w.rt.version++;
+  const vm = stageView(w, { width: 1200, height: 200, nowMs: NOW });
+  const p = vm.fx.find((f) => f.kind === "pillar");
+  const h = vm.heroes.find((x) => x.heroId === live.heroId);
+  assert.ok(p && h && p.sheet);
+  const { mod, log } = await mountStage(vm);
+  // the click target lies under the hero (painted earlier), the light column over it has no handler
+  const order = mod.findAll((n) => n.id === `${p.key}/hit` || n.id === h.key || n.id === p.key).map((n) => n.id);
+  assert.deepEqual(order, [`${p.key}/hit`, h.key, p.key], "paint order: hit target, hero, light column");
+  assert.equal(mod.fire(p.key).called, 0);
+  assert.ok(Math.abs(p.x - 24 - h.x) < 18, "the column's left edge is inside the hero's body (26 px right of its centre)");
+  mod.fire(h.key);
+  assert.deepEqual(log.commands.at(-1), { name: "markSeen", args: { heroId: h.heroId } });
+  mod.fire(`${p.key}/hit`);
+  assert.deepEqual(M.calls().openOverlay.at(-1).spec.props, { role: "sheet", heroId: h.heroId, focus: 4243 });
+});
+
+test("tooltips: the stage names a terminal's work as the party does (hero, Forkling, chest), never a bare program, shell or prompt title", () => {
+  const w = fresh("mid");
+  const cast = w.rt.demo.cast.agents;
+  const t1 = cast.find((a) => a.address === "t1"); // Claude Code, working, "Fix flaky auth test"
+  const id1 = w.rt.bind.get("t1");
+  const nowRef = { now: NOW };
+  const vm = () => stageView(w, { width: 1600, height: 200, nowMs: nowRef.now });
+  const questOf = () => vm().heroes.find((h) => h.heroId === id1).tooltip.split("\n")[2];
+  step(w, nowRef);
+  assert.match(questOf(), /^Questing \S+ · Fix flaky auth test$/);
+  // a task with no telling title and a program-name live title: a pane name the person gave,
+  // else no label (the old tooltip printed the task's raw title)
+  w.rt.live.get(id1).task.title = "";
+  t1.titles = ["✳ claude"];
+  t1.tabName = "1";
+  step(w, nowRef);
+  assert.match(questOf(), /^Questing \S+$/);
+  t1.paneName = "auth fixes";
+  step(w, nowRef);
+  assert.match(questOf(), /^Questing \S+ · auth fixes$/);
+  // a Forkling titled after its program is just a "Sub-agent"; a telling title, glyph stripped, names it
+  const t5 = cast.find((a) => a.address === "t5");
+  t5.subs[0].titles = ["Claude Code"];
+  t5.subs[1].titles = ["⏳ Ask about the schema"];
+  step(w, nowRef);
+  const forks = vm().heroes.find((h) => h.heroId === w.rt.bind.get("t5")).forklings;
+  assert.deepEqual(forks.map((f) => f.tooltip).sort(), ["Sub-agent", "Sub-agent: Ask about the schema"]);
+  // a chest from an older save that recorded a shell name reads "a task"
+  const fd = fresh("first-day");
+  const hero = fd.state.heroes.find((h) => h.id === fd.rt.bind.get("t1"));
+  hero.pend[0].title = "zsh";
+  fd.rt.version++;
+  const chest = stageView(fd, { width: 1600, height: 200, nowMs: NOW }).chests.find((c) => c.heroId === hero.id);
+  assert.match(chest.tooltip.split("\n")[0], /^Shipped: a task · /);
 });

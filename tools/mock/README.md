@@ -20,7 +20,10 @@ node --test test/mock.test.mjs
 lists), then every role in `tools/fixtures.mjs` at widths 360/960/1600 × zoom 1/2 with 3 s of timers
 (widths/heights are logical block sizes; `on_size_change` gets them × zoom, as herdr reports window px).
 The lint also refuses top-level `await`. With a layout in the fixture, its root `colors` (`mdr_*`)
-join `theme()`, as in herdr.
+join `theme()`, as in herdr. Every render of a `stage` role, timers' renders included, must stay within
+400 elements and 150 animated nodes (`loop` / `transition` / `frames` / `spring`; D§11.9.7), or the
+role fails with `stage-budget` (the mock itself only warns above 400 elements, for any role); the
+per-role line prints the stage's maxima.
 Flags: `--role stage`, `--widths 960`, `--zooms 1`, `--json`, `--quiet`, `--main`, `--fixtures`.
 Exit 0 = pass, 1 = errors, 2 = `main.js` or the fixtures module is missing.
 
@@ -39,15 +42,19 @@ export const roles = [
 ];
 ```
 
-The real file covers the stage × every demo kind, party (full, crowded, empty, rail), nameplates (agent
-panes, a Contractor, a shell pane, a mod pane, a hero pane while the save loads), the HUD, sheets
-(several heroes and tabs, a Contractor) and every Herd panel tab. `liveFromSnapshot(snap, extra)`
-turns any demo snapshot into live data. Fixtures are lazy getters, cached per demo kind.
+The real file covers the stage × every demo kind, a 3200 px stage (`stage-late-3200`), the 30-hero
+herd with a boss fight (`stressWorld`, kind `stress30`: `tools/qjs/stress30.js`, the recipe `npm run qjs` builds too: the
+stage at 960/1600/3200 px, the party, the Herd panel's roster), party (full, crowded, empty, rail),
+nameplates (agent panes, a Contractor, a shell pane, a mod pane, a hero pane while the save loads),
+the HUD, sheets (several heroes and tabs, a Contractor) and every Herd panel tab.
+`liveFromSnapshot(snap, extra)` turns any demo snapshot into live data. Fixtures are lazy getters,
+cached per demo kind.
 
-Role fields: `name`, `props`, `fixture` (live data, below), `world` (object or function),
+Role fields: `name`, `props`, `kind` (the world: a demo kind or `stress30`; `npm run qjs` builds the
+same one), `fixture` (live data, below), `world` (object or function),
 `setup({ mod, host, mock })`, `height`, `widths`, `zooms`, `nowMs`, `preview: {width, height}`.
 Fixture fields: `agents panes terminals spaces focused layout window placement machines theme
-settings fonts keys knownAgents props nowMs`, `files: { "/mock/home/data/mapledr/save.json": text }`
+settings fonts keys knownAgents props nowMs`, `files: { "/mock/home/data/down-the-stack/save.json": text }`
 (seeds the in-memory FS), `shared: {key: value}`, `exec: (cmd, args, opts) => result`.
 `theme` may be a preset name or a partial map over graphite; `settings` merges over herdr's defaults.
 
@@ -62,7 +69,7 @@ const M = await import("../tools/mock/index.mjs");
 const { div } = await import("gpui-kit");
 
 M.resetState();                                         // fixture, copies, FS, clock, calls
-const mod = await M.mountMod("mods/mapledr/main.js", { props: { role: "stage" }, fixture: M.sampleFixture(3), nowMs: 0 });
+const mod = await M.mountMod("mods/down-the-stack/main.js", { props: { role: "stage" }, fixture: M.sampleFixture(3), nowMs: 0 });
 const tree = mod.render();            // serialisable tree, or null if render threw (see mod.errors)
 mod.size(960, 210);                   // on_size_change on the root (window px; mods divide by zoom)
 await mod.tick(1000);                 // run due timers on the manual clock; re-renders if notified
@@ -82,6 +89,11 @@ mod.errors; mod.warnings; mod.stats;  // [{level, code, message, phase, copy}], 
 - `mod.hide()` / `mod.hide(false)`: a hidden copy (a hidden block) keeps its timers but does not
   render and gets no `<mod>.<command>`; with no shown copy, `run("<mod>.x")` is an error
   (`no-mod-copy`: herdr shows a "<mod>.x failed" toast) and lands in `M.calls().toasts`.
+- `run("layout.toggle" | "layout.show" | "layout.hide" | "layout.resize", {id, ...})` acts on the
+  fixture's `layout` like herdr (`window.rs` dispatch): it sets the node's `hidden` (or `size`) on a
+  copy of the layout (the test's own object is untouched), hides or shows the mounted copies of a
+  mod block there, and re-renders the copies that read `layout()`. A node the layout lacks is a
+  `bad-command` error and a "<cmd> failed" toast.
 - IO trouble: fixture `readError(absPath)` → an Error (or text) rejects that read;
   `hangAfterWrite(absPath)` → true lands that write but never settles its promise (the calling
   copy went away mid-write).
@@ -90,9 +102,9 @@ mod.errors; mod.warnings; mod.stats;  // [{level, code, message, phase, copy}], 
   `Date.now()` follows the mock clock (`tick` advances it); `new Date()` stays real time.
 - `appHome()` is `/mock/home`, `home()` is `/mock/user`; `readTextFile`/`writeTextFile` and
   `fs/promises` (for files under `mods/`) share an in-memory FS (`M.memfs`). Reads under
-  `/mock/home/mods/mapledr/...` fall through to the repo, read-only.
+  `/mock/home/mods/down-the-stack/...` fall through to the repo, read-only.
 - Asset paths (`image()`/`svg()`) resolve like herdr's (relative to the app home):
-  `mods/mapledr/...` → this repo, `icons/...` → herdr's shipped icons; `setAssetRoot()` adds more.
+  `mods/down-the-stack/...` → this repo, `icons/...` → herdr's shipped icons; `setAssetRoot()` adds more.
 
 ## What is enforced
 
@@ -115,10 +127,13 @@ Recorded as errors (herdr would not throw, but it is a bug): `.child(true|false)
 `image()`/`svg()` without both w and h (`image-size`), missing/unmapped/`..`/URL asset
 (`missing-image`), NaN/Infinity lengths (`non-finite`), `spin()` on a non-svg (`spin-not-svg`),
 unknown command name or missing required argument in `run()` (`bad-command`), any host call at
-module top level (`top-level-herdr`), handlers on `image()`/`svg()` (`handler-on-image`: herdr drops them), `writeTextFile` while checking (`write-in-check`) or under
+module top level (`top-level-herdr`), handlers on `image()`/`svg()` (`handler-on-image`: herdr drops them), `notify()` while checking (`notify-in-check`) or with a `sound` field (`sound`), `writeTextFile` while checking (`write-in-check`) or under
 `mods/` (`write-under-mods`), `setShared` in render, throwing handlers/timers/tasks, budgets (render
 50 ms, init/event/timer 500 ms, module 500 ms: herdr evaluates a mod inside the load's Task scope,
-which gets the event budget, close 250 ms).
+which gets the event budget, close 250 ms). A callback's time is the lower of its wall time and the
+process's CPU time over it (`stopwatch()` in `state.mjs`; `stats.lastRenderWallMs` keeps the wall
+time): a machine busy with other work (parallel test files, a browser taking previews) adds wall
+time but no CPU time, so it cannot push a callback over a budget, while real work counts in both.
 
 Warnings: duplicate `.id()` in one render, transition without `.id()`, `frames()` with children,
 non-style calls in `hover()`, args to nullary styles, a second loop on one property, `playSound`,

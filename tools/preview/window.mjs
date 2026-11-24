@@ -35,7 +35,9 @@ export function layoutSizes(layout = readLayout(), over = {}) {
   const s = { ...WINDOW_DEFAULTS };
   if (layout) {
     s.sidebar = px(findNode(layout, (n) => n.id === "sidebar")) ?? s.sidebar;
-    s.stage = px(findNode(layout, (n) => n.id === "stage")) ?? s.stage;
+    const stage = findNode(layout, (n) => n.id === "stage");
+    // a hidden stage (layout.toggle by hand, or collapsed while nothing works) takes no room
+    s.stage = stage && stage.hidden ? 0 : px(stage) ?? s.stage;
     s.status = px(findNode(layout, (n) => n.id === "status")) ?? s.status;
     s.tabBar = px(findNode(layout, (n) => n.id === "tabs")) ?? s.tabBar;
     const hud = findNode(layout, (n) => n.id === "hud");
@@ -48,7 +50,7 @@ export function layoutSizes(layout = readLayout(), over = {}) {
     if (typeof body?.padding === "number") s.padding = body.padding;
     if (typeof body?.gap === "number") s.gap = body.gap;
     // The party block shares its column with siblings by weight (e.g. spaces 1 : party 1.4).
-    const isParty = (c) => c.content?.mod === "mapledr" && c.content?.props?.role === "party";
+    const isParty = (c) => c.content?.mod === "down-the-stack" && c.content?.props?.role === "party";
     const column = findNode(layout, (n) => (n.children ?? []).some(isParty));
     if (column) {
       const weight = (c) => (c.hidden ? 0 : typeof c.size?.weight === "number" ? c.size.weight : c.size?.px != null ? 0 : 1);

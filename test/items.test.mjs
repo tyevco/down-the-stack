@@ -2,11 +2,11 @@
 // deprecate, polish (+ port), Squash Merge, Reroll.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import * as D from "../mods/mapledr/game/data.js";
-import * as F from "../mods/mapledr/game/formulas.js";
-import * as H from "../mods/mapledr/game/heroes.js";
-import * as I from "../mods/mapledr/game/items.js";
-import { newState } from "../mods/mapledr/game/save.js";
+import * as D from "../mods/down-the-stack/game/data.js";
+import * as F from "../mods/down-the-stack/game/formulas.js";
+import * as H from "../mods/down-the-stack/game/heroes.js";
+import * as I from "../mods/down-the-stack/game/items.js";
+import { newState } from "../mods/down-the-stack/game/save.js";
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) <= eps;
 const A = D.AFFIX_IDX;

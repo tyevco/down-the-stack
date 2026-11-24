@@ -4,13 +4,14 @@
 // its validation errors.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import * as D from "../mods/mapledr/game/data.js";
-import * as F from "../mods/mapledr/game/formulas.js";
-import * as Hr from "../mods/mapledr/game/heroes.js";
-import * as I from "../mods/mapledr/game/items.js";
-import * as W from "../mods/mapledr/game/world.js";
-import * as A from "../mods/mapledr/game/agents.js";
-import { encodeState, decodeState, SAVE_VERSION, crc32 } from "../mods/mapledr/game/save.js";
+import * as D from "../mods/down-the-stack/game/data.js";
+import * as F from "../mods/down-the-stack/game/formulas.js";
+import { autoOn } from "../mods/down-the-stack/game/formulas.js";
+import * as Hr from "../mods/down-the-stack/game/heroes.js";
+import * as I from "../mods/down-the-stack/game/items.js";
+import * as W from "../mods/down-the-stack/game/world.js";
+import * as A from "../mods/down-the-stack/game/agents.js";
+import { encodeState, decodeState, SAVE_VERSION, crc32 } from "../mods/down-the-stack/game/save.js";
 
 const T0 = 1_790_000_000_000;
 const near = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps;
@@ -232,6 +233,52 @@ describe("the clock (D§2.10, D§2.11)", () => {
     assert.deepEqual(w3.rt.errors, []);
   });
 
+  test("a restart while an offline gap is held finds the gap again: the hold is memory only, the save keeps the gap", () => {
+    const HOUR = 3600000;
+    const w = W.createWorld({ nowMs: T0, seed: 3 });
+    let now = run(w, T0, 1200, () => [ag("t1", "working")]);
+    now = run(w, now, 10, () => [ag("t1", "done", 2)]);
+    now = run(w, now, 10, () => [ag("t1", "idle", 2)]); // seen: the chest opens, Seals are credited
+    assert.ok(w.state.heroes[0].st.seals > 0, "Fresh Eyes accrue after the first credited Seal");
+    const text = W.serialize(w);
+    const L0 = w.state.herd.lastMs;
+    const later = L0 + 2 * HOUR; // 2 h of Fresh Eyes: 30 min, under the 60 min cap
+    const settle = (world, from) => { for (let i = 1; i <= 10; i++) W.tick(world, snap(from + i * 1000, [])); };
+    // reference: the app stays open through the hold (10 empty ticks, then settled)
+    const ref = W.loadWorld(text, { nowMs: later }).world;
+    W.tick(ref, snap(later, []));
+    assert.ok(ref.rt.offlineHold);
+    settle(ref, later);
+    assert.equal(ref.rt.offlineHold, null);
+    const feRef = ref.state.heroes[0].fe;
+    assert.ok(feRef > w.state.heroes[0].fe + 25, `the gap earned Fresh Eyes (${feRef})`);
+    // the app closes 3 s into the hold (close() flushes a save) and starts again 5 s later
+    const a = W.loadWorld(text, { nowMs: later }).world;
+    W.tick(a, snap(later, []));
+    for (let i = 1; i <= 3; i++) W.tick(a, snap(later + i * 1000, []));
+    assert.ok(a.rt.offlineHold, "still held");
+    assert.equal(a.state.herd.lastMs, later + 3000);
+    const flushed = W.serialize(a);
+    assert.equal(decodeState(flushed).state.herd.lastMs, L0 + 3000, "saved as not yet seen: the time before the gap + the 3 s stepped");
+    assert.equal(W.serialize(W.loadWorld(flushed, { nowMs: later }).world), flushed, "round-trips");
+    const restart = later + 8000;
+    const b = W.loadWorld(flushed, { nowMs: restart }).world;
+    W.tick(b, snap(restart, []));
+    assert.ok(b.rt.offlineHold, "held again after the restart");
+    assert.equal(b.rt.offlineHold.dtMs, restart - (L0 + 3000));
+    settle(b, restart);
+    assert.equal(b.rt.offlineHold, null);
+    // the gap counts once: the same Fresh Eyes as the session that stayed open (+ 5 s more time)
+    assert.ok(Math.abs(b.state.heroes[0].fe - feRef) < 0.05, `${b.state.heroes[0].fe} vs ${feRef}`);
+    // once settled, the save writes herd.lastMs as it is (a later restart sees no gap)
+    assert.equal(decodeState(W.serialize(b)).state.herd.lastMs, b.state.herd.lastMs);
+    const c = W.loadWorld(W.serialize(b), { nowMs: restart + 12000 }).world;
+    W.tick(c, snap(restart + 12000, []));
+    assert.equal(c.rt.offlineHold, undefined, "no gap: nothing held");
+    assert.ok(Math.abs(c.state.heroes[0].fe - b.state.heroes[0].fe) < 0.05);
+    for (const x of [ref, a, b, c]) assert.deepEqual(x.rt.errors, []);
+  });
+
   test("a clock that goes backwards accrues nothing until it passes the last tick again", () => {
     const w = W.createWorld({ nowMs: T0, seed: 1 });
     W.tick(w, snap(T0 + 5000));
@@ -326,6 +373,16 @@ describe("the emitter (D§11.7) and runtime flags", () => {
     assert.equal(mine[1].merged, 3);
     assert.ok(w.rt.fx.some((f) => f.kind === "poof"), "other effects pass");
     assert.ok(w.rt.fx.every((f) => /^fx:0:\d+$/.test(f.key) && f.bornTick === 0));
+    // effects are stamped in place on the emitter's own copies: a caller's data object is never touched
+    const data = { heroId: 2, value: 7, text: "7" };
+    ev.fx("num", data);
+    ev.fx("poof", data);
+    ev.flush();
+    assert.deepEqual(data, { heroId: 2, value: 7, text: "7" });
+    const two = w.rt.fx.filter((f) => f.heroId === 2);
+    assert.equal(two.length, 2);
+    assert.notEqual(two[0], two[1]);
+    assert.deepEqual(Object.keys(two[0]), ["kind", "heroId", "value", "text", "key", "bornTick"]);
 
     const w2 = W.createWorld({ nowMs: T0, seed: 1 });
     w2.rt.rooms = w.rt.rooms;
@@ -346,6 +403,12 @@ describe("the emitter (D§11.7) and runtime flags", () => {
     assert.equal(per(w.rt.rooms[0]), 6);
     assert.equal(per(w.rt.rooms[1]), 6);
     assert.equal(w3.rt.fx.length, 12);
+    // the rooms change (a new rt.rooms array): the per-room cap follows them, not the old ones
+    w3.rt.rooms = [{ id: "r1", heroIds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] }];
+    w3.rt.fx = [];
+    for (let id = 1; id <= 10; id++) for (let k = 0; k < 2; k++) ev3.fx("num", { heroId: id, value: 10 });
+    ev3.flush();
+    assert.equal(w3.rt.fx.length, 6, "one room: 6 numbers");
   });
 
   test("notes queue 3 s apart; banners last 3 ticks; fx live two ticks", () => {
@@ -766,8 +829,31 @@ describe("commands (ARCHITECTURE §3.5)", () => {
     assert.equal(W.command(w, "setting", { key: "auto.farm", value: false }).ok, true);
     assert.equal(cfg.auto.farm, false);
     assert.equal(W.command(w, "setting", { key: "auto.teleport", value: false }).ok, false);
+    // "auto" is the autopilot master switch (D§11.15): every system stops, the per-system
+    // switches keep their values for when it comes back on
+    assert.equal(W.command(w, "setting", { key: "auto", value: "no" }).ok, false);
     assert.equal(W.command(w, "setting", { key: "auto", value: false }).ok, true);
-    assert.ok(Object.values(cfg.auto).every((v) => v === false));
+    assert.equal(cfg.autopilot, false);
+    assert.equal(cfg.auto.farm, false);
+    assert.equal(cfg.auto.equip, true);
+    assert.equal(autoOn(w.state, "equip"), false);
+    assert.equal(W.command(w, "setting", { key: "auto", value: true }).ok, true);
+    assert.equal(autoOn(w.state, "equip"), true);
+    assert.equal(autoOn(w.state, "farm"), false);
+    assert.equal(W.command(w, "setting", { key: "auto", value: false }).ok, true);
+    // loot glow minimum rarity: a rarity id or index (D§11.15)
+    assert.equal(cfg.glow, 0);
+    assert.equal(W.command(w, "setting", { key: "glow", value: "release" }).ok, true);
+    assert.equal(cfg.glow, 3);
+    assert.equal(W.command(w, "setting", { key: "glow", value: 5 }).ok, true);
+    assert.equal(cfg.glow, 5);
+    for (const bad of [6, -1, 1.5, "mythic", "constructor", null]) assert.equal(W.command(w, "setting", { key: "glow", value: bad }).ok, false, String(bad));
+    // collapse the stage while nothing works, and the host's own "I hid it" note
+    assert.equal(cfg.collapse, false);
+    assert.equal(W.command(w, "setting", { key: "collapse", value: true }).ok, true);
+    assert.equal(W.command(w, "setting", { key: "collapsed", value: true }).ok, true);
+    assert.equal(W.command(w, "setting", { key: "collapse", value: 2 }).ok, false);
+    assert.deepEqual([cfg.collapse, cfg.collapsed], [true, true]);
     assert.equal(W.command(w, "setting", { key: "notify.lts", value: true }).ok, true);
     assert.equal(cfg.notify.lts, true);
     assert.equal(W.command(w, "setting", { key: "volume", value: 3 }).error, "Unknown setting volume");

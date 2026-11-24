@@ -10,7 +10,7 @@
 // CLI (package.json "preview"):
 //   node --import ./tools/mock/register.mjs tools/preview/shoot.mjs [--out dir] [--only name]
 //        [--main path] [--fixtures path] [--demo]
-// With mods/mapledr/main.js and tools/fixtures.mjs: every fixture role → out/role-<name>.png (1×),
+// With mods/down-the-stack/main.js and tools/fixtures.mjs: every fixture role → out/role-<name>.png (1×),
 // plus out/window.png (2×): the mock herdr window with party, stage and nameplates.
 // Without them (or with --demo): the mock's sample mod → out/mock-demo*.png.
 
@@ -86,7 +86,9 @@ export async function renderRoles(main, roles, { ticks = 2, sizeFor } = {}) {
       for (let i = 0; i < ticks; i++) await mod.tick(1000);
       mod.render();
     }
-    out.push({ role, tree: mod.tree, width: w, height: h, errors: mod.errors.slice(), warnings: mod.warnings.slice() });
+    // (the layout as the copies left it: layout.hide / .show / .resize act on the fixture's)
+    const layout = M.fixture().layout ? JSON.parse(JSON.stringify(M.fixture().layout)) : null;
+    out.push({ role, tree: mod.tree, width: w, height: h, layout, errors: mod.errors.slice(), warnings: mod.warnings.slice() });
     await mod.close();
   }
   return out;
@@ -125,7 +127,7 @@ export async function previewAll({ main, roles, outDir = M.OUT_DIR, only, prefix
 }
 
 async function cli(argv) {
-  const opt = { main: path.join(M.REPO, "mods", "mapledr", "main.js"), fixtures: path.join(M.REPO, "tools", "fixtures.mjs"), outDir: M.OUT_DIR };
+  const opt = { main: path.join(M.REPO, "mods", "down-the-stack", "main.js"), fixtures: path.join(M.REPO, "tools", "fixtures.mjs"), outDir: M.OUT_DIR };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--out") opt.outDir = path.resolve(argv[++i]);
     else if (argv[i] === "--only") opt.only = argv[++i];

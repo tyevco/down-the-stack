@@ -16,7 +16,7 @@ import { S, report } from "./state.mjs";
 const { mockError } = V;
 
 /** Symbol under which an element object keeps its Node. */
-export const NODE = Symbol.for("mapledr.mock.node");
+export const NODE = Symbol.for("down-the-stack.mock.node");
 export const FN = "[fn]";
 
 let uid = 1;

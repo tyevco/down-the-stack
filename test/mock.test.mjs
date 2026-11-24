@@ -140,7 +140,7 @@ test("no call on an element once it has a parent (herdr: AlreadyParented); a slo
   const content = div();
   Popover.new("pop").trigger(div()).content(content);
   content.p(4).bg("#123456");
-  // the mapledr roles never do it: every render tree builds bottom-up
+  // the Down the Stack roles never do it: every render tree builds bottom-up
   const { mod } = await renderWith(() => { const row = div(); const out = div().child(row); row.p(4); return out; });
   assert.deepEqual(codes(mod), ["reused-element"]);
 });
@@ -367,6 +367,54 @@ test("timers let go of closed copies; reloadAll gives every copy one new module 
   assert.deepEqual([...a.errors, ...b.errors], []);
 });
 
+// Budgets under load: npm test runs files in parallel, and other work (a browser taking previews)
+// can hold the CPU. Waiting for a CPU must never put a callback over herdr's budget; work must.
+/** Busy until both `ms` of this process's CPU time and `ms` of wall time have passed (work, under any load). */
+function spin(ms) {
+  const c0 = process.cpuUsage();
+  const t = performance.now();
+  for (let c = { user: 0, system: 0 }; (c.user + c.system) / 1000 < ms || performance.now() - t < ms; c = process.cpuUsage(c0)) { /* busy */ }
+}
+/** Blocked for `ms` of wall time without using a CPU (what another process holding the CPU looks like from here). */
+function wait(ms) {
+  const cell = new Int32Array(new SharedArrayBuffer(4));
+  const t = performance.now();
+  while (performance.now() - t < ms) Atomics.wait(cell, 0, 0, Math.max(1, ms - (performance.now() - t)));
+}
+
+test("budgets: the stopwatch counts work, not time spent waiting for a CPU", () => {
+  const a = M.stopwatch();
+  spin(30);
+  assert.ok(a.ms() >= 30, `CPU work counts (${a.ms().toFixed(1)} ms)`);
+  const b = M.stopwatch();
+  wait(60);
+  assert.ok(b.wall() >= 59, "the wall clock moved");
+  assert.ok(b.ms() < 20, `waiting does not count (${b.ms().toFixed(1)} ms)`);
+});
+
+test("budgets: a render that waits past 50 ms is not over budget; one that works past it is", async () => {
+  const slow = await renderWith(() => { wait(80); return div().child("x"); });
+  assert.deepEqual(codes(slow.mod), [], "waiting only");
+  assert.ok(slow.mod.stats.lastRenderWallMs >= 79 && slow.mod.stats.lastRenderMs < M.BUDGET.render, JSON.stringify(slow.mod.stats));
+  assert.equal(slow.mod.warnings.filter((w) => w.code === "slow-render").length, 0);
+  const busy = await renderWith(() => { spin(80); return div().child("x"); });
+  assert.deepEqual(codes(busy.mod), ["budget"]);
+  assert.match(busy.mod.errors[0].message, /^render took \d+\.\d ms \(herdr's budget is 50 ms\)/);
+});
+
+test("budgets: a timer callback or a handler that waits past 500 ms is not over budget", async () => {
+  const { mod } = await renderWith(() => div().id("b").on_click(() => wait(520)).child("b"), {
+    init: (cx) => cx.timer.every(1000, () => wait(520)),
+  });
+  await mod.tick(1000);
+  mod.fire("b");
+  assert.deepEqual(mod.errors, []);
+  const busy = await renderWith(() => div().id("b").on_click(() => spin(520)).child("b"));
+  busy.mod.fire("b");
+  assert.deepEqual(codes(busy.mod), ["budget"]);
+  assert.match(busy.mod.errors[0].message, /^on_click handler took \d+\.\d ms \(budget 500 ms\)/);
+});
+
 test("module evaluation: herdr's budget is 500 ms (the load runs in a Task scope)", () => {
   assert.equal(M.BUDGET.module, 500);
   assert.ok(M.BUDGET.moduleWarn < M.BUDGET.module);
@@ -374,7 +422,7 @@ test("module evaluation: herdr's budget is 500 ms (the load runs in a Task scope
 
 test("writeTextFile uses expected-text semantics; readTextFile reads it back", async () => {
   M.resetState();
-  const p = `${herdr.appHome()}/data/mapledr/save.json`;
+  const p = `${herdr.appHome()}/data/down-the-stack/save.json`;
   assert.equal(await herdr.readTextFile(p), null);
   await herdr.writeTextFile(p, "{}", null);
   await assert.rejects(herdr.writeTextFile(p, "{\"a\":1}", null), /already exists/);
@@ -477,6 +525,65 @@ test("runCheck passes the sample mod and reports missing inputs", async () => {
   assert.ok(res.roles[0].renders > 10);
   const missing = await runCheck({ main: path.join(os.tmpdir(), "nope", "main.js") });
   assert.equal(missing.exitCode, 2);
+});
+
+test("runCheck: a stage render over 400 elements or 150 animated nodes fails its role; other roles only warn", async () => {
+  // a mod whose tree grows with its width: 50 plain boxes, 450 at 2000+ px, and 160 of them
+  // looping at 3000+ px (the stage's budget, D§11.9.7); at 960 px, 420 from its second timer tick
+  const main = tempMod("budgety", `
+    import { View, div } from "gpui-kit";
+    import { settings } from "herdr";
+    export default class X extends View {
+      init(p, cx) { this.w = 960; this.t = 0; cx.timer.every(1000, (tcx) => { this.t++; tcx.notify(); }); }
+      render() {
+        const n = this.w >= 2000 ? 450 : this.t >= 2 ? 420 : 50;
+        const anim = this.w >= 3000 ? 160 : 0;
+        const kids = [];
+        for (let i = 0; i < n; i++) {
+          const d = div().id("b" + i).w(4).h(4);
+          kids.push(i < anim ? d.loop("opacity", { from: 0.5, to: 1, period: 900 }) : d);
+        }
+        return div().id("root").size_full().on_size_change((s, cx) => { this.w = s.width / settings().zoom; cx.notify(); }).children(kids);
+      }
+    }
+  `);
+  const fx = path.join(path.dirname(main), "fixtures.mjs");
+  fs.writeFileSync(fx, 'export const roles = [{ name: "stage", props: { role: "stage" }, widths: [960, 2400, 3200] }, { name: "party", props: { role: "party" }, widths: [3200] }];');
+  const res = await runCheck({ main, fixtures: fx, zooms: [1] });
+  assert.equal(res.exitCode, 1);
+  const [stage, party] = res.roles;
+  const budget = stage.errors.filter((e) => e.code === "stage-budget");
+  assert.deepEqual(budget.map((e) => `${e.ctx}: ${e.message}`), [
+    "zoom 1 width 960: tick 2: a stage render built 421 elements at 960×200 window px (budget 400, D§11.9.7)",
+    "zoom 1 width 2400: size+render: a stage render built 451 elements at 2400×200 window px (budget 400, D§11.9.7)",
+    "zoom 1 width 3200: size+render: a stage render built 451 elements at 3200×200 window px (budget 400, D§11.9.7)",
+    "zoom 1 width 3200: size+render: a stage render animates 160 nodes at 3200×200 window px (budget 150, D§11.9.7)",
+  ], "each distinct overflow once, renders from timers included");
+  assert.deepEqual(stage.stage, { elements: 451, animated: 160 });
+  assert.deepEqual(party.errors, [], "the budget is the stage's");
+  assert.ok(party.warnings.some((w) => w.code === "many-elements"));
+});
+
+test("the check's fixtures include an ultrawide stage and the 30-hero herd (with a boss fight)", async () => {
+  const FX = await import("../tools/fixtures.mjs");
+  const stages = FX.roles.filter((r) => r.props?.role === "stage");
+  assert.ok(stages.some((r) => r.kind === "late" && r.widths?.includes(3200)), "a 3200 px stage on the largest demo herd");
+  const thirty = stages.find((r) => r.kind === "stress30");
+  assert.ok(thirty && [960, 1600, 3200].every((w) => thirty.widths.includes(w)), "the 30-hero stage at 960 to 3200 px");
+  assert.ok(FX.roles.some((r) => r.kind === "stress30" && r.props.role === "party"));
+  const live = FX.stressFixture();
+  assert.equal(live.agents.length, 30);
+  assert.equal(live.terminals.filter((t) => t.parent).length, 15, "every sixth agent has three sub-agents");
+  const G = {
+    Demo: await import("../mods/down-the-stack/game/demo.js"), W: await import("../mods/down-the-stack/game/world.js"),
+    liveHeroes: (await import("../mods/down-the-stack/game/agents.js")).liveHeroes,
+    ...(await import("../mods/down-the-stack/game/items.js")), ...(await import("../mods/down-the-stack/game/herd.js")),
+  };
+  const { world, snapshot } = FX.stressWorld(G, FX.NOW);
+  assert.equal(world.state.heroes.length, 30);
+  assert.equal(world.rt.live.size, 30, "every hero is bound to a live agent");
+  assert.ok(world.rt.fights.length >= 1, "a zone boss fight runs");
+  assert.deepEqual(snapshot.agents.map((a) => a.address), live.agents.map((a) => a.address), "the live data is the world's own");
 });
 
 test("runCheck lint flags QuickJS-incompatible code", async () => {
@@ -586,4 +693,50 @@ test("preview screenshots with Playwright", async (t) => {
   const png = fs.readFileSync(shot.file);
   assert.equal(png.subarray(1, 4).toString(), "PNG");
   assert.equal(png.readUInt32BE(16), 400, "deviceScaleFactor 2 for user-facing shots");
+});
+
+test("layout.toggle / .show / .hide / .resize act on the fixture's layout like herdr (window.rs), copy on write", async () => {
+  M.resetState();
+  const layout = { id: "root", type: "row", children: [
+    { id: "stage", type: "block", size: { px: 200 }, content: { mod: "laymod", props: { role: "stage" } } },
+    { id: "side", type: "block", size: { px: 268 } },
+  ] };
+  const src = tempMod("laymod", `
+    import { View, div } from "gpui-kit";
+    import { layout } from "herdr";
+    export default class X extends View { render() { const s = layout()?.children?.[0]; return div().child(s && s.hidden ? "hidden" : "shown"); } }
+  `);
+  const mod = await M.mountMod(src, { props: { role: "stage" }, fixture: { layout } });
+  mod.render();
+  herdr.run("layout.hide", { id: "stage" });
+  assert.equal(M.fixture().layout.children[0].hidden, true);
+  assert.equal(layout.children[0].hidden, undefined, "the test's own object is untouched");
+  assert.equal(mod.copy.hidden, true, "the mod block's copy is hidden with it");
+  herdr.run("layout.toggle", { id: "stage" });
+  assert.equal(M.fixture().layout.children[0].hidden, false);
+  assert.equal(mod.copy.hidden, false);
+  assert.equal(mod.copy.dirty, true, "a copy that reads layout() re-renders");
+  mod.render();
+  assert.ok(mod.text().includes("shown"));
+  herdr.run("layout.resize", { id: "side", px: 44 });
+  assert.deepEqual(M.fixture().layout.children[1].size, { px: 44 });
+  // a node the shown layout lacks: herdr fails the command with a toast
+  herdr.run("layout.show", { id: "hud" });
+  assert.ok(mod.errors.some((e) => e.code === "bad-command" && /no node "hud"/.test(e.message)));
+  assert.deepEqual(M.calls().toasts.map((t) => t.title), ["layout.show failed"]);
+});
+
+test("notify(): recorded with its action checked; reported while checking() or with a sound", async () => {
+  M.resetState();
+  const mod = await M.mountView(class extends View { render() { return div(); } }, { props: {} });
+  await mod.flush();
+  herdr.notify({ title: "The Deadlock Hydra: FIXED", body: "x", level: "success", action: { name: "mod.open", args: { name: "down-the-stack" } } });
+  assert.equal(M.calls().notify.length, 1);
+  assert.throws(() => herdr.notify({ title: "x", action: { name: "mod.open", args: { nam: "y" } } }), /unknown argument/);
+  assert.throws(() => herdr.notify({ title: "x", level: "loud" }), /level must be/);
+  herdr.notify({ title: "x", sound: "ding" });
+  M.setChecking(true);
+  herdr.notify({ title: "y" });
+  M.setChecking(false);
+  assert.deepEqual(mod.errors.map((e) => e.code), ["sound", "notify-in-check"]);
 });

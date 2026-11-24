@@ -4,7 +4,7 @@ Every deliberate deviation from `docs/DESIGN.md`, why it was made and what it ch
 acceptance criterion is D§12.1 (all milestones of the four personas within ±15%) and the D§12.2
 bot plateau; the sustain criterion is D§5.6 / D§4.3 (0 crashes, ≤ 3 cups and 14–19 kills a minute
 per on-level working hour on every map and class). Every changed D§14 number carries a
-`// balance:` comment in `mods/mapledr/game/data.js`, and `test/formulas.test.mjs`
+`// balance:` comment in `mods/down-the-stack/game/data.js`, and `test/formulas.test.mjs`
 (`BALANCE_DEVIATIONS`) holds the list as `[design, data]` pairs, checked against both files.
 
 Tools: `npm run pacing` (personas, bot; `--seed N`), `npm run pacing -- --sweep` (every map × class,
@@ -103,7 +103,7 @@ LTS, the review weapons), measured on every hero of every persona (`gearRecorder
 |---|---|---|---|
 | Drop item levels (`items.dropIlvl`, `T.loot`) | kill/elite m + U{0,1}; chest map top + U{0,1,2}; duck m + 2; boss/review as given | kill, elite, chest and duck drops lowered by `ilvlOffset` −6, fading linearly to 0 between Lv 50 and 100 (`taperFrom` 50); boss and review rewards keep Lb / L as given (`boss.winFight`, `items.rollReviewReward`; Keepsakes the boss level) | A chest landed 4–5 levels above iRef(L) = L − 2; with best-of-many selection that is far above the reference kit. Past Lv ~60 R_ref × P_ref outgrows any Beta/Release polish (Release +9 < P_ref(100) = +10), so the offset fades. A boss or review reward is a few items a week; at Lb it is the prize of the fight. |
 | Affix ranges (D§8.3) | Memoized 2–4%, Linted 1–2%, Optimized 5–10%, Async 0.5–1%, Recursive 1–2%, Vectorized 3–6%, Blameless 3–6%, Green Build 1–2%, Caching 3–6%, Tab Completion 2–4%, Hot Reload 2–4%, Graceful Degradation 4–8% (× t) | all halved | 3–4 affixes on most worn items: worn damage% ran 0.5–0.9 at Lv 80 against D_ref = 0.24. Defensive affixes (Typed, Robust, Uptime, Idempotence, Rate Limiting) keep the design ranges: with them halved real gear sat at 0.8 of the reference EHP and drank on 5-3 / 8-x. |
-| Autopilot polish (D§8.8) | one item per 60 ticks, up to the rarity's max, whenever gold ≥ 5× cost | the same, but only up to `polishTarget` = ceil(L / 10) (D§5.2's P_ref, p ≈ L/10); manual polish is unchanged | Gold is never short: every worn item sat at +7..+10 by Lv 25. |
+| Autopilot polish (D§8.8) | one item per 60 ticks, up to the rarity's max, whenever gold ≥ 5× cost | the same, but only up to `polishTarget` = ceil(L / 10) (D§5.2's P_ref, p ≈ L/10), and never a weapon of another class's type (target 0); manual polish is unchanged | Gold is never short: every worn item sat at +7..+10 by Lv 25. An off-class weapon (left in hand by a provisional class switch or a Career Change) is swung as a Training Stick, so its polish did nothing, and it was usually the lowest-polished item, so autopilot picked it first. |
 | The Training Stick | grows with its Intern until Lv 10 | grows (iRef(L)) as long as the hero holds it | With drops at iRef a Junior's first class weapon can take a while; a frozen iLvl-8 stick held Lv 13–15 heroes in Lint Meadows. |
 | Map choice weapon lag (ARCHITECTURE §9.9) | a weapon lagging the reference weapon moved the hero up to 2 levels down | no longer: the deepest open map with mid ≤ L + 1 (L after a crash in the last 10 minutes; the crash rule still drops a map) | With drops at iRef a weapon a few levels behind is normal; one-agent herds sat a map low for days and missed the quota on the zone's last map that opens the boss door (Boss 5–7 a week late on some seeds). |
 | Guild convergence (D§2.8, `autopilot.CONVERGE_BELOW`) | a hero moves down to its guild-mates' map if that map is at most one map below its own choice | the same, but only to a map whose mid is at least L − 4 | A hero far above that map farmed at a heavy gap penalty to keep a lagging mate company, and a guild held there stopped feeding the frontier map's quota: a 10-day stall in `tools/pacing-sim.mjs`. |
@@ -173,21 +173,45 @@ Friday Deploy, Hotfixer ~62; the longest: The Catastrophic Backtracker, Forkbind
   Pacing results are unchanged (the sim's done → idle used to bump seq and land in the same place).
 - **Offline gaps settle after reconcile** (`world.tick`): agents that outlived the app are live again,
   so their chests are not off-duty chests and a Waiting hero earns no Fresh Eyes; a first listing
-  that is empty after an app start holds the gap for up to 10 ticks (`rt.offlineHold`).
+  that is empty after an app start holds the gap for up to 10 ticks (`rt.offlineHold`). The hold is
+  memory only, so a save written during it (a close within those seconds flushes one) records the
+  gap as not yet seen (`world.serialize` writes `lastMs` minus the held gap): a restart or a hot
+  reload then finds the gap again instead of losing its Fresh Eyes (`test/world.test.mjs`).
 - **The blocked clock is wall-clock time** (`agents.blockedSec`, `syncClocks`): an offline gap or
   dropped catch-up seconds count towards Unblocked's 10 s and the "! 15m" tag.
 - **Effects age per `world.tick` call** (`settleFx`): a pump that runs 2 steps shows all its effects
   at age 0 (D§11.7's per-frame number caps applied across the steps) and keeps the last call's fade.
 - A pane closed inside the 8-tick close after working → idle opens its chest as watched.
+- **Tick cost in QuickJS** (ARCHITECTURE §2.5, `npm run qjs`'s 30-hero stress world, a wasm
+  interpreter): the XP tooltip numbers (`live.why`, `agents.whyOf`) refresh every 5 ticks with the
+  heroes taking turns by id (a fifth of the herd a tick, was all of it on every 5th tick), and their
+  party counts come from one pass over the herd kept for the tick (`rt.whyRooms`; was a scan of the
+  herd per hero). `heroes.stats` checks its cache without allocating and keeps the Bug Tracker
+  tiers for the last kill counts seen; `world.makeEmitter` stamps effects in place and keeps the
+  hero-to-room map while `rt.rooms` is unchanged; `agents.attachForklings` skips heroes without
+  Forklings. Saves, effects, pacing and the sweep are unchanged (only the tooltip refresh moved);
+  stress-world ticks over 600 s, five interleaved runs each on a machine shared with other work:
+  p95 7.1–9.6 → 6.0–7.1 ms (median 8.5 → 6.3), mean 5.3 → 5.0 ms (medians), and the every-5th-tick
+  spike (+2.7 ms) is gone. The ~5 ms target is still missed by the interpreter (section 11).
 
 ## 10. Save contents
 
 | Change | Design | Now | Why |
 |---|---|---|---|
-| Journal length (`logMax`, in `formulas.js`; re-exported by `herd.js`, also used by `items.js`'s own journal lines) | D§13.3: capped at 60 entries (≈ 3 KB) | 120 entries up to 20 heroes, 6 fewer for each hero past 20, so D§13.3's 60 from 30 heroes (`herd.LOG_MAX` 120). A line takes ≈ 38 B in a typical save and up to ≈ 60 B: a save grows by ≈ 2.3–3.6 KB (pacing personas at the end of their run: Casual 10.2 → 13.7 KB, Solo 10.5 → 14.1 KB, Typical 12.7 → 15.9 KB, Heavy 22.3 → 25.9 KB). D§13.3's worst case (30 heroes in full gear, 140 stash items) keeps 60 lines and stays under 30 KB, at ≈ 29 KB; with a flat 120 it would be ≈ 32.5 KB (`test/herd.test.mjs`). | D§11.13 promises a hero's Journal tab "the last 30 events"; 60 lines covered 55–180 minutes of a four-agent herd, 12–17 lines a hero. |
+| Journal length (`logMax`, in `formulas.js`; re-exported by `herd.js`, also used by `items.js`'s own journal lines) | D§13.3: capped at 60 entries (≈ 3 KB) | 120 entries up to 20 heroes, 6 fewer for each hero past 20, so D§13.3's 60 from 30 heroes (`herd.LOG_MAX` 120). A line with a 40-character text takes ≈ 57 B (`test/herd.test.mjs`: 60 more lines, 3.3 KB more); its kind, and a text used twice, are indexes into the string table (below). D§13.3's worst case (30 heroes in full gear, 140 stash items) keeps 60 lines: 27.0 KB (`test/herd.test.mjs`; 28.4 KB before the string table held journal strings); with a flat 120 distinct lines it would be 30.3 KB (32.0 KB). | D§11.13 promises a hero's Journal tab "the last 30 events"; 60 lines covered 55–180 minutes of a four-agent herd, 12–17 lines a hero. |
+| The string table (`save.js` `str`) | D§13.2: seats and names inline | every string used more than once in the save goes into the top-level `str` table, written as its index: seats, space ids, pane and tab names (as before), and now pending-chest titles and the journal's kinds and texts. Saves written before load unchanged (their slots hold strings; a non-string is boxed so it never reads as an index), SAVE_VERSION stays 1 (`test/fixtures/saves` holds a save of every format this branch wrote). | platform-save-6: a 30-hero herd left alone for ~11 h went over 30 KB (stress30: 31.9 KB at 40,000 s; now 28.6 KB, and 28.8 KB at 80,000 s), and 30 × 20 pending chests took 61.0 KB (now 39.2 KB). Pacing personas at the end of their run: Casual 13.7 → 11.4 KB, Solo 14.1 → 12.0 KB, Typical 15.9 → 13.5 KB, Heavy 25.9 → 23.3 KB. D§13.3 lists every measurement. |
 | First-clear dates (D§10.5) | from the journal | `herd.bossAt` (epoch seconds per boss, set once by `boss.winFight` / `world.tick`, saved on the generic path) | The "FIXED" line rolls out of the journal within hours; the bosses tab lost the date. |
 
 ## 11. Known limits
+
+- The 30-hero stress world's tick p95 in `npm run qjs` (QuickJS-ng as a wasm interpreter, no JIT)
+  stays above ARCHITECTURE §2.5's ~5 ms (5.4–7 ms from run to run; median ~4.3 ms, of which
+  ~2.3 ms is the lane combat of ~27 questing heroes, `combat.stepRoom`). herdr 0.1.17 runs the same
+  kind of engine: quickjs-jit's plain interpreter, with its JIT tier left out (`window.rs:518` →
+  gpui-shell `engine/quickjs/mod.rs:1787-1801`, `build_interpreter()`), compiled natively rather
+  than to wasm, so its ticks should be somewhat faster than these but not by a JIT's margin (not
+  measured: herdr is never run here). V8 runs the same ticks at a median of 0.3–0.4 ms (p95
+  0.9–1.2 ms).
 
 - Real loot is lumpy: one herd's worn gear swings between 0.5× and 2× the reference kit (a Keepsake
   or an LTS weapon, a stretch without a class weapon), so with real gear the kill pace of a given map

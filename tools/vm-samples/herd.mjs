@@ -1,4 +1,4 @@
-// Sample HerdVMs (game/view.js herdView) for the Herd panel dialog (mods/mapledr/ui/herdpanel.js).
+// Sample HerdVMs (game/view.js herdView) for the Herd panel dialog (mods/down-the-stack/ui/herdpanel.js).
 // They are the spec view.js has to produce and the fixtures for tests and previews: every visual
 // state the renderer supports has a scenario. Shapes: the typedefs at the top of ui/herdpanel.js
 // (HerdVM, BuildingVM, UpgradesVM, HerdStashVM, TrackerVM, ZoneTrackVM, BossesVM, BossRowVM,
@@ -6,7 +6,7 @@
 // (ActionVM, ItemVM, CardVM, ChipVM, SquashVM, StashVM). Every string is display-ready; content
 // names come from game/data.js so they match the art and the rest of the game.
 
-import { ZONES, MOBS, BOSSES, AFFIXES } from "../../mods/mapledr/game/data.js";
+import { ZONES, MOBS, BOSSES, AFFIXES } from "../../mods/down-the-stack/game/data.js";
 import { RAR, action, item, cardOf, filters } from "./sheet.mjs";
 
 const C = { working: "#4CC38A", blocked: "#F2A93B", done: "#FFD447", idle: "#8A8F98", hp: "#FF5A5F", xp: "#7FE9F5", fresh: "#A9B8FF" };
@@ -191,7 +191,8 @@ function tracker(selected = "merge_marshes") {
     return {
       key: z.id, name: locked ? "???" : z.name, num: String(zi + 1), locked, accent: z.palette.accent,
       kills: kills.toLocaleString("en-US"), tier, tierName: tier > 0 ? TIERS[tier - 1][1] : null,
-      progress: tier >= 3 ? { frac: 1, text: `${kills.toLocaleString("en-US")} · Fixed` } : { frac: kills / nextNeed, text: `${kills.toLocaleString("en-US")} / ${nextNeed.toLocaleString("en-US")}` },
+      progress: locked ? { frac: 0, text: "Locked" }
+        : tier >= 3 ? { frac: 1, text: `${kills.toLocaleString("en-US")} · Fixed` } : { frac: kills / nextNeed, text: `${kills.toLocaleString("en-US")} / ${nextNeed.toLocaleString("en-US")}` },
       perk: locked ? "" : perkText(z, tier),
       tiers: TIERS.map(([key, name, need]) => ({ key, name, need: need.toLocaleString("en-US"), reached: kills >= need })),
       mobs: MOBS.filter((m) => m.zone === zi).map((m, mi) => ({
@@ -262,9 +263,17 @@ function rr(id, o) {
   };
 }
 
-function roster() {
+function roster(empty = false) {
+  if (empty) {
+    return {
+      count: "0 / 30 heroes · 0 hired today (6 a day)", slim: false, groups: [],
+      emptyText: "No heroes yet. Start an agent to hire one: every coding agent becomes a Termling.",
+      fame: { title: "Hall of Fame", bonus: "Legacy 0% herd XP", rows: [], more: null, emptyText: "Heroes retired at Lv 30+ rest here and add +0.5% herd XP each." },
+    };
+  }
   return {
     count: "9 / 30 heroes · 1 hired today (6 a day)", slim: false,
+    emptyText: "No heroes yet. Start an agent to hire one: every coding agent becomes a Termling.",
     groups: [
       { key: "g:herdr-app", name: "herdr-app", rows: [
         rr(1, { name: "Kip the Idempotent", level: 34, title: "Senior Refactorer", where: "4-1 Fast-Forward Ford", seen: "working 12m" }),
@@ -331,18 +340,26 @@ function digest(empty = false) {
 // ---------------------------------------------------------------------------------------------
 // Settings
 
+const RARITY_OPTIONS = [["All", "#A0A4AB"], ["Alpha", "#5BD16A"], ["Beta", "#4EA3FF"], ["Release", "#B36BFF"], ["LTS", "#FF9A2E"], ["Keepsake", "#FF7AA8"]]
+  .map(([label, color], id) => ({ id, label, color }));
+
 function settings(cfg = {}) {
   const tog = (key, label, hint, setting, value) => ({ key, label, hint, kind: "toggle", value, options: null, setting, chrome: null });
   const auto = cfg.auto ?? {};
-  const on = (k) => auto[k] ?? true;
+  const master = cfg.autopilot !== false;
+  const sys = (key, label, hint) => Object.assign(tog(`auto.${key}`, label, hint, `auto.${key}`, auto[key] ?? true),
+    master ? {} : { inactive: true, tooltip: "Autopilot is off: turn it on above to use this" });
   return {
     groups: [
       { key: "display", title: "Display", hint: null, rows: [
         tog("calm", "Calm mode", "No damage numbers, banners or blinking; the stage dims", "calm", !!cfg.calm),
         { key: "nums", label: "Damage numbers", hint: null, kind: "choice", value: cfg.nums ?? "all", options: [{ id: "all", label: "All" }, { id: "crits", label: "Crits" }, { id: "off", label: "Off" }], setting: "nums", chrome: null },
+        { key: "glow", label: "Loot glow minimum rarity", hint: "Drops below it neither glow on their way to the hero nor raise a pillar", kind: "choice", value: cfg.glow ?? 0,
+          options: RARITY_OPTIONS, setting: "glow", chrome: null, wide: true },
         { key: "stageH", label: "Stage height", hint: "At 64 px: nameplates, chests, bubbles and HP lines only", kind: "choice", value: cfg.stageH ?? 200,
           options: [{ id: 64, label: "64" }, { id: 120, label: "120" }, { id: 200, label: "200" }], setting: "stageH", chrome: { resize: "stage" } },
         { key: "hud", label: "HUD strip", hint: "A thin strip under the stage: gold, Sprint, who's working", kind: "toggle", value: null, options: null, setting: null, chrome: { toggle: "hud" } },
+        tog("collapse", "Collapse the stage when nothing works", "Hides it a minute after the last hero stops; it comes back when one works", "collapse", !!cfg.collapse),
       ] },
       { key: "notify", title: "Notifications", hint: "Off by default; at most 3 a day; never a sound.", rows: [
         tog("notify.boss", "Herd-first boss kill", null, "notify.boss", !!cfg.notifyBoss),
@@ -350,16 +367,17 @@ function settings(cfg = {}) {
         tog("notify.principal", "A hero reaches Principal", null, "notify.principal", false),
       ] },
       { key: "autopilot", title: "Autopilot", hint: null, rows: [
-        tog("auto.equip", "Auto-equip", "Equips upgrades that score +2% or better", "auto.equip", on("equip")),
-        tog("auto.deprecate", "Auto-deprecate", "Salvages Prototype and Alpha drops nobody can use", "auto.deprecate", on("deprecate")),
-        tog("auto.learn", "Auto-learn", "Spends skill points (each hero can opt out)", "auto.learn", on("learn")),
-        tog("auto.polish", "Auto-polish", "One item a minute, keeping a 20% gold reserve", "auto.polish", on("polish")),
-        tog("auto.buildings", "Buildings", "Buys the cheapest upgrade at 3× its cost", "auto.buildings", on("buildings")),
-        tog("auto.maps", "Map choice", "Moves heroes to the deepest map they outfight", "auto.maps", on("maps")),
-        tog("auto.boss", "Auto-boss", "Challenges when the win estimate is 100% or more", "auto.boss", on("boss")),
-        tog("auto.farm", "Farm bosses", "Fights beaten bosses again at 150% or more", "auto.farm", on("farm")),
-        tog("auto.calls", "Answer calls", "Heroes who beat a boss help others fight it", "auto.calls", on("calls")),
-        tog("auto.career", "Career", "Takes the recommended class at Lv 10", "auto.career", on("career")),
+        tog("auto", "Autopilot", master ? "Every system below; turning it off keeps their switches" : "Off: nothing below runs; the switches keep their values", "auto", master),
+        sys("equip", "Auto-equip", "Equips upgrades that score +2% or better"),
+        sys("deprecate", "Auto-deprecate", "Salvages Prototype and Alpha drops nobody can use"),
+        sys("learn", "Auto-learn", "Spends skill points (each hero can opt out)"),
+        sys("polish", "Auto-polish", "One item a minute, keeping a 20% gold reserve"),
+        sys("buildings", "Buildings", "Buys the cheapest upgrade at 3× its cost"),
+        sys("maps", "Map choice", "Moves heroes to the deepest map they outfight"),
+        sys("boss", "Auto-boss", "Challenges when the win estimate is 100% or more"),
+        sys("farm", "Farm bosses", "Fights beaten bosses again at 150% or more"),
+        sys("calls", "Answer calls", "Heroes who beat a boss help others fight it"),
+        sys("career", "Career", "Takes the recommended class at Lv 10"),
       ] },
     ],
     herd: { name: cfg.name ?? "The Herd", hint: "Shown here and in the sidebar. Renaming is free." },
@@ -406,12 +424,16 @@ export const scenarios = {
   bossFight: { ...base("bosses"), bosses: bosses({ fighting: true }) },
   /** Roster: two guilds, off duty, Hall of Fame. */
   roster: midVm("roster"),
+  /** Roster before the first agent: nobody yet (its empty line), an empty Hall of Fame. */
+  rosterEmpty: { ...base("roster", { digestBadge: null, header: { release: "v0.0", releaseTip: "Release Train: 0 Seals credited · v0.1 at 10 · +0.5% XP and gold", gold: "0", snippets: "0", sub: "0 heroes · 0 working", sprint: { label: "The Ignored Warning", have: 0, need: 6, text: "Sprint 0 / 6" } } }), roster: roster(true) },
   /** Since you last looked. */
   digest: midVm("digest"),
   /** Nothing new. */
   digestEmpty: { ...base("digest", { digestBadge: null }), digest: digest(true) },
   /** Settings (herd.cfg). */
   settings: midVm("settings"),
+  /** Settings with autopilot off (its systems inactive), loot glows from Release, the stage collapsing. */
+  settingsOff: { ...base("settings"), settings: settings({ autopilot: false, glow: 3, collapse: true, notifyBoss: true, auto: { farm: false } }) },
   /** A save from a newer version, opened read-only (D§13.4): the band under the header. */
   saveReadOnly: { ...midVm("roster"), save: {
     title: "Save is read-only",

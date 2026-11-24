@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// tools/gen-art.mjs: deterministic SVG generator for mods/mapledr/art (ARCHITECTURE §8).
+// tools/gen-art.mjs: deterministic SVG generator for mods/down-the-stack/art (ARCHITECTURE §8).
 //
-//   node tools/gen-art.mjs            write every asset into mods/mapledr/art (+ preview.svg)
+//   node tools/gen-art.mjs            write every asset into mods/down-the-stack/art (+ preview.svg)
 //   node tools/gen-art.mjs --out DIR  write into DIR instead (DIR/art/..., DIR/preview.svg)
 //
 // Every asset is drawn on a pixel Grid (1 px cells; bodies on a 2 px lattice for the chunky
@@ -12,13 +12,13 @@
 // that carries width/height = k × viewBox so herdr's one-time raster stays sharp (`intrinsicScale`).
 // Nothing here is random: same code, same bytes.
 //
-// `generateAll()` returns Map<relativePath, svgText> (paths relative to mods/mapledr), so the
+// `generateAll()` returns Map<relativePath, svgText> (paths relative to mods/down-the-stack), so the
 // test suite can check the files on disk are exactly what this script produces.
 
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { ZONES, MOBS, ADDS, BOSSES, CLASSES, CHEST_TIERS, BACKLOG } from "../mods/mapledr/game/data.js";
+import { ZONES, MOBS, ADDS, BOSSES, CLASSES, CHEST_TIERS, BACKLOG } from "../mods/down-the-stack/game/data.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -1847,10 +1847,9 @@ const FX_ART = {
     g.shade(c, dk(c, 0.2), 1, 0, 2);
     g.outline(OUT, { r: 1 });
   }],
-  "lanyard.svg": [10, 12, (g) => {
-    g.fine(() => { g.line(1, 0, 4, 5, "#45c2a8", 1.4); g.line(8, 0, 5, 5, "#45c2a8", 1.4); g.rect(2, 5, 6, 7, WHITE); g.rect(3, 6, 2, 2, "#a0a4ab"); g.rect(3, 9, 4, 1, "#a0a4ab"); });
-    g.outline(OUT, { r: 1 });
-  }],
+  // No lanyard: onboarding (D§3.4 "new hire lanyard") is a "New hire" chip on the sheet, and the
+  // Intern's own accessory (gear/acc-intern) is a lanyard. test/art.test.mjs requires every
+  // effect sprite here to be drawn by the mod.
 };
 
 /** FIXED stamp, 80 x 28: a grungy red stamp baked at -6 degrees (GPUI cannot rotate). */
@@ -2021,7 +2020,7 @@ function gearAssets(out) {
 }
 
 // =============================================================================================
-// preview.svg (320 x 200): the mapledr layout as herdr's Settings shows it (like win98.svg)
+// preview.svg (320 x 200): the Down-the-Stack layout as herdr's Settings shows it (like win98.svg)
 // =============================================================================================
 
 /** A tiny Termling (10 x 12) for the preview: hoodie body, title bar, screen with ">_". */
@@ -2191,7 +2190,7 @@ function withIntrinsicScale(rel, text) {
     `<svg xmlns="http://www.w3.org/2000/svg" width="${w * k}" height="${h * k}" viewBox="0 0 ${vw} ${vh}"`);
 }
 
-/** Map<relativePath (from mods/mapledr), svgText>. */
+/** Map<relativePath (from mods/down-the-stack), svgText>. */
 export function generateAll() {
   const out = generateAt1x();
   for (const [rel, text] of out) out.set(rel, withIntrinsicScale(rel, text));
@@ -2220,7 +2219,7 @@ function generateAt1x() {
   return out;
 }
 
-export function writeAll(outDir = path.join(ROOT, "mods/mapledr")) {
+export function writeAll(outDir = path.join(ROOT, "mods/down-the-stack")) {
   const files = generateAll();
   // Clear stale generated files so renamed assets don't linger.
   const artDir = path.join(outDir, "art");
@@ -2239,5 +2238,5 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const files = writeAll(dir);
   let bytes = 0;
   for (const t of files.values()) bytes += Buffer.byteLength(t);
-  console.log(`gen-art: wrote ${files.size} files (${(bytes / 1024).toFixed(1)} KB) to ${dir ?? "mods/mapledr"}`);
+  console.log(`gen-art: wrote ${files.size} files (${(bytes / 1024).toFixed(1)} KB) to ${dir ?? "mods/down-the-stack"}`);
 }

@@ -17,9 +17,9 @@ import { renderRoles, shoot } from "./shoot.mjs";
 import { composeWindow } from "./window.mjs";
 import { resolveTheme } from "../mock/theme.mjs";
 import { demoFixture, demoWorldOf, NOW } from "../fixtures.mjs";
-import { demoWorld } from "../../mods/mapledr/game/demo.js";
+import { demoWorld } from "../../mods/down-the-stack/game/demo.js";
 
-const MAIN = path.join(M.REPO, "mods", "mapledr", "main.js");
+const MAIN = path.join(M.REPO, "mods", "down-the-stack", "main.js");
 
 export const SETS = [
   { name: "mid", kind: "mid" },
@@ -28,6 +28,9 @@ export const SETS = [
   { name: "first-day", kind: "first-day" },
   { name: "empty", kind: "empty" },
   { name: "mid-light", kind: "mid", theme: "paper" },
+  // "collapse the stage when nothing is working" (D§11.15) turned on while every agent is idle:
+  // the host hides the stage block (layout.hide) and the terminals take its room
+  { name: "idle-collapsed", kind: "idle", collapse: true },
 ];
 
 // What an agent's terminal shows, by status (the mock window's pane body).
@@ -101,9 +104,13 @@ function windowRoles(set, panes, extra) {
   const fixture = fixtureFor(set, extra);
   const world = demoWorldOf(set.kind);
   const base = { nowMs: NOW, fixture, world };
+  // the person turns the setting on in the Herd panel (host.command): with nothing working the
+  // host collapses the stage at once. (Each role is mounted alone here: the party's host does it,
+  // since a hidden stage copy alone would have no shown copy to broadcast to.)
+  const collapse = set.collapse ? { setup: ({ host }) => { if (host) host.command("setting", { key: "collapse", value: true }); } } : {};
   const roles = [
     { ...base, name: "stage", props: { role: "stage" } },
-    { ...base, name: "party", props: { role: "party" } },
+    { ...base, ...collapse, name: "party", props: { role: "party" } },
     { ...base, name: "hud", props: { role: "hud" } },
   ];
   panes.forEach((p, i) => {
@@ -145,8 +152,10 @@ export async function shootSet(set, { outDir = M.OUT_DIR, withRoles = false, pre
   const problems = [];
   for (const r of rendered) for (const e of r.errors) problems.push(`${set.name}/${r.role.name}: [${e.code}] ${e.message}`);
   const tree = (n) => rendered.find((r) => r.role.name === n)?.tree ?? null;
+  // the layout as the party copy's host left it (a collapsed stage is hidden there)
+  const liveLayout = rendered.find((r) => r.role.name === "party")?.layout ?? undefined;
   const win = composeWindow({
-    theme, panes: paneSpec, title: `Down the Stack · ${set.name}`,
+    theme, panes: paneSpec, title: `Down the Stack · ${set.name}`, layout: liveLayout,
     party: tree("party"), stage: tree("stage"), hud: tree("hud"),
     nameplates: panes.map((_, i) => tree(`nameplate-${i + 1}`)),
   });

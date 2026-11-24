@@ -22,7 +22,7 @@ export const USER_HOME = "/mock/user";
 
 /** prefix (relative to the app home) → real directory. Longest prefix wins. */
 export const assetRoots = new Map([
-  ["mods/mapledr", path.join(MODS_DIR, "mapledr")],
+  ["mods/down-the-stack", path.join(MODS_DIR, "down-the-stack")],
   ["icons", path.join(HERDR_SRC, "defaults", "icons")],
 ]);
 

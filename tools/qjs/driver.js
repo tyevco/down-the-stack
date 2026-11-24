@@ -1,6 +1,6 @@
 // Driver evaluated INSIDE the engine under test (QuickJS-ng via run.mjs, or V8 via node-run.mjs for
 // the differential check). It imports the mod as real ES modules ("@mod/..." is mapped to
-// mods/mapledr/ by the loader; "herdr" / "gpui-kit" / "gpui-base" to ./shims/) and exposes
+// mods/down-the-stack/ by the loader; "herdr" / "gpui-kit" / "gpui-base" to ./shims/) and exposes
 // globalThis.__drv: every entry takes a JSON string and returns a JSON string.
 //
 // Clock: Date.now is pinned to globalThis.__clock (harness only) so every engine sees the same
@@ -18,13 +18,14 @@ import * as PanelsNS from "@mod/game/view/panels.js";
 import * as ChromeNS from "@mod/game/view/chrome.js";
 import * as StageNS from "@mod/game/view/stage.js";
 import * as SaveNS from "@mod/game/save.js";
-import Mapledr from "@mod/main.js";
+import DownTheStack from "@mod/main.js";
 import { getHost } from "@mod/host.js";
 import { SHEET_TABS } from "@mod/ui/sheet.js";
 import { HERD_TABS } from "@mod/ui/herdpanel.js";
 import { liveHeroes } from "@mod/game/agents.js";
 import { rollItem, stashPut } from "@mod/game/items.js";
 import { addGold, addSnippets } from "@mod/game/herd.js";
+import { stressWorld as stressRecipe } from "./stress30.js";
 
 const hr = globalThis.__hrnow;
 const SHIM_ERRS = globalThis.__shimErrs;
@@ -52,10 +53,14 @@ function stat(list) {
   const mean = a.reduce((s, x) => s + x, 0) / a.length;
   return { n: a.length, mean: +mean.toFixed(3), p50: +q(0.5).toFixed(3), p95: +q(0.95).toFixed(3), max: +a[a.length - 1].toFixed(3) };
 }
+// The lower of wall and CPU time (run.mjs stopwatch): a busy machine makes nothing look slower.
+const cpu = typeof globalThis.__cpunow === "function" ? globalThis.__cpunow : null;
 function timed(fn) {
   const t0 = hr();
+  const c0 = cpu ? cpu() : 0;
   const v = fn();
-  return [v, +(hr() - t0).toFixed(3)];
+  const wall = hr() - t0;
+  return [v, +(cpu ? Math.min(wall, cpu() - c0) : wall).toFixed(3)];
 }
 const setClock = (ms) => { globalThis.__clock = ms; };
 const errMsg = (e) => String((e && e.stack) || (e && e.message) || e);
@@ -104,24 +109,36 @@ function liveOf(snap, layoutJson) {
 
 let handleSeq = 1000;
 const copyErrors = [];
+// A cx used after its copy's build was released (hot reload): herdr throws (qjs/mod.rs "this cx
+// belongs to a build of the script that was reloaded or closed"); the reload phase lists them.
+const staleCx = [];
 function makeCx(copy) {
+  const live = (what) => {
+    if (!copy.released) return;
+    if (staleCx.length < 50) staleCx.push(`${copy.name || "copy"}: cx.${what} after its build was released`);
+    throw new Error("this cx belongs to a build of the script that was reloaded or closed");
+  };
   return {
-    notify() { copy.dirty = true; },
+    notify() { live("notify"); copy.dirty = true; },
     stop_propagation() {},
     propagate() {},
     phase() { return "event"; },
     theme() { return H.theme(); },
-    focus_handle() { return { __handle: ++handleSeq, focus() {}, is_focused() { return false; }, release() {} }; },
+    focus_handle() { live("focus_handle"); return { __handle: ++handleSeq, focus() {}, is_focused() { return false; }, release() {} }; },
     spawn(fn) {
+      live("spawn");
+      const task = { done: false };
+      if (copy.tasks) copy.tasks.push(task);
       let r;
-      try { r = fn(makeCx(copy)); } catch (e) { copyErrors.push(`spawn: ${errMsg(e)}`); }
-      if (r && typeof r.then === "function") r.then(null, (e) => copyErrors.push(`task: ${errMsg(e)}`));
-      return { cancel() {}, is_done() { return false; } };
+      try { r = fn(makeCx(copy)); } catch (e) { task.done = true; copyErrors.push(`spawn: ${errMsg(e)}`); }
+      if (r && typeof r.then === "function") r.then(() => { task.done = true; }, (e) => { task.done = true; copyErrors.push(`task: ${errMsg(e)}`); });
+      else task.done = true;
+      return { cancel() {}, is_done() { return task.done; } };
     },
-    sleep() { return new Promise(() => {}); },
+    sleep() { live("sleep"); return new Promise(() => {}); },
     timer: {
-      every(ms, fn) { copy.timers.push({ ms, fn, every: true }); return { cancel() {}, is_done() { return false; } }; },
-      after(ms, fn) { copy.timers.push({ ms, fn, every: false }); return { cancel() {}, is_done() { return false; } }; },
+      every(ms, fn) { live("timer.every"); copy.timers.push({ ms, fn, every: true }); return { cancel() {}, is_done() { return false; } }; },
+      after(ms, fn) { live("timer.after"); copy.timers.push({ ms, fn, every: false }); return { cancel() {}, is_done() { return false; } }; },
     },
     bind_keys(list) { return list.length; },
     open_url() {},
@@ -129,16 +146,22 @@ function makeCx(copy) {
     write_to_clipboard() {},
   };
 }
-function mount(props) {
-  const copy = { props, timers: [], dirty: false, view: null, cx: null };
+/** herdr's frame for a copy's callback: its props, and (reload phase) the build its host calls belong to. */
+function enter(copy) {
+  H.__ctl.setProps(copy.props);
+  H.__ctl.setFrame(copy.tracked ? copy : null);
+}
+/** A copy: constructor + init(undefined, cx) of `Class` (main.js's default export of a build). */
+function mount(props, Class = DownTheStack, more) {
+  const copy = Object.assign({ props, timers: [], dirty: false, view: null, cx: null }, more || {});
   copy.cx = makeCx(copy);
-  H.__ctl.setProps(props);
-  copy.view = new Mapledr();
+  enter(copy);
+  copy.view = new Class();
   copy.view.init(undefined, copy.cx);
   return copy;
 }
 function renderCopy(copy) {
-  H.__ctl.setProps(copy.props);
+  enter(copy);
   return copy.view.render(makeCx(copy));
 }
 /** Fire the root's on_size_change with window px (logical × zoom), as herdr reports it. */
@@ -146,7 +169,7 @@ function sizeCopy(copy, root, w, h) {
   if (!root || !root.m) return false;
   for (const call of root.m) {
     if (call[0] === "on_size_change" && typeof call[1] === "function") {
-      H.__ctl.setProps(copy.props);
+      enter(copy);
       call[1]({ width: w, height: h }, makeCx(copy));
       return true;
     }
@@ -154,7 +177,7 @@ function sizeCopy(copy, root, w, h) {
   return false;
 }
 function runTimer(copy) {
-  H.__ctl.setProps(copy.props);
+  enter(copy);
   const t = copy.timers.find((x) => x.every);
   if (!t) return false;
   t.fn(makeCx(copy));
@@ -275,52 +298,10 @@ function runRoles(world, fx, { digests = null, warmReps = 5 } = {}) {
 
 
 // ---------------------------------------------------------------------------------------------
-// "stress30": the roster maximum (TUNING.roster.max 30) hired over five days (6 per day), three
-// spaces, five agents with three sub-agents each (Forklings), high levels, rare gear, a full
-// stash, the late zones open, and a boss fight started. Not a game/demo.js kind: harness only.
+// "stress30": the 30-hero herd (tools/qjs/stress30.js, the recipe tools/fixtures.mjs builds too, so
+// npm run check and this harness run the same world). Not a game/demo.js kind: tools only.
 
-function stressWorld(nowMs) {
-  const DAY = 24 * 3600 * SEC;
-  const t0 = nowMs - 5 * DAY - 10 * 60 * SEC;
-  const plans = [[["working", 3000]], [["working", 1500], ["done", 300]], [["working", 600], ["blocked", 90], ["working", 900]], [["idle", 600], ["working", 1200]], [["working", 2000], ["done", 120], ["idle", 200]]];
-  const progs = ["claude", "codex", "pi", "opencode"];
-  const ags = [];
-  for (let k = 0; k < 30; k++) {
-    const sp = k % 3;
-    const subs = k % 6 === 0 ? [0, 1, 2].map((j) => ({ address: `t${k + 1}s${j}`, plan: [["working", 400 + 50 * j], ["done", 60]], title: `sub ${j}` })) : [];
-    ags.push(Demo.makeAgent({
-      address: `t${k + 1}`, program: progs[k % progs.length], space: `spc_${sp + 1}`, spaceName: ["herdr-app", "infra", "api-gateway"][sp],
-      tab: `tab_${sp}_${k >> 3}`, tabIndex: k >> 3, tabName: `t${k >> 3}`, plan: plans[k % plans.length], start: (k * 137) % 1500, titleIdx: k,
-      from: t0 + Math.floor(k / 6) * DAY, subs,
-    }));
-  }
-  const cast = Demo.makeCast(ags, { focus: "t3" });
-  const world = W.createWorld({ nowMs: t0, seed: 7 });
-  Demo.runCast(world, cast, t0 + SEC);
-  for (let d = 1; d <= 5; d++) {
-    Demo.advanceCast(cast, (t0 + d * DAY - world.state.herd.lastMs) / SEC);
-    W.tick(world, Demo.castSnapshot(cast, t0 + d * DAY));
-  }
-  Demo._internal.clearZones(world, 8, { kills: 4 });
-  const classes = ["refactorer", "hotfixer", "shellmancer", "forkbinder", "rubberducker"];
-  const heroes = liveHeroes(world).map((p) => p[0]);
-  heroes.forEach((h, i) => Demo._internal.grow(world, h, { L: 95 - (i % 10) * 3, cls: classes[i % classes.length], rar: i % 3 === 0 ? 4 : 3, pol: 6, keepsake: i < 9 ? i : -1 }));
-  const finder = heroes[0];
-  for (let k = 0; k < 120; k++) {
-    const it = rollItem(finder, { ilvl: 70 + (k % 30), source: k % 7 === 0 ? "boss" : "chest", classId: finder.cls, state: world.state });
-    stashPut(world.state, it);
-  }
-  addGold(world.state, 9e7);
-  addSnippets(world.state, 40000);
-  world.state.herd.bld = [9, 9, 8, 9, 7, 6];
-  world.state.herd.born = world.state.herd.day - 64;
-  Demo.runCast(world, cast, nowMs - 30 * SEC);
-  world.rt.demo = { cast };
-  const r = W.command(world, "challenge", { kind: "boss", idx: 7 }, nowMs - 30 * SEC);
-  Demo.runCast(world, cast, nowMs);
-  world.rt.demo = { cast };
-  return { world, snapshot: Demo.castSnapshot(cast, nowMs), challenge: r };
-}
+const stressWorld = (nowMs) => stressRecipe({ Demo, W, liveHeroes, rollItem, stashPut, addGold, addSnippets }, nowMs);
 const buildKind = (kind, nowMs) => (kind === "stress30" ? stressWorld(nowMs) : Demo.demoWorld(kind, nowMs));
 
 const drv = {};
@@ -335,7 +316,7 @@ drv.check = (argJson) => {
   copy.cx = makeCx(copy);
   let initMs, renderMs, tree, error = null;
   try {
-    const [v, cms] = timed(() => new Mapledr());
+    const [v, cms] = timed(() => new DownTheStack());
     copy.view = v;
     [, initMs] = timed(() => v.init(undefined, copy.cx));
     let el;
@@ -598,7 +579,7 @@ drv.fuzz = (argJson) => {
       const r = fn();
       if (r) failures.push(`${label}: ${r}`);
     } catch (e) {
-      const st = String((e && e.stack) || "").split("\n").filter((l) => /mods\/mapledr|driver/.test(l)).slice(0, 4).map((l) => l.trim().replace(/.*mods\/mapledr\//, "")).join(" <- ");
+      const st = String((e && e.stack) || "").split("\n").filter((l) => /mods\/down-the-stack|driver/.test(l)).slice(0, 4).map((l) => l.trim().replace(/.*mods\/down-the-stack\//, "")).join(" <- ");
       failures.push(`${label}: THREW ${String((e && e.message) || e).split("\n")[0]} at ${st}`);
     }
   };
@@ -648,7 +629,7 @@ drv.fuzz = (argJson) => {
         setClock(NOW + 13 * SEC);
         W.tick(world, hs);
       } catch (e) {
-        hostErr = `host.snapshot threw "${e && e.message}" at ${String((e && e.stack) || "").split("\n").filter((l) => /mods\/mapledr/.test(l)).slice(0, 2).map((l) => l.trim().replace(/.*mods\/mapledr\//, "")).join(" <- ")}`;
+        hostErr = `host.snapshot threw "${e && e.message}" at ${String((e && e.stack) || "").split("\n").filter((l) => /mods\/down-the-stack/.test(l)).slice(0, 2).map((l) => l.trim().replace(/.*mods\/down-the-stack\//, "")).join(" <- ")}`;
       }
       const views = runViews(world, { reset: true });
       const bad = Object.entries(views).filter(([, v]) => typeof v === "object").map(([k, v]) => `${k}: ${v.error.split("\n")[0]}`);
@@ -822,6 +803,257 @@ drv.saveText = (argJson) => {
   const { kind } = JSON.parse(argJson);
   setClock(NOW);
   return JSON.stringify({ text: W.serialize(buildKind(kind, NOW).world) });
+};
+
+// ---------------------------------------------------------------------------------------------
+// Hot reload in one context (run.mjs phase "reload"), as herdr does it when a file of the mod is
+// saved: src/window.rs files_changed → runtime.reload_now → shell watch.rs reload(), for every
+// copy of the mod in one synchronous pass:
+//   1. load_app: the first copy evaluates the new revision once, as new module records
+//      "<file>?v=<generation>" in the same context (run.mjs importBuild); the others reuse it;
+//   2. instantiate_for_view: constructor + init of a new instance while the old one still lives;
+//   3. release_application_generation of the old instance: its timers and tasks are cancelled (a
+//      pending host call never resumes), and close() is NOT called.
+// globalThis and the host modules carry over. Host IO is held (__ctl.setHold) and answered one call
+// at a time in the frame that made it (settleIO; run.mjs drains the jobs after each), so a write
+// can be in flight across the reload.
+
+const SAVE_PATH = "/mock/home/data/down-the-stack/save.json";
+const LIVE_KEY = Symbol.for("down-the-stack.live.v1");
+const RL = { copies: [], released: [], specs: [], castWorld: null, layout: null, now: 0, gen: 1, host: null, prevHost: null, prevGen: 0, before: null, globals0: null, inflightFrom: null, ticks: [] };
+
+const buildOf = (gen) => (gen === 1 ? { DownTheStack, getHost, W } : (globalThis.__builds || {})[gen]);
+const globalKeys = () => Object.getOwnPropertyNames(globalThis).concat(Object.getOwnPropertySymbols(globalThis).map((x) => String(x)));
+const copyName = (p) => p.role + (p.terminal ? `:${p.terminal}` : p.tab ? `:${p.tab}` : "");
+
+/** One copy of a build: tracked (its host calls belong to it), named "<role>@b<gen>". */
+function mountBuild(spec, gen) {
+  const B = buildOf(gen);
+  return mount(spec.props, B.DownTheStack, { tracked: true, released: false, tasks: [], name: `${copyName(spec.props)}@b${gen}`, gen, spec, sized: false });
+}
+/** watch.rs reload step 3 for one copy: its build is released (timers, tasks; its cx goes stale). */
+function release(copy) {
+  copy.released = true;
+  copy.timersAtRelease = copy.timers.length;
+  copy.pendingAtRelease = copy.tasks.filter((t) => !t.done).length;
+  copy.timers = [];
+  copy.view = null; // herdr drops the instance (only what the mod itself kept stays reachable)
+  copy.last = null;
+}
+const pending = (copy) => copy.tasks.filter((t) => !t.done).length;
+const heroesOf = (world) => world.state.heroes.map((h) => `${h.id}:${h.name}`).join(",");
+const tickOf = (text) => { try { return JSON.parse(text).tick; } catch (e) { return null; } };
+
+drv.reloadStart = (argJson) => {
+  const { kind, layout } = JSON.parse(argJson);
+  setClock(NOW);
+  const built = buildKind(kind, NOW);
+  H.__ctl.S.files.clear();
+  H.__ctl.resetCalls();
+  H.__ctl.S.files.set(SAVE_PATH, W.serialize(built.world));
+  H.__ctl.setHold(true);
+  RL.castWorld = built.world; // drives the cast (statuses) only; the host loads its save
+  RL.layout = layout;
+  RL.now = NOW;
+  RL.gen = 1;
+  RL.released = [];
+  RL.ticks = [];
+  const fx = liveOf(built.snapshot, layout);
+  H.__ctl.setFixture(Object.assign({}, globalThis.__baseFixture, fx));
+  RL.specs = [
+    { props: { role: "stage" }, size: [960, 200] },
+    { props: { role: "party" }, size: [248, 820] },
+    { props: { role: "hud" }, size: [960, 26] },
+  ].concat(fx.panes.slice(0, 2).map((p) => ({ props: { role: "nameplate", pane: p.pane, terminal: p.terminal }, size: [700, 34] })))
+    .concat([{ props: { role: "herd", overlay: "o2", tab: "roster" }, size: [760, 520] }]);
+  RL.copies = RL.specs.map((sp) => mountBuild(sp, 1));
+  RL.host = getHost();
+  RL.globals0 = null; // taken at the first reload, once the first build's host has registered itself
+  return JSON.stringify({ copies: RL.copies.length, heroes: built.world.state.heroes.length });
+};
+
+/** Deliver the held host IO (run.mjs drains the job queue after this, then asks again); `only`: just this build's. */
+drv.settleIO = (argJson) => {
+  const { only } = JSON.parse(argJson || "{}");
+  return String(H.__ctl.settle(only ? (f) => !!f && f.gen === only : undefined));
+};
+drv.reloadLoaded = () => JSON.stringify({ loaded: !!(RL.host && RL.host.loaded) });
+
+/** n seconds: every copy's 1 s timer (the host pumps once per 900 ms), then every copy renders. */
+drv.reloadStep = (argJson) => {
+  const { n = 1 } = JSON.parse(argJson || "{}");
+  const errs = [];
+  for (let i = 0; i < n; i++) {
+    RL.now += SEC;
+    setClock(RL.now);
+    const fx = liveOf(Demo.demoSnapshot(RL.castWorld, RL.now), RL.layout);
+    H.__ctl.setFixture(Object.assign({}, globalThis.__baseFixture, fx));
+    for (const c of RL.copies) {
+      // main.js rethrows a host problem once from its timer; herdr logs it and keeps the timer
+      try { runTimer(c); } catch (e) { if (errs.length < 5) errs.push(`${c.name} timer: ${errMsg(e).split("\n")[0]}`); }
+    }
+    for (const c of RL.copies) {
+      try {
+        let el = renderCopy(c);
+        if (!c.sized) { c.sized = sizeCopy(c, el, c.spec.size[0], c.spec.size[1]); el = renderCopy(c); }
+        c.last = el;
+      } catch (e) { if (errs.length < 5) errs.push(`${c.name} render: ${errMsg(e).split("\n")[0]}`); }
+    }
+    if (RL.host && RL.host.world) RL.ticks.push(RL.host.world.state.herd.tick);
+  }
+  if (errs.length) (RL.stepErrors = RL.stepErrors || []).push(...errs);
+  return "{}";
+};
+
+/** A save due now, started in the stage copy's frame (as its pump would): run.mjs then lets its writes land up to save.json. */
+drv.reloadInflight = () => {
+  const h = RL.host;
+  const stage = RL.copies[0];
+  RL.inflightFrom = H.__ctl.S.files.get(SAVE_PATH);
+  enter(stage);
+  h.world.rt.dirty = true;
+  h.saveSoonAt = RL.now;
+  const p = h.maybeSave(false, RL.now);
+  return JSON.stringify({ started: !!p });
+};
+/** Has the in-flight save's save.json write landed (its answer still held)? */
+drv.reloadIO = () => JSON.stringify({ saveWritten: H.__ctl.S.files.get(SAVE_PATH) !== RL.inflightFrom, held: H.__ctl.S.held.length, saving: !!(RL.host && RL.host.saving) });
+
+/**
+ * Another window (another VM sharing the save) writes save.json just before the reload: the same
+ * herd at the same tick, 7 gold richer. save.json is no longer the old host's text, so it declines
+ * the handover and the new host loads the file.
+ */
+drv.reloadForeign = () => {
+  const PB = buildOf(RL.gen);
+  const w = PB.W.loadWorld(PB.W.serialize(RL.host.world), { nowMs: RL.now }).world;
+  addGold(w.state, 7);
+  RL.foreign = PB.W.serialize(w);
+  H.__ctl.S.files.set(SAVE_PATH, RL.foreign);
+  return JSON.stringify({ tick: tickOf(RL.foreign) });
+};
+
+/** The reload itself: per copy, the new build's instance (constructor + init), then the old one released. */
+drv.reloadSwap = (argJson) => {
+  const { gen, keep = [] } = JSON.parse(argJson); // keep: roles whose new instance fails (watch.rs: the old one keeps running)
+  const B = buildOf(gen);
+  if (!B) throw new Error(`build ${gen} was never evaluated`);
+  const h1 = RL.host;
+  const PB = buildOf(RL.gen);
+  if (!RL.globals0) RL.globals0 = globalKeys();
+  const fileText = H.__ctl.S.files.get(SAVE_PATH);
+  RL.before = {
+    fileText, fileTick: tickOf(fileText), worldText: PB.W.serialize(h1.world), tick: h1.world.state.herd.tick, heroes: heroesOf(h1.world),
+    saves: h1.stats.saves, own: h1.ownTexts.length, inFlight: !!h1.saving, writes: H.__ctl.S.calls.writeTextFile, errors: h1.errors.length,
+    pumps: h1.stats.pumps, reloads: h1.stats.reloads,
+  };
+  const old = RL.copies;
+  const fresh = [];
+  const initMs = [];
+  for (const c of old) {
+    if (keep.includes(c.spec.props.role)) { fresh.push(c); continue; } // reload() failed: nothing released
+    const [copy, ms] = timed(() => mountBuild(c.spec, gen));
+    fresh.push(copy);
+    initMs.push(+ms.toFixed(2));
+    release(c);
+  }
+  RL.copies = fresh;
+  RL.released = RL.released.concat(old.filter((c) => c.released));
+  RL.prevHost = h1;
+  RL.prevGen = RL.gen;
+  RL.gen = gen;
+  RL.host = B.getHost();
+  return JSON.stringify({ initMs, newHost: RL.host !== h1, loadingAfterInit: !RL.host.loaded });
+};
+
+/**
+ * Right after the new build's load (every held read delivered): the handover's outcome. `declined`:
+ * another window wrote save.json (reloadForeign), so the new host loads that file instead, and
+ * retires the old host all the same.
+ */
+drv.reloadCheck = (argJson) => {
+  const { declined = false } = JSON.parse(argJson || "{}");
+  const B = buildOf(RL.gen);
+  const h2 = RL.host;
+  const h1 = RL.prevHost;
+  const b = RL.before;
+  const fail = [];
+  const want = (ok, text) => { if (!ok) fail.push(text); };
+  want(h2 !== h1, "the new build shares the old build's host (module scope did not start fresh)");
+  want(h2.loaded, "the new build's host never finished loading");
+  want(h2.world && h2.world !== h1.world, "the new host runs the old build's world object instead of decoding it with its own code");
+  const text = h2.world ? B.W.serialize(h2.world) : null;
+  if (declined) {
+    want(h2.stats.loadedFrom === "save", `loaded from "${h2.stats.loadedFrom}", not the other window's save.json ("save")`);
+    want(text === RL.foreign, `the new world is not the other window's save (tick ${h2.world && h2.world.state.herd.tick} vs ${b.fileTick})`);
+  } else {
+    want(h2.stats.loadedFrom === "reload", `loaded from "${h2.stats.loadedFrom}", not the previous build's world ("reload")`);
+    want(text === b.worldText, `the new world is not the old one at the reload (tick ${h2.world && h2.world.state.herd.tick} vs ${b.tick}; save.json had tick ${b.fileTick})`);
+  }
+  want(h2.world && heroesOf(h2.world) === b.heroes, "the heroes differ after the reload");
+  want(h1.retired === true, "the old host was not retired");
+  want(globalThis[LIVE_KEY] === h2, "globalThis[Symbol.for(\"down-the-stack.live.v1\")] is not the new host");
+  want(h2.lastText === H.__ctl.S.files.get(SAVE_PATH), "the new host's expected text is not save.json's");
+  // a retired host does nothing, even when something still calls it
+  want(h1.pump(RL.now + 5000, true) === false, "the retired host still pumps");
+  want(h1.maybeSave(true, RL.now + 5000) == null, "the retired host still saves");
+  want(h1.handover(H.__ctl.S.files.get(SAVE_PATH)) === null, "the retired host would hand its world over again");
+  // timers and tasks: the new copies own exactly main.js's (one 1 s timer, the nextCommand loop)
+  const built = RL.copies.filter((c) => c.gen === RL.gen);
+  const timers = built.map((c) => c.timers.length);
+  const every = built.every((c) => c.timers.length === 1 && c.timers[0].every && c.timers[0].ms === 1000);
+  const tasks = built.map(pending);
+  want(every, `timers per new copy ${JSON.stringify(timers)} (main.js arms one 1 s timer each)`);
+  want(tasks.every((n) => n === 1), `pending tasks per new copy ${JSON.stringify(tasks)} (the nextCommand loop each; the load task finished)`);
+  const released = RL.released.filter((c) => c.gen === RL.prevGen);
+  const left = released.map((c) => c.pendingAtRelease);
+  const extra = globalKeys().filter((k) => !RL.globals0.includes(k) && k !== "__builds");
+  want(!extra.length, `new globals after the reload: ${extra.join(", ")}`);
+  want(!staleCx.length, `a released build's cx was used: ${staleCx.join("; ")}`);
+  const hostErrors = h2.errors.map((x) => `${x.where}: ${x.message}`);
+  want(!hostErrors.length, `new host errors: ${hostErrors.join("; ")}`);
+  RL.checkTick = h2.world ? h2.world.state.herd.tick : 0;
+  const kept = RL.copies.filter((c) => c.gen !== RL.gen).map((c) => c.name);
+  return JSON.stringify({
+    gen: RL.gen, fail, from: h2.stats.loadedFrom, kept, tick: RL.checkTick, tickBefore: b.tick, fileTick: b.fileTick, unsavedTicks: b.tick - b.fileTick,
+    inFlight: b.inFlight, timers, tasks, releasedPendingAtRelease: left, releasedTimersAtRelease: released.map((c) => c.timersAtRelease),
+  });
+};
+
+/** Some seconds after the reload: the progress reached the disk, the old host stayed silent, every copy draws. */
+drv.reloadAfter = (argJson) => {
+  const { declined = false } = JSON.parse(argJson || "{}");
+  const h2 = RL.host;
+  const h1 = RL.prevHost;
+  const b = RL.before;
+  const PB = buildOf(RL.prevGen);
+  const fail = [];
+  const want = (ok, text) => { if (!ok) fail.push(text); };
+  const file = H.__ctl.S.files.get(SAVE_PATH);
+  const from = declined ? b.fileTick : b.tick; // declined: the other window's world, as loaded
+  want(tickOf(file) >= from, `save.json has tick ${tickOf(file)}, behind the world the new host took (${from})`);
+  want(h2.ownTexts.includes(file), "save.json does not hold a text the new host wrote");
+  want(h2.world.state.herd.tick > RL.checkTick, "the world stopped after the reload");
+  want(h1.stats.saves === b.saves && h1.ownTexts.length === b.own, "the retired host wrote after the reload");
+  want(h1.stats.pumps === b.pumps && h1.stats.reloads === b.reloads, `the old host still pumps (${h1.stats.pumps - b.pumps}) or reloads save.json (${h1.stats.reloads - b.reloads})`);
+  const writes = H.__ctl.S.calls.writes.filter((w) => w.seq > b.writes);
+  const foreign = writes.filter((w) => !String(w.by || "").endsWith(`@b${RL.gen}`));
+  want(!foreign.length, `writes after the reload not from the new build: ${JSON.stringify(foreign)}`);
+  want(h2.stats.reloads === 0, `the new host reloaded save.json ${h2.stats.reloads}× (a write conflict)`);
+  const chips = RL.copies.filter((c) => !c.last || JSON.stringify(treeOf(c.last)).indexOf("hit a snag") >= 0).map((c) => c.name);
+  want(!chips.length, `copies not drawing after the reload: ${chips.join(", ")}`);
+  const hostErrors = h2.errors.map((x) => `${x.where}: ${x.message}`);
+  want(!hostErrors.length, `host errors: ${hostErrors.join("; ")}`);
+  want(!(RL.stepErrors || []).length, `timer/render errors: ${(RL.stepErrors || []).join("; ")}`);
+  want(!staleCx.length, `a released build's cx was used: ${staleCx.join("; ")}`);
+  const back = RL.ticks.filter((t, i) => i > 0 && t < RL.ticks[i - 1]).length;
+  want(!back, "the herd's tick went backwards across a reload");
+  RL.stepErrors = [];
+  return JSON.stringify({
+    fail, fileTick: tickOf(file), tick: h2.world.state.herd.tick, writes: writes.length, saves: h2.stats.saves,
+    retainedWorldBytes: h1.world ? PB.W.serialize(h1.world).length : 0, retainedMemo: h1.memo && h1.memo.map ? h1.memo.map.size : 0,
+    shimErrs: SHIM_ERRS.splice(0), copyErrors: copyErrors.splice(0),
+  });
 };
 
 globalThis.__drv = drv;

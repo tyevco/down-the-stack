@@ -2,11 +2,13 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import zlib from "node:zlib";
-import * as D from "../mods/mapledr/game/data.js";
-import * as F from "../mods/mapledr/game/formulas.js";
-import * as H from "../mods/mapledr/game/heroes.js";
-import * as I from "../mods/mapledr/game/items.js";
-import { encodeState, decodeState, crc32, newState, saveSize, migrations, SAVE_VERSION } from "../mods/mapledr/game/save.js";
+import fs from "node:fs";
+import * as D from "../mods/down-the-stack/game/data.js";
+import * as F from "../mods/down-the-stack/game/formulas.js";
+import * as H from "../mods/down-the-stack/game/heroes.js";
+import * as I from "../mods/down-the-stack/game/items.js";
+import * as W from "../mods/down-the-stack/game/world.js";
+import { encodeState, decodeState, crc32, newState, saveSize, migrations, SAVE_VERSION } from "../mods/down-the-stack/game/save.js";
 
 // Re-sign a parsed save object after editing it (the CRC covers the text with crc = "").
 function resign(obj) {
@@ -109,8 +111,13 @@ describe("round trip", () => {
     assert.equal(obj.heroes[0].eq.length, 6);
     assert.equal(obj.heroes[0].eq[0][0], state.heroes[0].eq[0].uid); // [uid, base, ...]
     assert.equal(obj.heroes[0].eq[0][5].length, 2 * state.heroes[0].eq[0].aff.length); // flat affix pairs
-    assert.deepEqual(obj.str, ["herdr-app/claude", "spc_19", "main", "api"]); // shared strings table
+    // shared strings table: seats, space ids, pane/tab names, then pending-chest titles and the
+    // journal's repeated kinds and texts (D§13.3: titles and journal strings are written once)
+    assert.deepEqual(obj.str, ["herdr-app/claude", "spc_19", "main", "api", "Fix flaky auth test", "ship"]);
     assert.equal(obj.heroes[0].s, 0);
+    assert.equal(obj.heroes[0].pd[0][1], 4); // the title by its index
+    assert.equal(obj.herd.log.d[0][1], 5); //   the kind by its index
+    assert.equal(obj.herd.log.d[0][3], "Fix flaky auth test number 0 in api/"); // used once: inline
   });
 
   test("boss repeat cooldowns: beaten bosses and seconds left survive (bitmask + pairs)", () => {
@@ -312,10 +319,98 @@ describe("size budget (D§13.3)", () => {
     assert.deepEqual(decodeState(text).state.herd.inbox, s.herd.inbox);
   });
 
+  test("pending-chest titles and journal strings are written once (the string table): 30 heroes × 20 chests", (t) => {
+    // platform-save-6: titles were inline, so a 30-hero herd left alone for ~11 hours crossed 30 KB
+    // (stress30 measured 31.9 KB at 40,000 s). An agent's tasks share few titles.
+    const s = populated(30, { stash: 140, log: 60, full: true });
+    const titles = ["Refactor the session store adapter (#2)", "Bump deps and fix the types", "Investigate the memory leak in the worker"];
+    for (const h of s.heroes) {
+      h.pend = [];
+      for (let k = 0; k < 20; k++) h.pend.push({ min: 25, fmin: 0, title: titles[(h.id + k) % 3], at: 1795000000000 - k * 1800000, sealFactor: 0.75 });
+    }
+    const text = encodeState(s);
+    const obj = JSON.parse(text);
+    for (const ttl of titles) assert.equal(text.split(JSON.stringify(ttl)).length - 1, 1, `${ttl} written once`);
+    assert.ok(obj.heroes.every((h) => h.pd.every((r) => typeof r[1] === "number")));
+    const back = decodeState(text).state;
+    assert.deepEqual(back.heroes.map((h) => h.pend.map((p) => p.title)), s.heroes.map((h) => h.pend.map((p) => p.title)));
+    assert.equal(encodeState(back), text, "byte-identical");
+    const size = saveSize(text);
+    t.diagnostic(`30 heroes × 20 pending chests (600), 140 stash items, 60 journal lines: ${size.bytes} B`);
+    assert.ok(size.bytes < 48 * 1024, `${size.bytes} B (≈ 61 KB with titles inline)`);
+  });
+
+  test("text slots: a string in the table is its index, null stays null, any other value is boxed", () => {
+    const s = populated(2);
+    s.heroes[0].pend = [{ min: 5, fmin: 0, title: null, at: 1794999000000, sealFactor: 1 }];
+    s.herd.log.push([1795000100000, "note", 0, 42, 0], [1795000200000, "note", 0, { odd: 1 }, 0]);
+    const text = encodeState(s);
+    const back = decodeState(text).state;
+    assert.equal(back.heroes[0].pend[0].title, null);
+    assert.deepEqual(back.herd.log.slice(-2).map((e) => e[3]), [42, { odd: 1 }], "never read back as table indices");
+    assert.deepEqual(JSON.parse(text).herd.log.d.slice(-2).map((r) => r[3]), [[42], [{ odd: 1 }]]);
+    assert.equal(encodeState(back), text);
+  });
+
+  test("the D§11.15 settings: defaults are left out of the save; changes round-trip", () => {
+    const s = populated(1);
+    const plain = JSON.parse(encodeState(s)).herd.cfg;
+    for (const k of ["ap", "glow", "col", "held", "autopilot", "collapse", "collapsed"]) assert.equal(k in plain, false, k);
+    Object.assign(s.herd.cfg, { autopilot: false, glow: 4, collapse: true, collapsed: true });
+    const text = encodeState(s);
+    assert.deepEqual(JSON.parse(text).herd.cfg, { ...plain, ap: 0, glow: 4, col: 1, held: 1 });
+    const cfg = decodeState(text).state.herd.cfg;
+    assert.deepEqual([cfg.autopilot, cfg.glow, cfg.collapse, cfg.collapsed], [false, 4, true, true]);
+    assert.equal(encodeState(decodeState(text).state), text);
+    // an out-of-range glow from a hand-edited save is clamped
+    const edited = JSON.parse(text);
+    edited.herd.cfg.glow = 9;
+    assert.equal(decodeState(resign(edited)).state.herd.cfg.glow, 5);
+  });
+
   test("saveSize counts UTF-8 bytes", () => {
     assert.equal(saveSize("abc").bytes, 3);
     assert.equal(saveSize("é").bytes, 2);
     assert.equal(saveSize("€").bytes, 3);
     assert.equal(saveSize("😀").bytes, 4);
   });
+});
+
+describe("every save this branch has written loads (SAVE_VERSION stays 1)", () => {
+  // test/fixtures/saves: texts written by the engine of each commit that changed the save format
+  // (990aa93 the first save.js; 4f9a1a0 = 4082db1's save.js; 2d2583c before the string table held
+  // pending-chest titles and journal strings), demo worlds of the time, one with shared titles.
+  const DIR = new URL("./fixtures/saves/", import.meta.url);
+  const files = fs.readdirSync(DIR).filter((f) => f.endsWith(".json")).sort();
+
+  test("the fixtures cover every format", () => {
+    assert.deepEqual(files.map((f) => f.split("-")[0]).filter((c, i, a) => a.indexOf(c) === i), ["2d2583c", "4082db1", "4f9a1a0", "990aa93"]);
+  });
+
+  for (const f of files) {
+    test(`${f}: loads with its checksum, keeps every title and journal line, ticks, and saves in the new form`, () => {
+      const text = fs.readFileSync(new URL(f, DIR), "utf8");
+      const raw = JSON.parse(text);
+      assert.equal(raw.v, 1);
+      const { state, warning, readOnly } = decodeState(text);
+      assert.equal(readOnly, false);
+      assert.equal(warning, null, String(warning));
+      assert.equal(state.heroes.length, raw.heroes.length);
+      // inline strings (the old form) read back as they were
+      raw.heroes.forEach((h, i) => {
+        assert.equal(state.heroes[i].name, h.n);
+        assert.deepEqual(state.heroes[i].pend.map((p) => p.title), (h.pd ?? []).map((r) => r[1]));
+      });
+      const rawLog = Array.isArray(raw.herd.log) ? raw.herd.log : raw.herd.log?.d ?? [];
+      assert.deepEqual(state.herd.log.map((e) => [e[1], e[3]]), rawLog.map((r) => [r[1], r[3]]));
+      // the world runs on it, and the new form round-trips byte for byte
+      const { world } = W.loadWorld(text, { nowMs: state.herd.lastMs });
+      for (let k = 1; k <= 5; k++) W.tick(world, { nowMs: state.herd.lastMs + k * 1000, tzOffsetMin: 0, weekday: 2, windowActive: true, focusedTerminal: null, agents: [], subagents: [], tabs: {}, spaces: [] });
+      assert.deepEqual(world.rt.errors, []);
+      const t2 = encodeState(state);
+      assert.equal(encodeState(decodeState(t2).state), t2);
+      assert.ok(saveSize(t2).bytes <= saveSize(text).bytes + 64, `${saveSize(t2).bytes} vs ${saveSize(text).bytes}`);
+      if (f.includes("pend")) assert.ok(saveSize(t2).bytes < saveSize(text).bytes - 1000, "shared titles are written once now");
+    });
+  }
 });

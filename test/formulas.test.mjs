@@ -3,9 +3,9 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import * as D from "../mods/mapledr/game/data.js";
-import * as F from "../mods/mapledr/game/formulas.js";
-import * as R from "../mods/mapledr/game/rng.js";
+import * as D from "../mods/down-the-stack/game/data.js";
+import * as F from "../mods/down-the-stack/game/formulas.js";
+import * as R from "../mods/down-the-stack/game/rng.js";
 
 const close = (actual, expected, msg) => {
   const tol = Math.max(1, Math.abs(expected) * 0.01);
@@ -134,7 +134,7 @@ describe("data.js: D§14 transcription", () => {
   const seen = new Set();
   for (const [blk, key, val] of pairs) test(`${blk} ${key}`, () => assertSubset(B[blk][key], val, key, seen));
   test("every documented balance deviation is used, and data.js marks it with a balance: comment", () => {
-    const src = fs.readFileSync(new URL("../mods/mapledr/game/data.js", import.meta.url), "utf8");
+    const src = fs.readFileSync(new URL("../mods/down-the-stack/game/data.js", import.meta.url), "utf8");
     for (const p of Object.keys(BALANCE_DEVIATIONS)) assert.ok(seen.has(p), `${p} is not a D§14 value any more`);
     assert.ok((src.match(/\/\/ balance:/g) || []).length >= 30, "data.js marks its balance changes");
     const doc = fs.readFileSync(new URL("../docs/BALANCE.md", import.meta.url), "utf8");

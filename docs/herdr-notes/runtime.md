@@ -100,7 +100,7 @@ Anything I could not prove from source is marked **UNCONFIRMED**.
 - `globalThis` persists across normal hot reloads, because the context is the same one. Shipped mods rely on this
   (`changes/main.js:5-6`, `files/main.js:7`). Note AGENTS.md:938-941: a broken save's top-level code has already run, so
   side effects on `globalThis` from module top level are risky. Store **plain data** (no class instances, whose methods would
-  belong to old code), versioned by key, e.g. `globalThis[Symbol.for("mapledr.sim.v1")] ??= {...}`.
+  belong to old code), versioned by key, e.g. `globalThis[Symbol.for("down-the-stack.sim.v1")] ??= {...}`.
 
 ---
 
@@ -138,7 +138,7 @@ Anything I could not prove from source is marked **UNCONFIRMED**.
 ## 3. `shared(key)` / `setShared(key, value)`
 
 - Store: `<appHome>/shared.json`, loaded lazily on first use (`src/mods.rs:495-498`, `515-542`). It is global to all mods, so
-  prefix keys (`mapledr.*`). A corrupt file is moved aside and the store starts empty (`src/mods.rs:520-533`).
+  prefix keys (`down-the-stack.*`). A corrupt file is moved aside and the store starts empty (`src/mods.rs:520-533`).
 - `shared(k)`: a deep conversion of the stored JSON into JS **on every call** (`src/mods.rs:1354-1357`). It is not live-read
   tracked.
 - `setShared(k, v)` (`src/mods.rs:1358-1361` → `set_shared` `489-493` → `SharedStore::set` `544-556`):
@@ -365,8 +365,10 @@ processed; `checking()` → `true`; `exec`/`hc`/`writeTextFile` **run for real**
 - **Top-level await**: the module promise is `finish()`ed synchronously at load (`qjs/mod.rs:2431-2434`), so awaiting host I/O
   at top level can't complete. AGENTS.md:1066-1067 forbids it. The exact error is **UNCONFIRMED**.
 - File size ≤ **8 MiB** per module (`qjs/mod.rs:57`, `5757-5790`).
-- Engine: QuickJS via longbridge `quickjs-jit` 0.12.11 (a QuickJS-ng based fork with a JIT tier in release builds,
-  `shell/Cargo.toml:45-52`, `qjs/mod.rs:5426-5439`). Shipped mods use optional chaining, `??=`, `Array.prototype.at`,
+- Engine: QuickJS via longbridge `quickjs-jit` 0.12.11 (a QuickJS-ng based fork, `shell/Cargo.toml:45-52`). herdr
+  0.1.17 builds it **without the JIT tier**: every window's runtime comes from `build_interpreter()`
+  (`src/window.rs:518` → `ShellRuntime::new` → `qjs/mod.rs:1787-1801`, "HERDR: the plain interpreter"); the JIT
+  constructors are `#[cfg(test)]` only (`qjs/mod.rs:1743-1756`, `5426-5439`). Shipped mods use optional chaining, `??=`, `Array.prototype.at`,
   `replaceAll` and Unicode property regexes (`agents/main.js:387`, `win98/taskbar.js:182`, `win98/kit.js:436`,
   `changes/main.js:61`). Classes and fields are fine.
   **UNCONFIRMED from source**: private `#fields`, static blocks, `structuredClone`. These are standard in QuickJS-ng, but no
@@ -398,6 +400,16 @@ processed; `checking()` → `true`; `exec`/`hc`/`writeTextFile` **run for real**
   (`src/mods.rs:1342-1347`, `src/window.rs:4019-4025`). Timeout is 5000 ms, or 8000 for `error`/`warning`, unless
   `timeout` is set (`src/window.rs:4049-4052`). It costs one mod load and render each and stacks on screen. Use it for rare
   milestones (boss down), never per kill.
+  - It has no sound of its own (sounds are `playSound` or herdr's own attention alerts, `src/window.rs:2377-2379`).
+  - The shipped toast mod runs `run(action.name, action.args ?? {})` when clicked, then closes itself
+    (`defaults/mods/toast/main.js`). A `<mod>.<command>` action reaches shown copies only (below) and toasts
+    "<cmd> failed" elsewhere; `mod.open {name}` is an app command that opens the `"overlay"` spec of that mod's
+    `mod.json` (`src/window.rs:3690-3702`, `5446-5449`) in any layout. Running it again closes it (overlay id
+    `mod-<name>`).
+- `layout.toggle` / `layout.show` / `layout.hide {id}` set the node's `hidden` (`src/window.rs:3646-3654`; a node the
+  shown layout lacks fails the command). The click state is written to `layouts/.state/<layout>.json` by `save()`
+  (`src/window.rs:1180-1194`, `1236-1255`), so a hidden block stays hidden across restarts. A hidden block's mod copy
+  keeps living (and its timers run) while its slot is in the layout (`src/window.rs:1630-1636`).
 - **Floating blocks**:
   - slot `float:<id>`, props = content props plus **`float: <id>`** (`src/window.rs:5464-5468`).
   - Sized to content (`set_fit_content(true)`, `src/window.rs:1638-1646`).
@@ -469,17 +481,17 @@ built or run. Citation prefixes are as at the top of this file, plus `taffy/` = 
   ways to fan out:
   (a) each copy runs its own `cx.timer.every(T)`, compares a module-level `version` with the one it saw last, and
       `cx.notify()`s itself;
-  (b) one copy calls `run("mapledr.refresh")`, which reaches every **shown** copy's `nextCommand()`
+  (b) one copy calls `run("down-the-stack.refresh")`, which reaches every **shown** copy's `nextCommand()`
       (`src/window.rs:3104-3109` → `src/mods.rs:784-799`).
   Avoid `setShared` for this: a changed value re-serialises all of shared.json and refreshes every copy of every mod
   (`src/mods.rs:544-556`, `src/window.rs:1905-1922`).
 - Module state resets on hot reload (a new module record per revision, `shell/watch.rs:521-587`) and on a VM restart
   (`src/window.rs:4442-4500`). `globalThis` survives a hot reload but not a VM restart. Keep the sim as plain data (optionally
-  mirrored under `globalThis[Symbol.for("mapledr.v1")]` to survive dev reloads) and persist it to disk (Q2).
+  mirrored under `globalThis[Symbol.for("down-the-stack.v1")]` to survive dev reloads) and persist it to disk (Q2).
   Never store element objects across renders: `SpecError::Expired` (`shell/spec.rs:1489-1504`).
 
 ### Q2. Best persistence for a save file
-**`writeTextFile(appHome() + "/data/mapledr/save.json", json, lastText)` from a single writer, read back with `readTextFile`.**
+**`writeTextFile(appHome() + "/data/down-the-stack/save.json", json, lastText)` from a single writer, read back with `readTextFile`.**
 - It is not capability-gated: plain `std::fs` on any path (`src/mods.rs:1137-1154`, `src/mod_files.rs:14-96`). The limit is
   1 MiB (`mod_files.rs:8`). It runs on its own thread, behind a process-wide mutex (`mod_files.rs:9,48,123-139`).
 - `expected` must equal the file's current bytes, or the call rejects "The file changed outside Herdr…" (`mod_files.rs:52-57`).
@@ -487,7 +499,7 @@ built or run. Citation prefixes are as at the top of this file, plus `taffy/` = 
   The **create** path (`expected=null`) is a non-atomic `create_new` + `write_all` (`mod_files.rs:60-67`), and there is no fsync
   anywhere. So create a `"{}"` placeholder once, then always replace.
 - `data/` is not watched, so saving never hot-reloads (`src/files.rs:120-132`). `data/<mod>/` is created on every copy load
-  (`src/mods.rs:1459-1460`) and never cleaned. Anything written under `mods/mapledr/` **does** reload the mod
+  (`src/mods.rs:1459-1460`) and never cleaned. Anything written under `mods/down-the-stack/` **does** reload the mod
   (`src/files.rs:133-142`).
 - Relative paths resolve against the process cwd inherited from the launcher (`src/update.rs:446-457`), so always build paths
   from `appHome()`.

@@ -4,12 +4,12 @@
 // Driven through world.tick with scripted snapshots, the way the host drives it.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import * as D from "../mods/mapledr/game/data.js";
-import * as F from "../mods/mapledr/game/formulas.js";
-import * as Hr from "../mods/mapledr/game/heroes.js";
-import * as W from "../mods/mapledr/game/world.js";
-import * as A from "../mods/mapledr/game/agents.js";
-import * as I from "../mods/mapledr/game/items.js";
+import * as D from "../mods/down-the-stack/game/data.js";
+import * as F from "../mods/down-the-stack/game/formulas.js";
+import * as Hr from "../mods/down-the-stack/game/heroes.js";
+import * as W from "../mods/down-the-stack/game/world.js";
+import * as A from "../mods/down-the-stack/game/agents.js";
+import * as I from "../mods/down-the-stack/game/items.js";
 
 const T0 = 1_790_000_000_000; // a Tuesday-ish epoch; the local day is computed with tz 0
 const near = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps;
@@ -294,6 +294,53 @@ describe("tasks and the 8-tick close (D§2.3)", () => {
     assert.equal(h.pend[0].title, "Fix the flaky test");
     assert.equal(sim.live("t1").state, "shipped");
     noErrors(sim);
+  });
+
+  test("a task keeps the last title that names its work: program, shell, path, prompt or blank retitles never replace it", () => {
+    // herdr's agents list judges titles the same way (defaults/mods/agents/main.js title()); an agent
+    // that retitles itself "Claude Code" or "zsh" must not rename the task its chest records
+    const sim = new Sim().set("t1", "working", { title: "✳ Fix the flaky test" }).tick(120);
+    assert.equal(sim.live("t1").task.title, "Fix the flaky test", "the status glyph is stripped");
+    for (const t of ["claude", "Claude", "✳ claude", "t1", "zsh", "-bash", "node", "~/src/app", "me@box: ~/src", "⏳", "", null]) {
+      sim.set("t1", "working", { title: t }).tick(2);
+      assert.equal(sim.live("t1").task.title, "Fix the flaky test", JSON.stringify(t));
+      assert.equal(sim.live("t1").title, t == null ? "" : String(t), "the live record mirrors the raw title");
+    }
+    sim.set("t1", "working", { title: "⠋ Refactor the webhook sender so retries back off exponentially" }).tick(2);
+    assert.equal(sim.live("t1").task.title, "Refactor the webhook sender so retries b", "a telling retitle wins, cut to 40 characters (D§2.3)");
+    sim.set("t1", "working", { title: "Refactor the webhook sender so  retries" }).tick(2);
+    sim.set("t1", "working", { title: "zsh" }).tick(2);
+    sim.set("t1", "done").tick(8);
+    const h = sim.hero("t1");
+    assert.equal(h.pend.length, 1);
+    assert.equal(h.pend[0].title, "Refactor the webhook sender so  retries", "the chest records the task's last telling title");
+    // a task opened under its program's name has no title
+    sim.set("t1", "working", { title: "Claude" }).tick(120);
+    assert.equal(sim.live("t1").task.title, "");
+    // a chest from an older save that recorded a shell name journals as "Commit"
+    h.pend.push({ min: 120, fmin: 0, title: "zsh", at: sim.now, sealFactor: 1 });
+    A.openChests(sim.w, h, { reason: "click" }, null);
+    const ships = sim.state.herd.log.filter((e) => e && e[1] === "ship").map((e) => e[3]);
+    assert.deepEqual(ships.slice(-2), ["Refactor the webhook sender so  retries", "Commit"]);
+    noErrors(sim);
+  });
+
+  test("tellingTitle remembers its answers per title and terminal, never across programs or terminals", () => {
+    const codex = { address: "t1", program: { key: "codex", name: "Codex" }, app: "codex" };
+    const claude = { address: "t2", program: { key: "claude", name: "Claude Code" }, app: "claude-code" };
+    for (let round = 0; round < 2; round++) { // the second round answers from the cache
+      assert.equal(A.tellingTitle("✳ Codex", codex), "");
+      assert.equal(A.tellingTitle("✳ Codex", claude), "Codex");
+      assert.equal(A.tellingTitle("t1", codex), "");
+      assert.equal(A.tellingTitle("t1", claude), "t1");
+      assert.equal(A.tellingTitle("Claude Code", null), "Claude Code");
+      assert.equal(A.tellingTitle("Claude Code", claude), "");
+    }
+    // past its size the cache starts afresh; answers stay the same
+    for (let i = 0; i < 1200; i++) assert.equal(A.tellingTitle(`⠋ Task ${i}`, codex), `Task ${i}`);
+    assert.equal(A.tellingTitle("✳ Codex", codex), "");
+    assert.equal(A.tellingTitle("", codex), "");
+    assert.equal(A.tellingTitle(null, codex), "");
   });
 
   test("flipping back to working inside the 8 ticks continues the same task", () => {
@@ -702,6 +749,70 @@ describe("first sight, shift and the why tooltip", () => {
     assert.equal(why.nextBandMin, 240);
     assert.equal(why.flapPaused, false);
     assert.equal(why.pending, 0);
+  });
+
+  test("live.why's party, banner and crowding counts (kept for the tick) match a fresh scan", async () => {
+    const { makeWorld, makeEv } = await import("./helpers/engine.mjs");
+    const w = makeWorld({ heroes: [
+      { cls: "refactorer", L: 10 }, { cls: "hotfixer", L: 10 }, { cls: "shellmancer", L: 10 },
+      { cls: "forkbinder", L: 10, mapId: "1-2" }, { cls: "rubberducker", L: 10, space: "s2" },
+    ] });
+    const pairs = A.liveHeroes(w);
+    const [h1, l1] = pairs[0];
+    const [h2, l2] = pairs[1];
+    const [, l3] = pairs[2];
+    w.rt.tick = 10;
+    for (const [, l] of pairs) l.nowTick = 10;
+    const fresh = (h, l) => { w.rt.whyRooms = null; return A.whyOf(w, h, l); };
+    const keys = (y) => [y.party, y.banner, y.crowding, y.xpPerMin];
+    const before = A.whyOf(w, h1, l1);
+    const kept = w.rt.whyRooms;
+    assert.ok(kept, "the counts are kept for the tick");
+    assert.deepEqual(keys(A.whyOf(w, h1, l1)), keys(fresh(h1, l1)));
+    assert.ok(before.party > 0, "two room mates questing");
+    // a mate stops (its stepStatus on the same tick): the next hero's numbers follow at once
+    A.whyOf(w, h1, l1);
+    l2.status = "blocked";
+    A.stepStatus(w, h2, l2, makeEv());
+    assert.equal(l2.state, "waiting");
+    const after = A.whyOf(w, h1, l1);
+    assert.ok(after.party < before.party, "one mate fewer");
+    assert.deepEqual(keys(after), keys(fresh(h1, l1)));
+    // a pin changes outside the status loop (reconcile): counted again on the next tick
+    l3.pinned = true;
+    w.rt.tick = 11;
+    assert.equal(A.whyOf(w, h1, l1).banner, D.TUNING.party.banner);
+    assert.deepEqual(keys(A.whyOf(w, h1, l1)), keys(fresh(h1, l1)));
+    for (const [h, l] of pairs) assert.deepEqual(A.whyOf(w, h, l), fresh(h, l), h.name);
+  });
+
+  test("live.why refreshes every 5 ticks, heroes taking turns (a fifth of the herd a tick), and at once on a state change", async () => {
+    const { makeWorld, makeEv } = await import("./helpers/engine.mjs");
+    const w = makeWorld({ heroes: Array.from({ length: 10 }, (_, i) => ({ cls: "refactorer", L: 10 + i })) });
+    const pairs = A.liveHeroes(w);
+    const ev = makeEv();
+    const step = (tick) => {
+      w.rt.tick = tick;
+      const before = pairs.map(([, l]) => l.why);
+      for (const [h, l] of pairs) A.stepStatus(w, h, l, ev);
+      return pairs.filter(([, l], i) => l.why !== before[i]).map(([h]) => h.id);
+    };
+    assert.equal(step(100).length, 10, "first sight: every hero");
+    const seen = new Map();
+    for (let t = 101; t <= 105; t++) {
+      const ids = step(t);
+      assert.equal(ids.length, 2, `tick ${t}: ${ids}`);
+      for (const id of ids) {
+        assert.equal((t + id) % 5, 0);
+        seen.set(id, (seen.get(id) || 0) + 1);
+      }
+    }
+    assert.deepEqual([...seen.values()], new Array(10).fill(1), "each hero once in 5 ticks");
+    // a state change refreshes that hero on the spot
+    const [h, l] = pairs.find(([x]) => (106 + x.id) % 5 !== 0);
+    l.status = "blocked";
+    assert.ok(step(106).includes(h.id));
+    assert.equal(l.why.state, "waiting");
   });
 
   test("pinned, focused, program, title and space are mirrored on the live record", () => {

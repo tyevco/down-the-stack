@@ -13,7 +13,8 @@
 //   → out/view-stage-<kind>.png: the real demo worlds through game/view.js stageView
 //
 // Layout follows D§11.2/11.3 exactly as view.js should: slot w = clamp(W / N, 150, 320) with the
-// spare width split at both ends; overflow when N·150 > W (C − 1 slots + a 150 px camp chip);
+// spare width split at both ends; overflow when N·150 > W (C − 1 slots + a 150 px camp chip;
+// protected heroes squeeze the slots to 90 px, at most 30 slots, before they fold too);
 // a boss fight appends a 2w arena at the right end (fighters ≥ 56 px apart, no BOSS tag inside
 // it). Inside a slot of width w: hero at 0.24w (resting 0.22w with the campfire at 0.08w;
 // supervising 0.16w with Forklings from 0.30w), a shipped hero's chest at ≥ 0.42w (the SHIPPED
@@ -24,7 +25,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ZONES, BACKLOG, MOB_BY_ID, BOSS_BY_ID, BOSS_PARTS, PALETTE, ITEM_BASES, CLASS_COLORS, RARITIES } from "../../mods/mapledr/game/data.js";
+import { ZONES, BACKLOG, MOB_BY_ID, BOSS_BY_ID, BOSS_PARTS, PALETTE, ITEM_BASES, CLASS_COLORS, RARITIES } from "../../mods/down-the-stack/game/data.js";
 
 const TICK0 = 51840;                 // an arbitrary "now" tick; fx keys are fx:<tick>:<n>
 const COL = {
@@ -103,7 +104,17 @@ function build(spec, { width, height, tick = 0 } = {}) {
     shownHeroes = all.filter((h) => !fold.has(h.id));
     folded = all.filter((h) => fold.has(h.id));
     if (shownHeroes.length > L.shown) {
-      // More protected heroes than slots: squeeze the slots below 150 px (heroes scale down).
+      // More protected heroes than slots: squeeze the slots below 150 px (heroes scale down), to
+      // 90 px and at most 30 slots; past that protected heroes fold too (chest, pinned, focused,
+      // then blocked last, lowest level first).
+      const maxK = Math.max(1, Math.min(30, Math.floor((width - 150) / 90)));
+      if (shownHeroes.length > maxK) {
+        const prank = (h) => (h.state === "waiting" ? 3 : h.focused ? 2 : h.pinned ? 1 : 0);
+        const more = new Set(shownHeroes.slice().sort((a, b) => prank(a) - prank(b) || a.level - b.level)
+          .slice(0, shownHeroes.length - maxK).map((h) => h.id));
+        shownHeroes = shownHeroes.filter((h) => !more.has(h.id));
+        folded = all.filter((h) => fold.has(h.id) || more.has(h.id));
+      }
       const sw = Math.min(320, (width - 150) / shownHeroes.length);
       L = { ...L, w: sw, shown: shownHeroes.length, xs: shownHeroes.map((_, i) => i * sw), chip: { x: shownHeroes.length * sw, w: width - shownHeroes.length * sw } };
     }
@@ -201,7 +212,7 @@ function build(spec, { width, height, tick = 0 } = {}) {
           pacing: j > 0 && working && !spec.calm, paceAmp: 12, opacity: 1,
           phaser: (def.traits ?? []).includes("phaser"), pending: Boolean(m.pending),
           growScale: m.grow ?? 1, dying: m.dyingAt != null && tick === m.dyingAt, hit: Boolean(m.hit && tick === 0),
-          waiting: h.state === "waiting",
+          waiting: h.state === "waiting", lane: j, // 0 = the front of the lane (a crowded stage keeps it)
         });
       });
     }
@@ -336,7 +347,7 @@ function build(spec, { width, height, tick = 0 } = {}) {
 
 // prop art sizes (viewBox) per zone: [prop-1, prop-2, prop-3]
 const PROP_SIZES = {};
-const ART = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "mods", "mapledr", "art", "bg");
+const ART = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "mods", "down-the-stack", "art", "bg");
 for (const z of [...ZONES.map((z) => z.id), "backlog"]) {
   PROP_SIZES[z] = [1, 2, 3].map((k) => {
     try {
@@ -507,6 +518,85 @@ SPECS.crowd = {
   }),
   fx: Array.from({ length: 24 }, (_, i) => ({ hero: 61 + (i % 16), kind: i % 6 === 0 ? "crit" : "num", at: "mob", text: String(800 + i * 37), born: i < 12 ? 0 : -1, dx: 4 })),
 };
+// Ultrawide stress (D§11.9.7 budget): 30 heroes on a 4000 px stage, every status at once, each in
+// its own room (neighbours alternate spaces), a full effects tick with a pillar. 25 slots show
+// (150 px each) and the rest camp; the stage's detail ladder thins the scene to hold ~400 elements.
+const THRONG_NAMES = ["Abe", "Bea", "Cal", "Dee", "Eli", "Fay", "Gus", "Hal", "Ivy", "Jem", "Kai", "Lou", "Max", "Ned", "Ora",
+  "Pip", "Quin", "Rex", "Sky", "Tam", "Uma", "Vic", "Wes", "Xia", "Yul", "Zia", "Ada", "Bo", "Cy", "Di"];
+const THRONG_MAPS = ["6-1", "6-2", "6-3", "7-1", "7-2", "7-3", "8-1", "8-2", "8-3", "9-1"];
+function throngHero(i, over = {}) {
+  const map = THRONG_MAPS[i % THRONG_MAPS.length];
+  const mm = Object.keys(mapOf(map).spawn);
+  const mob = (j, o = {}) => ({ id: mm[j % mm.length], ...o });
+  return {
+    id: 101 + i, name: `${THRONG_NAMES[i % 30]}${i >= 30 ? "-Two" : ""} the Async`, level: 60 + (i * 7) % 36,
+    cls: ["refactorer", "hotfixer", "shellmancer", "forkbinder", "rubberducker"][i % 5], career: "Senior Refactorer",
+    program: ["claude", "codex", "pi"][i % 3], space: `s${1 + (i % 3)}`, map, state: "questing", attacking: true,
+    hp: 0.5 + (i % 5) * 0.1, tier: 3 + (i % 3), hat: 1 + (i % 5), mobs: [mob(0, { hp: 0.6, hit: true }), mob(1)], ...over,
+  };
+}
+SPECS.throng = {
+  width: 4000,
+  frontier: { mapId: "8-3", quota: [18, 40], sprint: [40, 70], door: true },
+  heroes: Array.from({ length: 30 }, (_, i) => {
+    const map = THRONG_MAPS[i % THRONG_MAPS.length];
+    const mm = Object.keys(mapOf(map).spawn);
+    const three = [{ id: mm[0], hp: 0.4, hit: true, elite: i % 20 === 0 }, { id: mm[1 % mm.length] }, { id: mm[2 % mm.length], pending: true }];
+    switch (i % 10) {
+      case 0: return throngHero(i, { crit: true, mobs: three, fresh: i === 10 ? "42m" : undefined });
+      case 2: return throngHero(i, { state: "supervising", attacking: false, forks: 4, forkBlocked: i === 2, mobs: three.slice(0, 1) });
+      case 3: return throngHero(i, { state: "waiting", attacking: false, blockedFor: "3m" });
+      case 5: return throngHero(i, { state: "shipped", attacking: false, mobs: [], chest: { tier: "gold", count: 2, seals: "6.1" } });
+      case 6: return throngHero(i, { state: "resting", attacking: false, mobs: [], zzz: true, fresh: "1h 10m" });
+      case 7: return throngHero(i, { state: "crashed", attacking: false, reboot: 0.5, mobs: three.slice(0, 1) });
+      case 8: return throngHero(i, { focused: i === 8, pinned: i === 18 });
+      case 9: return throngHero(i, { mobs: three, chest: { tier: "iron", seals: "1.0" } });
+      default: return throngHero(i);
+    }
+  }),
+  fx: [
+    ...Array.from({ length: 24 }, (_, i) => ({ hero: 101 + (i % 12), kind: i % 6 === 0 ? "crit" : "num", at: "mob", text: String(4800 + i * 37), born: i < 12 ? 0 : -1, dx: 4 })),
+    { hero: 101, kind: "pillar", text: "LTS", color: RARITIES[4].color, born: 0, ox: 26 },
+    { hero: 102, kind: "levelup", text: "LEVEL UP", born: 0 },
+    { hero: 104, kind: "unblocked", text: "Unblocked", born: 0 },
+  ],
+};
+// The squeeze extreme: 60 heroes on 4000 px, 45 of them protected (15 blocked, 30 holding chests):
+// slots squeeze toward 90 px but never past 30 on any strip, so 15 chest holders camp; every "!"
+// and every chest on stage stays drawn at the ladder's barest level.
+SPECS.squeeze = {
+  width: 4000,
+  frontier: { mapId: "8-3", quota: [18, 40] },
+  heroes: Array.from({ length: 60 }, (_, i) => {
+    switch (i % 4) {
+      case 0: return throngHero(i, { state: "waiting", attacking: false, blockedFor: "5m", forks: i % 12 === 0 ? 2 : 0, forkBlocked: false });
+      case 1: return throngHero(i, { state: "resting", attacking: false, mobs: [], zzz: true, chest: { tier: "silver", count: 2, seals: "3.2" } });
+      case 2: return throngHero(i, { chest: { tier: "wooden", seals: "0.4" } });
+      default: return throngHero(i);
+    }
+  }),
+  fx: Array.from({ length: 12 }, (_, i) => ({ hero: 103 + i * 4, kind: "num", at: "mob", text: String(900 + i * 41), born: 0, dx: 4 })),
+};
+// A long day's herd (D§11.9.7 levels 15-16): 36 heroes on 4000 px, every one holding status at
+// once (blocked with chests waiting and a blocked sub-agent, crashed with a chest, resting by two
+// chests): 30 squeezed slots, 6 at camp; the ladder merges the marks and folds the Forklings
+// into counters to stay within ~400 elements with every "!", chest and tag drawn.
+SPECS.swamped = {
+  width: 4000,
+  frontier: { mapId: "8-3", quota: [18, 40] },
+  heroes: Array.from({ length: 36 }, (_, i) => {
+    switch (i % 4) {
+      case 0: return throngHero(i, { state: "waiting", attacking: false, blockedFor: "12m", forks: 3 + (i % 8 === 0 ? 2 : 0), forkBlocked: true, chest: { tier: "gold", count: 2, seals: "6.1" } });
+      case 1: return throngHero(i, { state: "waiting", attacking: false, blockedFor: "4m", forks: 3, forkBlocked: i % 3 === 0, chest: { tier: "silver", count: 3, seals: "3.2" } });
+      case 2: return throngHero(i, { state: "crashed", attacking: false, reboot: 0.6, forks: 3, chest: { tier: "iron", seals: "1.0" } });
+      default: return throngHero(i, { state: "resting", attacking: false, mobs: [], zzz: true, fresh: "1h 05m", chest: { tier: "wooden", count: 2, seals: "0.4" } });
+    }
+  }),
+  fx: [
+    ...Array.from({ length: 8 }, (_, i) => ({ hero: 103 + i * 4, kind: "num", at: "mob", text: String(700 + i * 23), born: 0, dx: 4 })),
+    { hero: 105, kind: "unblocked", text: "Unblocked", born: 0 },
+  ],
+};
 SPECS.calm = { ...SPECS.midgame, calm: true };
 SPECS["all-idle"] = {
   width: 1200,
@@ -553,7 +643,7 @@ const EMPTY = {
 };
 
 /** Every scenario name, in preview order. */
-export const SCENARIOS = ["empty", "loading", "first-day", "midgame", "boss", "boss-enraged", "boss-won", "late", "late-wide", "crowd", "calm", "all-idle", "narrow", "promoted", "compact", "tall"];
+export const SCENARIOS = ["empty", "loading", "first-day", "midgame", "boss", "boss-enraged", "boss-won", "late", "late-wide", "crowd", "throng", "squeeze", "swamped", "calm", "all-idle", "narrow", "promoted", "compact", "tall"];
 
 /** Build one scenario's StageVM. opts: { width, height, tick } (tick 1 = the next tick). */
 export function makeScenario(name, opts = {}) {
@@ -581,7 +671,7 @@ async function shootAll(argv) {
   const M = await import("../mock/index.mjs");
   const { View } = await import("gpui-kit");
   const { shoot } = await import("../preview/shoot.mjs");
-  const Stage = (await import("../../mods/mapledr/ui/stage.js")).default;
+  const Stage = (await import("../../mods/down-the-stack/ui/stage.js")).default;
   const shots = [];
   const variants = [];
   for (const n of SCENARIOS) {
@@ -624,10 +714,10 @@ async function shootViews(argv) {
   const M = await import("../mock/index.mjs");
   const { View } = await import("gpui-kit");
   const { shoot } = await import("../preview/shoot.mjs");
-  const { demoWorld, demoSnapshot, DEMO_KINDS } = await import("../../mods/mapledr/game/demo.js");
-  const { tick } = await import("../../mods/mapledr/game/world.js");
-  const { stageView } = await import("../../mods/mapledr/game/view.js");
-  const Stage = (await import("../../mods/mapledr/ui/stage.js")).default;
+  const { demoWorld, demoSnapshot, DEMO_KINDS } = await import("../../mods/down-the-stack/game/demo.js");
+  const { tick } = await import("../../mods/down-the-stack/game/world.js");
+  const { stageView } = await import("../../mods/down-the-stack/game/view.js");
+  const Stage = (await import("../../mods/down-the-stack/ui/stage.js")).default;
   const now0 = Date.UTC(2026, 10, 24, 9, 30, 0);
   const shots = [];
   for (const kind of DEMO_KINDS) {

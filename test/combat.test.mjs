@@ -2,12 +2,13 @@
 // types, coffee and crashes, rest, quotas and the Backlog, determinism and cost.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import * as D from "../mods/mapledr/game/data.js";
-import * as F from "../mods/mapledr/game/formulas.js";
-import * as H from "../mods/mapledr/game/heroes.js";
-import * as C from "../mods/mapledr/game/combat.js";
-import { encodeState } from "../mods/mapledr/game/save.js";
+import * as D from "../mods/down-the-stack/game/data.js";
+import * as F from "../mods/down-the-stack/game/formulas.js";
+import * as H from "../mods/down-the-stack/game/heroes.js";
+import * as C from "../mods/down-the-stack/game/combat.js";
+import { encodeState } from "../mods/down-the-stack/game/save.js";
 import { makeWorld, makeEv, stepWorld, heroOf, liveOf } from "./helpers/engine.mjs";
+import { within } from "./helpers/perf.mjs";
 import { fullRefKit, sweep, SWEEP_CLASSES } from "../tools/pacing-sim.mjs";
 
 const CLS5 = ["refactorer", "hotfixer", "shellmancer", "forkbinder", "rubberducker"];
@@ -831,7 +832,7 @@ describe("determinism and cost", () => {
     assert.notEqual(run(78).text, a.text);
   });
 
-  test("stepRoom for 8 heroes stays well under 1 ms (V8)", () => {
+  test("stepRoom for 8 heroes stays well under 1 ms (V8)", (t) => {
     const heroes = [];
     for (let i = 0; i < 8; i++) heroes.push({ cls: CLS5[i % 5], L: 45 + i, mapId: "5-2" });
     const w = makeWorld({ seed: 3, heroes });
@@ -845,8 +846,8 @@ describe("determinism and cost", () => {
       w.rt.nowMs += 1000;
       for (const r of C.buildRooms(w)) C.stepRoom(w, r, ev);
     }
-    const us = Number(process.hrtime.bigint() - t0) / N / 1000;
-    assert.ok(us < 400, `${us.toFixed(1)} us per tick`);
+    // 0.4 ms a tick with PERF=1, 4 ms otherwise (test/helpers/perf.mjs)
+    within(t, Number(process.hrtime.bigint() - t0) / N / 1e6, 0.4, "stepRoom per tick");
   });
 });
 

@@ -1,8 +1,8 @@
 {
   "layout:Down-the-Stack": {
     "ctrl-shift-g": "layout.toggle:stage",
-    "ctrl-shift-s": "mapledr.sheet",
-    "ctrl-shift-a": "mapledr.herd",
-    "ctrl-shift-d": "mapledr.calm"
+    "ctrl-shift-s": "down-the-stack.sheet",
+    "ctrl-shift-a": "down-the-stack.herd",
+    "ctrl-shift-d": "down-the-stack.calm"
   }
 }

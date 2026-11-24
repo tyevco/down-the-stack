@@ -1,4 +1,4 @@
-// The layout (layouts/Down-the-Stack.json), the mod manifest (mods/mapledr/mod.json) and the suggested
+// The layout (layouts/Down-the-Stack.json), the mod manifest (mods/down-the-stack/mod.json) and the suggested
 // keys (keys.example.json), checked against herdr 0.1.17's own rules:
 //   - layout schema: src/layout.rs (Node, Content, PaneFrame, Header, Background, Size, Look);
 //     colors: settings.rs (`#rrggbb[aa]` or a theme name; unknown names paint magenta);
@@ -17,7 +17,9 @@ import { fileURLToPath } from "node:url";
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const HERDR = process.env.HERDR_SRC ?? path.resolve(REPO, "..", "herdrdev", "herdr-app");
 const LAYOUT_FILE = path.join(REPO, "layouts", "Down-the-Stack.json");
-const MOD_DIR = path.join(REPO, "mods", "mapledr");
+/** The mod folder: herdr shows it to players (Keys overlay, failed-command toasts, "did not load"). */
+const MOD = "down-the-stack";
+const MOD_DIR = path.join(REPO, "mods", MOD);
 
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 const readJsonIfAny = (file) => (fs.existsSync(file) ? readJson(file) : null);
@@ -87,7 +89,7 @@ const APP_COMMANDS = {
   "mod.open": [{ name: "name", required: true }],
 };
 
-/** mapledr's own commands (ARCHITECTURE §4) and the roles a layout node may ask for (§1). */
+/** The mod's own commands (ARCHITECTURE §4) and the roles a layout node may ask for (§1). */
 const MOD_COMMANDS = new Set(["sheet", "herd", "calm"]);
 const LAYOUT_ROLES = new Set(["stage", "party", "nameplate", "hud"]);
 
@@ -325,16 +327,16 @@ describe("layouts/Down-the-Stack.json", () => {
     }
   });
 
-  test("every referenced mod exists (shipped by herdr, or mods/mapledr)", () => {
-    assert.ok(fs.existsSync(path.join(MOD_DIR, "mod.json")), "mods/mapledr/mod.json is missing");
+  test("every referenced mod exists (shipped by herdr, or mods/down-the-stack)", () => {
+    assert.ok(fs.existsSync(path.join(MOD_DIR, "mod.json")), "mods/down-the-stack/mod.json is missing");
     for (const m of V.mods) {
-      const ok = m.name === "mapledr" || SHIPPED_MODS.has(m.name) || m.name.startsWith("frame-");
+      const ok = m.name === MOD || SHIPPED_MODS.has(m.name) || m.name.startsWith("frame-");
       assert.ok(ok, `${m.where}: unknown mod "${m.name}"`);
     }
   });
 
-  test("every mapledr block names a known role in an object props", () => {
-    const ours = V.mods.filter((m) => m.name === "mapledr");
+  test("every down-the-stack block names a known role in an object props", () => {
+    const ours = V.mods.filter((m) => m.name === MOD);
     assert.ok(ours.length >= 4);
     for (const m of ours) {
       assert.ok(isObj(m.props), `${m.where}: props must be an object (herdr replaces anything else by {})`);
@@ -378,13 +380,13 @@ describe("layouts/Down-the-Stack.json", () => {
     assert.equal(sb.type, "column");
     assert.deepEqual([sb.size, sb.min, sb.max, sb.resizable, sb.background], [{ px: 268 }, 44, 480, false, "chrome"]);
     assert.equal(parentOf("sidebar"), layout, "sidebar is a child of the root row (the root divider drags it)");
-    assert.equal(layout.preview, "mods/mapledr/preview.svg");
+    assert.equal(layout.preview, "mods/down-the-stack/preview.svg");
   });
 
   test("the party replaces the shipped agents list inside the sidebar", () => {
     const party = byId("party");
     assert.equal(party.type, "block");
-    assert.deepEqual(party.content, { mod: "mapledr", props: { role: "party" } });
+    assert.deepEqual(party.content, { mod: "down-the-stack", props: { role: "party" } });
     assert.equal(parentOf("party").id, "sidebar-lists");
     assert.ok(within("sidebar", "party"));
     assert.ok(!V.mods.some((m) => m.name === "agents"), "the agents list is replaced, not doubled");
@@ -395,7 +397,7 @@ describe("layouts/Down-the-Stack.json", () => {
     const f = mainFrame();
     assert.equal(byId("main").content.tab, "active");
     assert.equal(f.lone, true);
-    assert.equal(f.header.content.mod, "mapledr");
+    assert.equal(f.header.content.mod, MOD);
     assert.equal(f.header.content.props.role, "nameplate");
     assert.ok(!("pane" in f.header.content.props) && !("terminal" in f.header.content.props), "herdr sets pane/terminal itself");
     assert.ok(f.header.height >= 30 && f.header.height <= 34, `height ${f.header.height}`);
@@ -407,7 +409,7 @@ describe("layouts/Down-the-Stack.json", () => {
   test("the stage spans the work column between the panes and the status bar", () => {
     const stage = byId("stage");
     assert.equal(stage.type, "block");
-    assert.deepEqual(stage.content, { mod: "mapledr", props: { role: "stage" } });
+    assert.deepEqual(stage.content, { mod: "down-the-stack", props: { role: "stage" } });
     assert.deepEqual([stage.size, stage.min, stage.max], [{ px: 200 }, 64, 420]);
     assert.ok(!stage.hidden && !stage.window_drag, "shown, and clicks reach the mod instead of dragging the window");
     const work = parentOf("stage");
@@ -419,7 +421,7 @@ describe("layouts/Down-the-Stack.json", () => {
 
   test("the hud is optional: present, hidden by default", () => {
     const hud = byId("hud");
-    assert.deepEqual(hud.content, { mod: "mapledr", props: { role: "hud" } });
+    assert.deepEqual(hud.content, { mod: "down-the-stack", props: { role: "hud" } });
     assert.equal(hud.hidden, true);
     assert.equal(parentOf("hud").id, "work");
   });
@@ -435,7 +437,7 @@ describe("layouts/Down-the-Stack.json", () => {
     assert.equal(byId("tabs").content.mod, "tabs");
   });
 
-  test("differs from herdr's shipped main.json only by the mapledr changes", (t) => {
+  test("differs from herdr's shipped main.json only by the Down the Stack changes", (t) => {
     const main = readJsonIfAny(path.join(HERDR, "defaults", "layouts", "main.json"));
     if (!main) return t.skip("herdr source not found (set HERDR_SRC)");
     // Undo exactly the documented changes; what is left must be main, key for key.
@@ -484,7 +486,7 @@ describe("layouts/Down-the-Stack.json", () => {
 
 // ---------------------------------------------------------------------------------------------
 
-describe("mods/mapledr/mod.json", () => {
+describe("mods/down-the-stack/mod.json", () => {
   const manifest = readJson(path.join(MOD_DIR, "mod.json"));
 
   test('place is "none" (anything else docks a copy into the person\'s own layout)', () => {
@@ -512,8 +514,8 @@ describe("mods/mapledr/mod.json", () => {
       } else {
         // A mod command: "<this mod>.<command>", no arguments, handled by the mod (ARCHITECTURE §4).
         const [mod, cmd] = p.command.split(/\.(.*)/s);
-        assert.equal(mod, "mapledr", `${p.command}: a mod's own commands start with "mapledr."`);
-        assert.ok(MOD_COMMANDS.has(cmd), `${p.command}: not a mapledr command`);
+        assert.equal(mod, MOD, `${p.command}: a mod's own commands start with "${MOD}."`);
+        assert.ok(MOD_COMMANDS.has(cmd), `${p.command}: not a ${MOD} command`);
         assert.deepEqual(args, {}, `${p.command}: mod commands take no arguments`);
       }
       const id = `${p.command}:${JSON.stringify(args)}`;
@@ -525,9 +527,9 @@ describe("mods/mapledr/mod.json", () => {
 
   test("offers the sheet, the Herd panel and calm mode", () => {
     const entries = Object.fromEntries(manifest.palette.map((p) => [p.title, [p.command, p.args ?? {}]]));
-    assert.deepEqual(entries["Down the Stack: character sheet"], ["mapledr.sheet", {}]);
-    assert.deepEqual(entries["Down the Stack: Herd panel"], ["mapledr.herd", {}]);
-    assert.deepEqual(entries["Down the Stack: calm mode"], ["mapledr.calm", {}]);
+    assert.deepEqual(entries["Down the Stack: character sheet"], ["down-the-stack.sheet", {}]);
+    assert.deepEqual(entries["Down the Stack: Herd panel"], ["down-the-stack.herd", {}]);
+    assert.deepEqual(entries["Down the Stack: calm mode"], ["down-the-stack.calm", {}]);
   });
 
   test("no entry duplicates one herdr's palette builds itself (herdr drops those silently)", () => {
@@ -580,7 +582,7 @@ describe("keys.example.json", () => {
     for (const k of Object.keys(keys[`layout:${name}`])) assert.ok(!taken.has(normKey(k)), `${k} is a herdr default`);
   });
 
-  test("actions are valid: layout toggles of real nodes, or mapledr commands the palette also offers", () => {
+  test("actions are valid: layout toggles of real nodes, or the mod's commands the palette also offers", () => {
     const manifest = readJson(path.join(MOD_DIR, "mod.json"));
     const offered = new Set(manifest.palette.map((p) => p.command));
     for (const [k, action] of Object.entries(keys[`layout:${name}`])) {
@@ -591,8 +593,8 @@ describe("keys.example.json", () => {
         assert.ok(byId(value), `${k}: no node "${value}" in the layout`);
         assert.ok(!["sidebar", "panel"].includes(value), `${k}: herdr already binds that toggle`);
       } else {
-        assert.match(cmd, /^mapledr\./, `${k}: unknown action ${action}`);
-        assert.ok(MOD_COMMANDS.has(cmd.slice("mapledr.".length)), `${k}: ${cmd} is not a mapledr command`);
+        assert.ok(cmd.startsWith(`${MOD}.`), `${k}: unknown action ${action}`);
+        assert.ok(MOD_COMMANDS.has(cmd.slice(MOD.length + 1)), `${k}: ${cmd} is not a ${MOD} command`);
         assert.equal(value, undefined, `${k}: mod commands take no argument`);
         assert.ok(offered.has(cmd), `${k}: ${cmd} should also be in the palette`);
       }
@@ -602,6 +604,77 @@ describe("keys.example.json", () => {
   test("binds the stage toggle and the character sheet", () => {
     const actions = Object.values(keys[`layout:${name}`]);
     assert.ok(actions.includes("layout.toggle:stage"));
-    assert.ok(actions.includes("mapledr.sheet"));
+    assert.ok(actions.includes("down-the-stack.sheet"));
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+
+describe("the mod folder name (herdr shows it to players)", () => {
+  const manifest = readJson(path.join(MOD_DIR, "mod.json"));
+  const keys = readJson(path.join(REPO, "keys.example.json"));
+  const ids = [
+    ...manifest.palette.map((p) => p.command).filter((c) => !APP_COMMANDS[c]),
+    ...Object.values(Object.values(keys)[0]).filter((a) => !APP_COMMANDS[a.split(/:(.*)/s)[0]]),
+  ];
+
+  test("is the only mod folder, and a name herdr accepts and splits back out of a command id", () => {
+    const dirs = fs.readdirSync(path.join(REPO, "mods")).filter((n) => fs.statSync(path.join(REPO, "mods", n)).isDirectory());
+    assert.deepEqual(dirs, [MOD]);
+    // src/mods.rs valid_name: letters, digits, '-' and '_' (mod.clone and layout.clone refuse others)
+    assert.match(MOD, /^[A-Za-z0-9_-]+$/);
+    // lower case like herdr's own folders (machine-add, terminals-bar, workspace-chrome); no '.' or
+    // ':', which the command parsers split on
+    assert.match(MOD, /^[a-z0-9]+(-[a-z0-9]+)*$/);
+    assert.ok(!SHIPPED_MODS.has(MOD), "a shipped mod's name would collide with herdr's own folder");
+  });
+
+  test("every <mod>.<command> id parses back to this mod the way herdr parses it", () => {
+    assert.ok(ids.length >= 4, ids.join(", "));
+    for (const id of ids) {
+      // window.rs run_as: `name:value` shorthand first (split_once(':')), then a mod's
+      // `<mod>.<command>` (split_once('.')) → mods::send_command(m, c)
+      assert.ok(!id.includes(":"), `${id}: a colon would be read as name:value`);
+      const at = id.indexOf(".");
+      const [m, c] = [id.slice(0, at), id.slice(at + 1)];
+      assert.equal(m, MOD, id);
+      assert.ok(MOD_COMMANDS.has(c), id);
+      // keys.rs valid_action / gone_mod: non-empty halves, and mods/<m> must be a folder
+      assert.ok(m && c && fs.statSync(path.join(REPO, "mods", m)).isDirectory(), id);
+      // frame/palette/main.js modEntry: the prefix before the first '.' is the entry's own mod
+      assert.equal(id.slice(0, id.indexOf(".")), MOD, id);
+    }
+  });
+
+  test("never says maple where herdr prints it (Keys overlay, toasts, did-not-load, palette)", () => {
+    // defaults/mods/help/main.js label(): the action with '.' and '_' read as spaces
+    const keysLabel = (action) => action.split(":")[0].replace(/[._]/g, " ");
+    assert.equal(keysLabel(`${MOD}.sheet`), "down-the-stack sheet");
+    const shown = [
+      MOD,
+      ...ids.map(keysLabel),
+      ...ids.map((id) => `${id} failed`),                       // window.rs command_error toast title
+      `${MOD}.tick failed`,
+      `${MOD} did not load:`,                                    // window.rs mod error panel
+      `no mod folder ~/.config/herdr-app/mods/${MOD}`,
+      ...manifest.palette.map((p) => `${p.group ?? ""} ${p.title} ${p.words ?? ""} ${MOD}`), // palette row and search words
+      layout.preview,
+      ...Object.keys(keys),                                      // keys overlay section "(layout:…)"
+    ];
+    for (const s of shown) assert.doesNotMatch(s, /maple/i, s);
+  });
+
+  test("the spellings herdr and mod.clone rely on all name this folder", () => {
+    // ARCHITECTURE §2.9: one spelling per form clone_mod_at rewrites (src/mods.rs:247-257)
+    const host = fs.readFileSync(path.join(MOD_DIR, "host.js"), "utf8");
+    const kit = fs.readFileSync(path.join(MOD_DIR, "ui", "kit.js"), "utf8");
+    assert.match(host, new RegExp(`^const SELF = \\{ mod: "${MOD}" \\};$`, "m"));
+    assert.match(kit, new RegExp(`^export const ASSETS = "mods/${MOD}";$`, "m"));
+    assert.ok(layout.preview.startsWith(`mods/${MOD}/`), layout.preview);
+    const ours = V.mods.filter((m) => m.name === MOD);
+    assert.equal(ours.length, 4, "stage, party, nameplate, hud");
+    for (const file of [LAYOUT_FILE, path.join(MOD_DIR, "mod.json"), path.join(REPO, "keys.example.json")]) {
+      assert.doesNotMatch(fs.readFileSync(file, "utf8"), /maple/i, path.relative(REPO, file));
+    }
   });
 });

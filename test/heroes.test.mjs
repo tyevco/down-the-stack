@@ -1,12 +1,12 @@
 // Heroes: names, creation, derived stats, XP/levels, careers, class signature, skills.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import * as D from "../mods/mapledr/game/data.js";
-import * as F from "../mods/mapledr/game/formulas.js";
-import * as H from "../mods/mapledr/game/heroes.js";
-import * as I from "../mods/mapledr/game/items.js";
-import { fnv1a32 } from "../mods/mapledr/game/rng.js";
-import { newState } from "../mods/mapledr/game/save.js";
+import * as D from "../mods/down-the-stack/game/data.js";
+import * as F from "../mods/down-the-stack/game/formulas.js";
+import * as H from "../mods/down-the-stack/game/heroes.js";
+import * as I from "../mods/down-the-stack/game/items.js";
+import { fnv1a32 } from "../mods/down-the-stack/game/rng.js";
+import { newState } from "../mods/down-the-stack/game/save.js";
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) <= eps;
 
@@ -160,6 +160,40 @@ describe("stats (D§5.3)", () => {
     const c = H.stats(h);
     h.sp[0] = 3;
     assert.notEqual(H.stats(h), c);
+  });
+
+  test("cache: two heroes in turn keep their own entries; every herd and room input still counts", () => {
+    // stats() checks its cache with scratch signatures (no allocation on a hit) and remembers the
+    // last Bug Tracker kill counts: neither may leak one hero's or one call's inputs into another
+    const { state, h } = mk("refactorer", 15);
+    const g = H.newHero(state, { seat: "repo/codex", ord: 0, nowMs: 0 });
+    g.cls = D.CLASS_IDX.hotfixer;
+    g.L = 22;
+    const ctx = { herd: state.herd, roomBonuses: { dmg: 0, dr: 0, xp: 0 }, roomAllies: 0, freshEyes: false, workingForklings: 0 };
+    const a = H.stats(h, ctx);
+    const b = H.stats(g, ctx);
+    assert.notEqual(a, b);
+    assert.equal(H.stats(h, ctx), a, "hero A's entry survives a call for hero B");
+    assert.equal(H.stats(g, ctx), b);
+    // kills inside a Bug Tracker tier change nothing; crossing a tier recomputes
+    state.herd.bt[5] = 4000;
+    const t1 = H.stats(h, ctx);
+    state.herd.bt[5] = 4500;
+    assert.equal(H.stats(h, ctx), t1, "same tier: cache hit");
+    state.herd.bt[5] = 5000;
+    const t2 = H.stats(h, ctx);
+    assert.notEqual(t2, t1, "next tier: recomputed");
+    assert.ok(near(t2.dmgPct - t1.dmgPct, 0.02));
+    assert.ok(near(H.stats(g, ctx).dmgPct - b.dmgPct, 0.04), "the other hero sees the tiers too (two)");
+    // room inputs
+    ctx.roomBonuses.dmg = 0.1;
+    const r = H.stats(h, ctx);
+    assert.notEqual(r, t2);
+    assert.ok(near(r.dmgPct - t2.dmgPct, 0.1));
+    ctx.roomAllies = 2;
+    assert.notEqual(H.stats(h, ctx), r);
+    // the same results as a fresh computation
+    for (const x of [h, g]) assert.deepEqual(JSON.stringify(H.stats(x, ctx)), JSON.stringify(H.computeStats(x, ctx)));
   });
 
   test("DPS_est / EHP respond to gear; Power Level stays within L-5..L+8", () => {

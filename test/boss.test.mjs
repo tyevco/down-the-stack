@@ -2,11 +2,11 @@
 // Postmortems, suspension round trips, rewards, the estimate, participants and determinism.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import * as D from "../mods/mapledr/game/data.js";
-import * as F from "../mods/mapledr/game/formulas.js";
-import * as H from "../mods/mapledr/game/heroes.js";
-import * as Bo from "../mods/mapledr/game/boss.js";
-import { encodeState, decodeState } from "../mods/mapledr/game/save.js";
+import * as D from "../mods/down-the-stack/game/data.js";
+import * as F from "../mods/down-the-stack/game/formulas.js";
+import * as H from "../mods/down-the-stack/game/heroes.js";
+import * as Bo from "../mods/down-the-stack/game/boss.js";
+import { encodeState, decodeState } from "../mods/down-the-stack/game/save.js";
 import { makeWorld as baseMakeWorld, addHero, makeEv, stepWorld, heroOf, liveOf } from "./helpers/engine.mjs";
 import { fullRefKit } from "../tools/pacing-sim.mjs";
 

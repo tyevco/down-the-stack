@@ -4,7 +4,7 @@
 export { mountMod, mountView, mounted, tickAll, reloadAll, globalErrors, globalWarnings, walkLive, Mounted, BUDGET, clearAssetCache } from "./harness.mjs";
 export {
   S as state, setFixture, updateFixture, fixture, defaultFixture, checkFixture, setChecking, resetState,
-  setClock, mockNow, flush, report, clock,
+  setClock, mockNow, flush, report, clock, stopwatch,
 } from "./state.mjs";
 export { advanceTimers as advanceTimers, View } from "./view.mjs";
 export { serialize, isElement, nodeOf } from "./elements.mjs";
@@ -19,7 +19,7 @@ import { S, deliver, flush as flushAll } from "./state.mjs";
 /** Recorded host calls: run, openOverlay, closeOverlay, notify, setAgentOrder, playSound, ... */
 export const calls = () => S.calls;
 /** Deliver a command to every mounted copy of a mod (like keys.json "<mod>:<command>"). */
-export async function sendCommand(cmd, { mod = "mapledr" } = {}) {
+export async function sendCommand(cmd, { mod = "down-the-stack" } = {}) {
   for (const c of S.copies) if (c.alive && c.modName === mod && !c.hidden) deliver(c, cmd);
   await flushAll();
 }

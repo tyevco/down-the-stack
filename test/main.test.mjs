@@ -11,9 +11,9 @@ import path from "node:path";
 const M = await import("../tools/mock/index.mjs");
 const FX = await import("../tools/fixtures.mjs");
 
-const MAIN = path.join(M.REPO, "mods", "mapledr", "main.js");
+const MAIN = path.join(M.REPO, "mods", "down-the-stack", "main.js");
 const NOW = FX.NOW;
-const SAVE = `${M.APP_HOME}/data/mapledr/save.json`;
+const SAVE = `${M.APP_HOME}/data/down-the-stack/save.json`;
 const ROLE_FILES = { stage: "ui/stage.js", party: "ui/party.js", nameplate: "ui/nameplate.js", hud: "ui/hud.js", sheet: "ui/sheet.js", herd: "ui/herdpanel.js" };
 
 let graphN = 0;
@@ -73,7 +73,7 @@ test("two copies share one world: the 1 s timers pump it once a second and the b
   assert.equal(party.view.host, host);
   const r0 = [stage.stats.renders, party.stats.renders];
   const tick0 = host.world.state.herd.tick;
-  const ticks = () => M.calls().run.filter((r) => r.name === "mapledr.tick").length;
+  const ticks = () => M.calls().run.filter((r) => r.name === "down-the-stack.tick").length;
   const b0 = ticks();
   for (let i = 0; i < 5; i++) await M.tickAll(1000);
   assert.equal(host.world.state.herd.tick - tick0, 5, "five ticks in five seconds, not ten");
@@ -143,7 +143,7 @@ test("sheet key: the focused agent's hero, then closes it; no focused hero → t
 
   await M.sendCommand("sheet");
   assert.equal(opened().length, 1);
-  assert.deepEqual(opened()[0].spec, { mod: "mapledr", kind: "dialog", width: 760, height: 500, props: { role: "sheet", heroId: 2 } });
+  assert.deepEqual(opened()[0].spec, { mod: "down-the-stack", kind: "dialog", width: 760, height: 500, props: { role: "sheet", heroId: 2 } });
   const id = opened()[0].id;
   const dlg = await mount({ role: "sheet", overlay: id, heroId: 2 }, { graph: g, fixture: null });
   assert.equal(host.overlays.sheet.id, id);
@@ -286,4 +286,19 @@ test("close(): role cleanup, overlay unregistered, the save flushed only by the 
   assert.equal(M.calls().writeTextFile.filter((c) => c.path === SAVE).length, n + 1, "the last copy flushed");
   assert.equal(M.memfs.readText(SAVE), host.lastText);
   assert.deepEqual([...a.errors, ...b.errors], []);
+});
+
+test("save trouble reaches the party and the HUD through the host (the role fixtures render differently)", async () => {
+  const { renderRoles } = await import("../tools/preview/shoot.mjs");
+  const byName = Object.fromEntries(FX.roles.map((r) => [r.name, r]));
+  const out = await renderRoles(MAIN, ["hud", "hud-save-unreadable", "party-mid", "party-save-notsaving"].map((n) => byName[n]));
+  const has = (r, id) => JSON.stringify(r.tree).includes(`"${id}"`);
+  const [hud, hudSave, party, partySave] = out;
+  for (const r of out) assert.deepEqual(r.errors, [], r.role.name);
+  assert.equal(has(hud, "hud-save"), false);
+  assert.equal(has(hudSave, "hud-save"), true);
+  assert.notEqual(JSON.stringify(hudSave.tree), JSON.stringify(hud.tree));
+  assert.equal(has(party, "party-save"), false);
+  assert.equal(has(partySave, "party-save"), true);
+  assert.ok(JSON.stringify(partySave.tree).includes("Not saving"));
 });

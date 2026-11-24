@@ -3,12 +3,12 @@
 // buildings, auto-learn, boss / farm / review challenges, and every cfg.auto switch.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import * as D from "../mods/mapledr/game/data.js";
-import * as F from "../mods/mapledr/game/formulas.js";
-import * as Hr from "../mods/mapledr/game/heroes.js";
-import * as I from "../mods/mapledr/game/items.js";
-import * as AP from "../mods/mapledr/game/autopilot.js";
-import * as H from "../mods/mapledr/game/herd.js";
+import * as D from "../mods/down-the-stack/game/data.js";
+import * as F from "../mods/down-the-stack/game/formulas.js";
+import * as Hr from "../mods/down-the-stack/game/heroes.js";
+import * as I from "../mods/down-the-stack/game/items.js";
+import * as AP from "../mods/down-the-stack/game/autopilot.js";
+import * as H from "../mods/down-the-stack/game/herd.js";
 import { makeWorld, addHero, makeEv, T0 } from "./helpers/engine.mjs";
 
 function item(state, slot, ilvl, rar = 0, extra = {}) {
@@ -226,6 +226,33 @@ describe("gear (D§8.7, D§8.8)", () => {
     assert.equal(h.eq[3].pol, 1);
   });
 
+  test("autoPolish never spends on a weapon of another class's type (swung as a Training Stick)", () => {
+    const w = makeWorld({ heroes: [{ cls: "shellmancer", L: 20 }] });
+    const h = w.state.heroes[0];
+    w.state.herd.gold = 1e9;
+    w.state.herd.snip = 1e6;
+    for (const it of h.eq) if (it) it.pol = 2; // AP.polishTarget at Lv 20
+    // a provisional class switch left a Refactorer's blade in hand
+    h.eq[0] = item(w.state, "weapon", 20, 2, { type: "blade" });
+    assert.equal(I.canEquip(h, h.eq[0], { ignoreLevel: true }), false);
+    assert.equal(Hr.stats(h, {}).offClassWeapon, true);
+    assert.equal(AP.polishTarget(h, h.eq[0]), 0);
+    const gold = w.state.herd.gold;
+    assert.equal(AP.autoPolish(w), null, "nothing else is below its target");
+    assert.equal(h.eq[0].pol, 0);
+    assert.equal(w.state.herd.gold, gold, "no gold spent");
+    // the hero's own gear is still polished (the blade is the lowest, but skipped)
+    h.eq[2].pol = 1;
+    assert.deepEqual(AP.autoPolish(w), { heroId: h.id, uid: h.eq[2].uid });
+    assert.equal(h.eq[2].pol, 2);
+    assert.equal(h.eq[0].pol, 0);
+    // a weapon of its own type is polished as before
+    h.eq[0] = item(w.state, "weapon", 20, 2, { type: "pipe" });
+    assert.equal(AP.polishTarget(h, h.eq[0]), 2);
+    assert.deepEqual(AP.autoPolish(w), { heroId: h.id, uid: h.eq[0].uid });
+    assert.equal(h.eq[0].pol, 1);
+  });
+
   test("autoBuild buys the cheapest affordable building", () => {
     const w = makeWorld({ heroes: [] });
     w.state.herd.gold = 2500;
@@ -279,6 +306,37 @@ describe("the pass and its switches", () => {
     h.pinMap = "1-2";
     AP.autopilot(w, makeEv());
     assert.equal(live.mapId, "1-2");
+  });
+
+  test("the master switch (herd.cfg.autopilot, D§11.15) stops every system and keeps their own switches", () => {
+    const w = makeWorld({ heroes: [{ cls: "shellmancer", L: 15, mapId: "1-1", ranks: [0, 0, 0, 0, 0, 0, 0] }] });
+    openMaps(w.state, "1-1", "1-2", "1-3");
+    const h = w.state.heroes[0];
+    const live = w.rt.live.get(h.id);
+    h.spFree = 14;
+    w.state.herd.gold = 1e6;
+    w.state.herd.cfg.autopilot = false;
+    AP.autopilot(w, makeEv());
+    assert.equal(h.spFree, 14, "no auto-learn");
+    assert.equal(live.mapId, "1-1", "no map choice");
+    assert.deepEqual(w.state.herd.bld, [0, 0, 0, 0, 0, 0], "no buildings");
+    const great = item(w.state, "weapon", 15, 4, { type: "pipe" });
+    AP.offerDrop(w, h, great, makeEv());
+    assert.notEqual(h.eq[0], great, "no auto-equip");
+    const junk = item(w.state, "hat", 5, 0);
+    assert.equal(AP.offerDrop(w, h, junk, makeEv()).kept, true, "no auto-deprecate");
+    assert.ok(Object.values(w.state.herd.cfg.auto).every((v) => v === true), "the systems' own switches are untouched");
+    // back on: every system runs again as its own switch says
+    w.state.herd.cfg.autopilot = true;
+    w.state.herd.cfg.auto.buildings = false;
+    AP.autopilot(w, makeEv());
+    assert.equal(h.spFree, 0);
+    assert.notEqual(live.mapId, "1-1");
+    assert.deepEqual(w.state.herd.bld, [0, 0, 0, 0, 0, 0], "buildings still off by their own switch");
+    assert.equal(F.autoOn(w.state, "learn"), true);
+    assert.equal(F.autoOn(w.state, "buildings"), false);
+    assert.equal(F.autoOn({ herd: { cfg: { autopilot: false } } }, "learn"), false);
+    assert.equal(F.autoOn({ herd: {} }, "learn"), true, "a herd without settings runs on autopilot");
   });
 
   test("a targeted pass (heroIds) touches only those heroes and skips the herd systems", () => {

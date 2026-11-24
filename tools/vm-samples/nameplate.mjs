@@ -1,5 +1,5 @@
 // Sample PlateVMs (ARCHITECTURE §5 nameplateView) for the pane header role
-// (mods/mapledr/ui/nameplate.js), plus the herdr side each scenario is seen with: the pane's
+// (mods/down-the-stack/ui/nameplate.js), plus the herdr side each scenario is seen with: the pane's
 // PaneInfo (what panes() returns for props().pane) and the header width. `scenarios` is the spec
 // game/view.js has to produce; `panes` / `widths` are the herdr fixture for tests and previews.
 //

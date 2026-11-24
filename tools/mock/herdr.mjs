@@ -7,13 +7,18 @@
 //  - writeTextFile while checking(), or under mods/ (hot-reloads the mod)
 //  - run() with an unknown command or a missing required argument (herdr fails later, silently)
 //  - run("<mod>.<command>") with no shown copy of that mod (herdr shows a "<cmd> failed" toast)
+//  - notify() while checking() (ARCHITECTURE §2.15: never), or with a sound-like field
+//
+// Layout commands act on the fixture's layout like herdr's (window.rs): layout.toggle / .show /
+// .hide set the node's `hidden` (and hide or show the mounted copies of a mod block there),
+// layout.resize sets its size; a node the shown layout lacks fails ("<cmd> failed" toast).
 //
 // Fixture hooks for IO trouble (tests): fixture().readError?.(absPath) → an Error (or message) makes
 // that readTextFile reject; fixture().hangAfterWrite?.(absPath) → true makes that writeTextFile
 // land on disk but never settle (herdr: the calling copy went away while the write ran).
 
 import path from "node:path";
-import { S, als, report, fixture, deliver } from "./state.mjs";
+import { S, als, report, fixture, deliver, updateFixture } from "./state.mjs";
 import { memfs } from "./memfs.mjs";
 import { APP_HOME, USER_HOME } from "./config.mjs";
 import { COMMANDS, COMMAND_BY_NAME, APP_NAMESPACES, validateArgs, missingArg } from "./herdr-commands.mjs";
@@ -116,6 +121,7 @@ export function run(name, args) {
     validateArgs(command, args); // herdr throws these synchronously
     const missing = missingArg(command, args);
     if (missing) report("error", "bad-command", `run("${name}"): required argument \`${missing}\` is missing (herdr fails the command when it runs)`, { copy: c });
+    else if (!S.checking) layoutCommand(name, args, c);
     return null;
   }
   const dot = name.indexOf(".");
@@ -136,6 +142,37 @@ export function run(name, args) {
   }
   for (const k of targets) deliver(k, sub);
   return null;
+}
+
+/** layout.toggle / .show / .hide / .resize on the fixture's layout (herdr window.rs dispatch). */
+function layoutCommand(name, args, c) {
+  if (!["layout.toggle", "layout.show", "layout.hide", "layout.resize"].includes(name)) return;
+  if (!fixture().layout || typeof fixture().layout !== "object") return; // no layout in this fixture
+  const root = clone(fixture().layout); // copy on write: a test's layout object stays as it was
+  const find = (n) => {
+    if (!n || typeof n !== "object") return null;
+    if (n.id === args.id) return n;
+    for (const k of Array.isArray(n.children) ? n.children : []) { const f = find(k); if (f) return f; }
+    return null;
+  };
+  const node = find(root);
+  if (!node) {
+    S.calls.toasts.push({ title: `${name} failed`, copy: c?.label });
+    report("error", "bad-command", `run("${name}"): no node ${JSON.stringify(args.id)} in the shown layout (herdr shows a "${name} failed" toast)`, { copy: c });
+    return;
+  }
+  if (name === "layout.resize") {
+    if (typeof args.px === "number") node.size = { px: args.px };
+    else if (typeof args.weight === "number") node.size = { weight: args.weight };
+  } else {
+    node.hidden = name === "layout.toggle" ? !node.hidden : name === "layout.hide";
+    const content = node.content && typeof node.content === "object" ? node.content : null;
+    if (content && content.mod) {
+      const want = JSON.stringify(content.props ?? {});
+      for (const k of S.copies) if (k.alive && k.modName === content.mod && JSON.stringify(k.props ?? {}) === want) k.hidden = node.hidden;
+    }
+  }
+  updateFixture({ layout: root }); // the copies that read layout() re-render
 }
 
 export function nextCommand() {
@@ -240,6 +277,8 @@ export function closeOverlay(id) {
 
 export function notify(n) {
   const c = host("notify");
+  if (S.checking) report("error", "notify-in-check", "notify() during `herdr-app check` posts a real toast; guard it with checking()", { copy: c });
+  if (n && ("sound" in n || "playSound" in n)) report("error", "sound", "notify(): no sound, ever (D§11.15)", { copy: c });
   if (!n || typeof n.title !== "string") throw new TypeError("notify(n) needs a string title");
   if (n.level && !["info", "success", "warning", "error"].includes(n.level)) throw new TypeError(`notify: level must be info, success, warning or error`);
   if (n.action) {

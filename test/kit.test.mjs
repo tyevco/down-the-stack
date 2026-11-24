@@ -8,7 +8,7 @@ import path from "node:path";
 
 const M = await import("../tools/mock/index.mjs");
 const FX = await import("../tools/fixtures.mjs");
-const { hex, T, C } = await import("../mods/mapledr/ui/kit.js");
+const { hex, T, C } = await import("../mods/down-the-stack/ui/kit.js");
 
 test("hex(): trims, adds a missing '#', keeps valid lengths, else the fallback", () => {
   assert.equal(hex("#ff8800", "#000"), "#ff8800");
@@ -31,7 +31,7 @@ test("T(): every token is a colour the element bridge accepts, whatever the them
 });
 
 test("roles that draw from T() keep rendering with a '#'-less theme override", async () => {
-  const MAIN = path.join(M.REPO, "mods", "mapledr", "main.js");
+  const MAIN = path.join(M.REPO, "mods", "down-the-stack", "main.js");
   for (const props of [{ role: "party" }, { role: "hud" }, { role: "nameplate", pane: "p_sh", terminal: "t_sh" }]) {
     M.resetState();
     const fixture = { ...FX.demoFixture("mid", { shell: true }), theme: { accent: "ff8800", border: "ffffff18", foreground: "eeeeef", muted: "#a0a4ab " } };
@@ -49,7 +49,7 @@ test("roles that draw from T() keep rendering with a '#'-less theme override", a
 });
 
 test("the stage's mdr_* tokens and the dialogs' herdr tokens go through hex() too", async () => {
-  const MAIN = path.join(M.REPO, "mods", "mapledr", "main.js");
+  const MAIN = path.join(M.REPO, "mods", "down-the-stack", "main.js");
   const theme = { accent: "ff8800", foreground: "eeeeef", popover: "25272b", input: "ffffff24 ", solid: "nope", mdr_night_sky: "151126", mdr_night_horizon: "not a colour" };
   for (const props of [{ role: "stage" }, { role: "herd" }, { role: "sheet", heroId: 1 }]) {
     M.resetState();
@@ -64,7 +64,7 @@ test("the stage's mdr_* tokens and the dialogs' herdr tokens go through hex() to
     assert.deepEqual(host.errors.filter((e) => /render/.test(e.where)), [], props.role);
     assert.deepEqual(mod.errors, [], props.role);
   }
-  const { dialogTokens } = await import("../mods/mapledr/ui/sheet.js");
+  const { dialogTokens } = await import("../mods/down-the-stack/ui/sheet.js");
   M.resetState();
   M.setFixture({ theme });
   const d = dialogTokens();

@@ -301,6 +301,26 @@ export async function flush(rounds = 3) {
   for (let i = 0; i < rounds; i++) await new Promise((r) => realSetImmediate(r));
 }
 
+/**
+ * A budget clock a busy machine cannot fail: `ms()` is the lower of the wall time since it started
+ * and this process's CPU time over the same span. Waiting for a CPU (parallel test files, a browser
+ * taking screenshots, another fixer's build) adds wall time but no CPU time; GC or loader threads
+ * can add CPU time, but never more than the wall time the call took. Work the script really does
+ * counts in both, so a callback that is slow on an idle machine is still over its budget.
+ */
+export function stopwatch() {
+  const c0 = process.cpuUsage();
+  const t0 = performance.now();
+  return {
+    wall: () => performance.now() - t0,
+    ms() {
+      const wall = performance.now() - t0;
+      const c = process.cpuUsage(c0);
+      return Math.min(wall, (c.user + c.system) / 1000);
+    },
+  };
+}
+
 /** Resolve after `ms` real milliseconds (harness use only). */
 export function realDelay(ms) {
   return new Promise((r) => realSetTimeout(r, ms));

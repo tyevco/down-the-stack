@@ -1,4 +1,4 @@
-// GameHost (mods/mapledr/host.js) through the mock herdr runtime: one shared world per module
+// GameHost (mods/down-the-stack/host.js) through the mock herdr runtime: one shared world per module
 // graph, the 900 ms pump gate, the snapshot from herdr's live data, the save policy (expected
 // text, save.bak, conflicts, our own writes landing unanswered, flush on close), corrupt,
 // checksum-only and newer-version saves, unreadable saves, the save status shown to the player,
@@ -14,13 +14,13 @@ import os from "node:os";
 
 const M = await import("../tools/mock/index.mjs");
 const FX = await import("../tools/fixtures.mjs");
-const { demoWorld } = await import("../mods/mapledr/game/demo.js");
-const { serialize, createWorld } = await import("../mods/mapledr/game/world.js");
-const { crc32 } = await import("../mods/mapledr/game/save.js");
+const { demoWorld } = await import("../mods/down-the-stack/game/demo.js");
+const { serialize, createWorld } = await import("../mods/down-the-stack/game/world.js");
+const { crc32 } = await import("../mods/down-the-stack/game/save.js");
 
-const MAIN = path.join(M.REPO, "mods", "mapledr", "main.js");
+const MAIN = path.join(M.REPO, "mods", "down-the-stack", "main.js");
 const NOW = FX.NOW;
-const DIR = `${M.APP_HOME}/data/mapledr`;
+const DIR = `${M.APP_HOME}/data/down-the-stack`;
 const SAVE = `${DIR}/save.json`;
 const BAK = `${DIR}/save.bak`;
 const BROKEN = `${DIR}/save.broken`;
@@ -73,7 +73,7 @@ test("pump: at most once per 900 ms, snapshot from herdr's live data, version an
   const fx = FX.demoFixture("mid");
   const mod = await mount({ role: "hud" }, { fixture: fx });
   const host = await hostOf(mod);
-  const runs = () => M.calls().run.filter((r) => r.name === "mapledr.tick").length;
+  const runs = () => M.calls().run.filter((r) => r.name === "down-the-stack.tick").length;
   const v0 = host.version;
   const r0 = runs();
   assert.equal(host.pump(NOW + 1000), true);
@@ -490,6 +490,82 @@ test("hot reload: the new build takes the previous build's world over (no rollba
   assert.deepEqual(mod.errors, []);
 });
 
+test("hot reload: a save the retired host still has in flight stands down (a copy whose reload failed keeps its build)", async () => {
+  // herdr keeps an old instance running when its reload fails (watch.rs reload returns before the
+  // release), so a write that instance's pump started is answered after the next build took the
+  // world over. Its save.json write would land over the new host's expected text, and the new host
+  // would reload it as someone else's save (npm run qjs, phase reload, build 5).
+  M.resetState();
+  const mod = await mount({ role: "stage" }, { fixture: FX.demoFixture("first-day") });
+  const host = await hostOf(mod);
+  await M.tickAll(31000);
+  const onDisk = M.memfs.readText(SAVE);
+  assert.ok(onDisk && host.lastGood, "a save landed (the next one writes save.bak first)");
+  await M.tickAll(3000);
+  host.world.rt.dirty = true;
+  const saves = host.stats.saves;
+  const p = host.maybeSave(true);
+  assert.ok(p && host.saving === p, "in flight: at its save.bak write");
+  host.retire(); // the next build's load took the world over meanwhile
+  assert.equal(host.saving, null);
+  assert.equal(await p, false, "it stands down when its write is answered");
+  assert.equal(M.memfs.readText(SAVE), onDisk, "save.json is untouched");
+  assert.equal(host.lastText, onDisk);
+  assert.equal(host.stats.saves, saves);
+  assert.equal(host.maybeSave(true), null, "and it never starts another");
+  await M.tickAll(5000);
+  assert.equal(M.memfs.readText(SAVE), onDisk);
+  assert.deepEqual(mod.errors, []);
+});
+
+test("hot reload: the previous build's host is retired even when it declines the handover (a copy whose reload failed still runs it)", async () => {
+  // It declines when save.json is no longer its own text (another window wrote it). The new host
+  // loads the file; the old one, kept alive by a copy whose reload failed (watch.rs reload), must
+  // not go on pumping and saving: two writers in one VM fight over save.json (conflicts, reloads).
+  M.resetState();
+  const a = await mount({ role: "stage" }, { graph: "decline", fixture: FX.demoFixture("mid") });
+  const b = await mount({ role: "party" }, { graph: "decline", fixture: null });
+  const h1 = await hostOf(a);
+  await M.tickAll(31000);
+  assert.ok(h1.lastText && M.memfs.readText(SAVE) === h1.lastText, "a save landed");
+  const theirs = saveOf("late", Date.now());
+  M.memfs.write(SAVE, theirs); // another window saved meanwhile
+  await M.reloadAll([a]); // b's new instance failed: b keeps build 1 and its host
+  const h2 = await hostOf(a);
+  assert.notEqual(h2, h1);
+  assert.equal(b.view.host, h1, "the copy that kept its build still holds the old host");
+  assert.equal(h2.stats.loadedFrom, "save", "declined: the file is another window's, so it is loaded");
+  assert.equal(h2.lastText, theirs);
+  assert.equal(h1.retired, true, "retired all the same");
+  const w0 = writes(SAVE).length;
+  const [pumps, saves] = [h1.stats.pumps, h1.stats.saves];
+  await M.tickAll(70000); // b's timer still calls h1 every second
+  assert.equal(h1.stats.pumps, pumps, "the old host no longer pumps");
+  assert.equal(h1.stats.saves, saves, "nor saves");
+  assert.equal(h1.stats.reloads, 0);
+  const after = writes(SAVE).slice(w0);
+  assert.ok(after.length >= 2 && after.every((w) => w.copy === a.copy.label), JSON.stringify(after.map((w) => w.copy)));
+  assert.equal(h2.stats.reloads, 0, "no write conflict");
+  assert.equal(M.memfs.readText(SAVE), h2.lastText);
+  assert.deepEqual([...a.errors, ...b.errors], []);
+});
+
+test("hot reload: a host retired while it is still loading never finishes the load nor registers", async () => {
+  M.resetState();
+  let fails = 1;
+  const fixture = { ...FX.demoFixture("mid"), readError: (p) => (p === SAVE && fails-- > 0 ? new Error("os error 32") : null) };
+  const mod = await mount({ role: "stage" }, { graph: "retire-loading", fixture });
+  const host = await hostOf(mod);
+  assert.equal(host.ready, false, "still loading: the read is retried after 1 s");
+  host.retire(); // the next build took over meanwhile
+  await M.tickAll(15000); // past the read retry and the 10 s stuck-load retry
+  assert.equal(host.loaded, false);
+  assert.equal(host.ready, false);
+  assert.notEqual(globalThis[Symbol.for("down-the-stack.live.v1")], host, "never registered for a later build");
+  assert.equal(writes(SAVE).length, 0);
+  assert.deepEqual(mod.errors, []);
+});
+
 test("hot reload of every copy: one new module scope and one new host for all of them", async () => {
   M.resetState();
   const a = await mount({ role: "stage" }, { graph: "hr", fixture: FX.demoFixture("mid") });
@@ -598,13 +674,13 @@ test("tab ids that name Object.prototype members (a herdr.tab label) neither thr
   assert.deepEqual(mod.errors, []);
 });
 
-test("broadcast: only while a copy can be shown (herdr toasts \"mapledr.tick failed\" when none listens)", async () => {
+test("broadcast: only while a copy can be shown (herdr toasts \"down-the-stack.tick failed\" when none listens)", async () => {
   M.resetState();
   const fx = FX.demoFixture("mid");
   const stage = await mount({ role: "stage" }, { graph: "bc", fixture: fx });
   const party = await mount({ role: "party" }, { graph: "bc", fixture: null });
   const host = await hostOf(stage);
-  const runs = () => M.calls().run.filter((r) => r.name === "mapledr.tick").length;
+  const runs = () => M.calls().run.filter((r) => r.name === "down-the-stack.tick").length;
   await M.tickAll(3000);
   const n0 = runs();
   assert.ok(n0 >= 2, "broadcasts while shown");
@@ -638,7 +714,7 @@ test("mayBeShown follows herdr's visibility: a stack shows its active visible ch
   const mod = await mount({ role: "hud" }, { fixture: { focused: null } });
   const host = await hostOf(mod);
   const block = (id, content, extra = {}) => ({ id, type: "block", content, ...extra });
-  const ours = { mod: "mapledr", props: { role: "stage" } };
+  const ours = { mod: "down-the-stack", props: { role: "stage" } };
   const shown = (layout) => { M.updateFixture({ layout }); return host.mayBeShown(); };
   // the active child hidden: herdr shows the first visible child instead (layout.rs active_child)
   assert.equal(shown({ id: "r", type: "stack", active: "a", children: [block("a", { mod: "files" }, { hidden: true }), block("b", ours)] }), true);
@@ -670,7 +746,7 @@ test("dialog registry: one sheet and one Herd panel at a time; dialog copies reg
   assert.equal(host.overlays.herd, null);
   assert.equal(M.calls().openOverlay.length, 4);
   const spec = M.calls().openOverlay[0].spec;
-  assert.deepEqual(spec, { mod: "mapledr", kind: "dialog", width: 760, height: 500, props: { role: "sheet", heroId: 1 } });
+  assert.deepEqual(spec, { mod: "down-the-stack", kind: "dialog", width: 760, height: 500, props: { role: "sheet", heroId: 1 } });
 
   // a dialog opened straight by a role (openOverlay in a click handler) registers itself
   const dlg = await mount({ role: "herd", overlay: "o77", tab: "roster" }, { graph: "dlg", fixture: null });
@@ -713,8 +789,8 @@ test("a throwing view builder is told apart from loading (viewError)", async () 
 
 test("mod.clone: the clone's host names its own mod (overlays, <mod>.tick, the save folder)", async () => {
   // clone_mod_at (herdr src/mods.rs:247-257) rewrites these text forms in every file, nothing else
-  const from = "mapledr";
-  const to = "mapledr-copy";
+  const from = "down-the-stack";
+  const to = "down-the-stack-copy";
   const rewrite = (text) => {
     let t = text.replaceAll(`mods/${from}/`, `mods/${to}/`).replaceAll(`"mods/${from}"`, `"mods/${to}"`).replaceAll(`'mods/${from}'`, `'mods/${to}'`);
     for (const key of ["mod", '"mod"', "'mod'"]) for (const space of ["", " "]) for (const q of ['"', "'"]) {
@@ -722,7 +798,7 @@ test("mod.clone: the clone's host names its own mod (overlays, <mod>.tick, the s
     }
     return t;
   };
-  const src = path.join(M.REPO, "mods", "mapledr");
+  const src = path.join(M.REPO, "mods", from);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mdr-clone-"));
   const dst = path.join(dir, to);
   const copy = (a, b) => {
@@ -736,7 +812,7 @@ test("mod.clone: the clone's host names its own mod (overlays, <mod>.tick, the s
     copy(src, dst);
     for (const rel of ["host.js", "ui/kit.js"]) {
       const code = fs.readFileSync(path.join(dst, rel), "utf8").split("\n").filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
-      assert.doesNotMatch(code, /["']mapledr["']|["']mods\/mapledr["'/]/, `${rel} still names the original mod`);
+      assert.doesNotMatch(code, /["']down-the-stack["']|["']mods\/down-the-stack["'/]/, `${rel} still names the original mod`);
     }
     M.resetState();
     const mod = await M.mountMod(path.join(dst, "main.js"), { props: { role: "stage" }, fixture: FX.demoFixture("mid"), nowMs: NOW, name: to });
@@ -747,7 +823,7 @@ test("mod.clone: the clone's host names its own mod (overlays, <mod>.tick, the s
     mod.render();
     await M.tickAll(2000);
     assert.ok(M.calls().run.some((r) => r.name === `${to}.tick`));
-    assert.ok(!M.calls().run.some((r) => r.name === "mapledr.tick"));
+    assert.ok(!M.calls().run.some((r) => r.name === `${from}.tick`));
     host.openSheet(1);
     assert.equal(M.calls().openOverlay.at(-1).spec.mod, to);
     await mod.close();

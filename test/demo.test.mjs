@@ -1,12 +1,14 @@
 // Demo worlds (game/demo.js): every kind is built by the real engine, is deterministic for a given
-// nowMs, cheap enough for check runs (< 300 ms in V8), shows what its name promises, and keeps
-// ticking cleanly with demoSnapshot(). Also the scripted-agent helpers the e2e tests rely on.
+// nowMs, cheap enough for check runs (< 300 ms in V8: the strict bound with PERF=1, see
+// test/helpers/perf.mjs), shows what its name promises, and keeps ticking cleanly with
+// demoSnapshot(). Also the scripted-agent helpers the e2e tests rely on.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import * as W from "../mods/mapledr/game/world.js";
-import * as Dm from "../mods/mapledr/game/demo.js";
-import { saveSize } from "../mods/mapledr/game/save.js";
-import { MAP_BY_ID, BOSSES } from "../mods/mapledr/game/data.js";
+import * as W from "../mods/down-the-stack/game/world.js";
+import * as Dm from "../mods/down-the-stack/game/demo.js";
+import { saveSize } from "../mods/down-the-stack/game/save.js";
+import { MAP_BY_ID, BOSSES } from "../mods/down-the-stack/game/data.js";
+import { within } from "./helpers/perf.mjs";
 
 const NOW = 1_790_000_000_000;
 const SNAP_KEYS = ["nowMs", "tzOffsetMin", "weekday", "windowActive", "focusedTerminal", "agents", "subagents", "tabs", "spaces"];
@@ -29,9 +31,9 @@ const count = (list, x) => list.filter((s) => s === x).length;
 
 describe("every kind", () => {
   for (const kind of Dm.DEMO_KINDS) {
-    test(`${kind}: built by the engine, valid snapshot, clean, under budget`, () => {
+    test(`${kind}: built by the engine, valid snapshot, clean, under budget`, (t) => {
       const { world, snapshot, ms } = demo(kind);
-      assert.ok(ms < 300, `${kind} took ${ms.toFixed(0)} ms`);
+      within(t, ms, 300, `${kind} build`);
       assert.deepEqual(world.rt.errors, []);
       assert.equal(world.rt.nowMs, NOW);
       assert.equal(world.state.herd.lastMs, NOW);

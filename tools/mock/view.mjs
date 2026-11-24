@@ -6,7 +6,7 @@
 //   async cx   given to init, timers and spawned tasks; valid while the copy lives and its task runs.
 // Using a call-scoped cx after its call returned throws: "never keep a cx" (ARCHITECTURE §2.4).
 
-import { S, als, clock, mockNow, report, fixture } from "./state.mjs";
+import { S, als, clock, mockNow, report, fixture, stopwatch } from "./state.mjs";
 import { baseTheme } from "./theme.mjs";
 import { mockError } from "./validate.mjs";
 
@@ -204,14 +204,14 @@ export async function advanceTimers(ms, { flush, budgetMs = 500 } = {}) {
     if (!due.copy?.alive) continue;
     fired++;
     const { cx } = makeCx(due.copy, "async", { task: due.task });
-    const t0 = performance.now();
+    const sw = stopwatch();
     let result;
     try {
       result = als.run(due.copy, () => withPhase("task", () => due.fn(cx)));
     } catch (e) {
       report("error", e.code ?? "timer-error", `error in script task (timer): ${e?.message ?? e}`, { copy: due.copy, stack: e?.stack });
     }
-    const spent = performance.now() - t0;
+    const spent = sw.ms(); // its work, not time spent waiting for a CPU (state.mjs stopwatch)
     if (spent > budgetMs) report("error", "budget", `a timer callback took ${spent.toFixed(1)} ms (budget ${budgetMs} ms)`, { copy: due.copy });
     if (result && typeof result.then === "function") {
       try { await result; } catch (e) {

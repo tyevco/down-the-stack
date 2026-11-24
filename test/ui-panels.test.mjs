@@ -10,8 +10,8 @@ import assert from "node:assert/strict";
 
 const M = await import("../tools/mock/index.mjs");
 const { View, div, svg } = await import("gpui-kit");
-const SheetMod = await import("../mods/mapledr/ui/sheet.js");
-const HerdMod = await import("../mods/mapledr/ui/herdpanel.js");
+const SheetMod = await import("../mods/down-the-stack/ui/sheet.js");
+const HerdMod = await import("../mods/down-the-stack/ui/herdpanel.js");
 const S = await import("../tools/vm-samples/sheet.mjs");
 const H = await import("../tools/vm-samples/herd.mjs");
 
@@ -66,7 +66,36 @@ async function mount(kind, name, { width = 760, zoom = 1, theme = "graphite", ui
 
 const ids = (m) => new Set(m.findAll((n) => n.id != null).map((n) => n.id));
 const runs = (name) => M.calls().run.filter((c) => c.name === name);
-const errorsOf = (m) => m.errors.map((e) => `${e.code}: ${e.message}`);
+// herdr's render budget is wall-clock time, and the mock flags any render over it ("budget"). Under
+// load (parallel test files, a browser shooting previews) a slow render says nothing about the
+// code: load only adds time, waiting for a CPU. So a view the mock flagged is rendered again, each
+// render's cost taken as the lower of the mock's script time (its stopwatch, itself the lower of
+// wall and CPU time) and the process's CPU time for the whole render (no waiting; the mock's own
+// checks and GC threads are in it), and the best of 5 must fit. Every other validator error counts
+// as it is. (As in test/ui-chrome.test.mjs.)
+const isRenderBudget = (e) => e.code === "budget" && /^render took/.test(String(e.message));
+/** One render's cost (ms): min(the mock's script time, CPU time of the whole render). */
+function renderCost(m) {
+  const c0 = process.cpuUsage();
+  m.render();
+  const c = process.cpuUsage(c0);
+  return Math.min(m.stats.lastRenderMs, (c.user + c.system) / 1000);
+}
+function bestRenderMs(m, n = 5) {
+  let best = Infinity;
+  for (let k = 0; k < n; k++) best = Math.min(best, renderCost(m));
+  return best;
+}
+function errorsOf(m) {
+  const out = m.errors.filter((e) => !isRenderBudget(e)).map((e) => `${e.code}: ${e.message}`);
+  if (m.errors.some(isRenderBudget) && m.view) {
+    const best = bestRenderMs(m);
+    if (best > M.BUDGET.render) out.push(`budget: the best of 5 renders took ${best.toFixed(1)} ms (herdr's budget is ${M.BUDGET.render} ms)`);
+  }
+  return out;
+}
+/** m.ok without the wall clock: no validator error, a render over the budget judged as above. */
+const clean = (...ms) => ms.every((m) => errorsOf(m).length === 0);
 const has = (m, method) => m.findAll((n) => n.methods.some((x) => x[0] === method)).length > 0;
 const lastView = (host) => host.views.at(-1)[1];
 
@@ -112,7 +141,7 @@ for (const kind of ["sheet", "herd"]) {
       role.host = { ...fake, view: (k, a) => samples.nextTick(samples.viewFor(name, a)) };
       m.render();
       assert.deepEqual([...ids(m)].sort(), [...before].sort(), name);
-      assert.ok(m.ok, `${name}: ${errorsOf(m).join("; ")}`);
+      assert.deepEqual(errorsOf(m), [], name);
     }
   });
 }
@@ -134,6 +163,34 @@ test("the pure renderers build a tree from a VM inside a plain render pass", asy
     m.render();
     assertClean(m, fn.toString());
   }
+});
+
+test("a dialog render the mock timed over herdr's budget once (load) is judged by its best of 5; one always slow still fails", async () => {
+  // busy until both this process's CPU time and the wall clock have run `ms`, under any load (the
+  // CPU time alone can pass `ms` early: it counts V8's helper threads too, whose time lands in steps)
+  const spin = (ms) => {
+    const c0 = process.cpuUsage();
+    const t0 = performance.now();
+    for (let c = { user: 0, system: 0 }; (c.user + c.system) / 1000 < ms || performance.now() - t0 < ms; c = process.cpuUsage(c0)) { /* busy */ }
+  };
+  const env = { width: 760, height: 500, zoom: 1, host: null, act: () => ({ ok: true }) };
+  M.resetState();
+  let n = 0;
+  const once = await M.mountView(class extends View { render() { if (n++ === 0) spin(80); return SheetMod.renderSheet(S.scenarios.career, env); } }, { props: {} });
+  once.render();
+  assert.ok(once.errors.some(isRenderBudget), "the mock flagged the slow render");
+  assert.deepEqual(errorsOf(once), [], "a one-off: the best of 5 fits");
+  assert.ok(clean(once));
+  M.resetState();
+  const always = await M.mountView(class extends View { render() { spin(80); return HerdMod.renderHerd(H.scenarios.bossFight, { ...env, height: 520 }); } }, { props: {} });
+  always.render();
+  assert.match(errorsOf(always).join(), /^budget: the best of 5 renders took \d+\.\d ms/, "a render that is always slow still fails");
+  assert.equal(clean(always), false);
+  // another validator error is never excused
+  M.resetState();
+  const bad = await M.mountView(class extends View { render() { spin(80); return div().child(null); } }, { props: {} });
+  bad.render();
+  assert.ok(errorsOf(bad).some((e) => !/^budget/.test(e)), errorsOf(bad).join("; "));
 });
 
 test("loading, missing hero, and herdr-app check (props null) render quiet placeholders", async () => {
@@ -186,7 +243,7 @@ test("sheet: tabs switch by click, by number key and by arrow; the VM for the ne
   assert.equal(lastView(host).tab, "career");
   click(m, "sheet", "left", "key_down");
   assert.equal(lastView(host).tab, "stats");
-  assert.ok(m.ok, errorsOf(m).join("; "));
+  assert.deepEqual(errorsOf(m), []);
 });
 
 test("sheet: the close button closes this overlay; Focus closes it and focuses the agent's pane", async () => {
@@ -229,7 +286,7 @@ test("sheet gear: stash rows select / hover the card; slots select equipped item
   assert.equal(lastView(host).filter.usable, true);
   click(m, "sh-f-sort");
   assert.equal(lastView(host).filter.sort, "ip");
-  assert.ok(m.ok, errorsOf(m).join("; "));
+  assert.deepEqual(errorsOf(m), []);
 });
 
 test("sheet gear: card actions run their commands; confirm arms first; disabled ones do nothing; results flash", async () => {
@@ -258,7 +315,7 @@ test("sheet gear: card actions run their commands; confirm arms first; disabled 
   const r = await mount("sheet", "gear", { host: { result: { ok: false, error: "Needs 982 gold" } } });
   click(r.m, "sh-act-polish:921");
   assert.ok(r.m.text().includes("Needs 982 gold"));
-  assert.ok(m.ok && p.m.ok && r.m.ok);
+  assert.ok(clean(m, p.m, r.m), [m, p.m, r.m].flatMap(errorsOf).join("; "));
 });
 
 test("sheet gear: Squash Merge picks squashable items and sends the VM's uids", async () => {
@@ -326,7 +383,7 @@ test("sheet career: review challenge, class change, map pin / auto, rename and r
   click(m, "sh-rename-save");
   assert.deepEqual(host.commands.at(-1), ["rename", { heroId: 2, name: "Rue the Unflaky" }]);
   assert.equal(role.ui.renaming, false);
-  assert.ok(m.ok, errorsOf(m).join("; "));
+  assert.deepEqual(errorsOf(m), []);
 });
 
 test("sheet career (benched): Rebind moves a live agent onto the hero", async () => {
@@ -347,12 +404,12 @@ test("sheet: the doll's Termling blinks and bobs unless calm; calm stops every l
   assert.ok(!has(benched.m, "frames"), "an off-duty face does not blink");
 });
 
-test("sheet: mapledr.sheet closes the sheet; herd and calm act like the chrome roles", async () => {
+test("sheet: down-the-stack.sheet closes the sheet; herd and calm act like the chrome roles", async () => {
   const { role, host } = await mount("sheet", "gear");
   assert.equal(role.command("sheet"), true);
   assert.deepEqual(M.calls().closeOverlay.map((c) => c.id), ["o1"]);
   assert.equal(role.command("herd"), true);
-  assert.deepEqual(M.calls().openOverlay.map((c) => c.spec), [{ mod: "mapledr", kind: "dialog", width: 760, height: 520, props: { role: "herd" } }]);
+  assert.deepEqual(M.calls().openOverlay.map((c) => c.spec), [{ mod: "down-the-stack", kind: "dialog", width: 760, height: 520, props: { role: "herd" } }]);
   assert.equal(role.command("calm"), true);
   assert.equal(host.commands.at(-1)[0], "setting");
   assert.equal(role.command("nope"), false);
@@ -396,7 +453,73 @@ test("sheet: the provisional tag opens Career; the current class chip locks it (
   assert.deepEqual(rue.host.commands, []);
   const benched = await mount("sheet", "benched");
   assert.equal(benched.m.node("sh-tag").handlers.on_click, undefined);
-  assert.ok(m.ok && rue.m.ok && benched.m.ok, errorsOf(m).join("; "));
+  assert.ok(clean(m, rue.m, benched.m), [m, rue.m, benched.m].flatMap(errorsOf).join("; "));
+});
+
+test("sheet career: during its zone boss fight the boss card leads the column, its Retreat in the card's title row", async () => {
+  /** The left column's blocks, in order, as their ids (or "ladder" / "title"). */
+  const order = (m) => {
+    const col = m.node("sh-career-l").children[0].children;
+    return col.map((n) => n.id ?? (n.children.some((c) => typeof c.id === "string" && c.id.startsWith("sh-cl-")) ? "ladder" : "title"));
+  };
+  const f = await mount("sheet", "provisional");
+  assert.equal(f.m.node("sh-boss") != null, true);
+  assert.deepEqual(order(f.m), ["sh-boss", "title", "ladder"], "fighting: the card first");
+  // the button is in the card's title row (beside "Zone boss"), not beside the name and status
+  const card = f.m.node("sh-boss");
+  /** Is n inside the card's title row? */
+  const inTitle = (m, n) => { const row = m.node("sh-boss").children[0]; for (let p = n?.parent; p; p = p.parent) if (p === row) return true; return false; };
+  assert.ok(inTitle(f.m, f.m.node("sh-boss-go")), "Retreat in the title row");
+  assert.ok(card.children[0].children.some((c) => c.type !== "text" && c.children.some((x) => x.type === "text" && x.text === "Zone boss")));
+  assert.ok(card.has("border_color") && card.last("border_color")[0] !== card.methods.find((x) => x[0] === "border_color")[1][0], "a fight tints the card's border");
+  // armed: the question replaces the label where it stands
+  click(f.m, "sh-boss-go");
+  assert.ok(inTitle(f.m, f.m.node("sh-boss-go")));
+  assert.ok(f.m.text().includes("Retreat? (a Postmortem)"));
+  // no fight: after the ladder, as before; the estimate in the title row (with the button when
+  // there is one), so it stays in view when a long ladder pushes the card down
+  const c = await mount("sheet", "career");
+  assert.deepEqual(order(c.m), ["title", "ladder", "sh-boss"], "no fight: the card after the ladder");
+  assert.equal(c.m.node("sh-boss-go"), null, "Rue's door is shut: no button");
+  assert.ok(inTitle(c.m, c.m.node("sh-boss-est")), "the estimate in the title row");
+  assert.equal(c.m.node("sh-boss-est").children[0].text, "Risky 0.61×");
+  const pipBoss = S.scenarios.provisional.career.boss;
+  const vmOf = (boss) => ({ ...S.scenarios.career, career: { ...S.scenarios.career.career, boss } });
+  // an open door: estimate, then Challenge, both in the title row
+  const challenge = S.action("challenge:3", "Challenge", "challenge", { kind: "boss", idx: 3 }, { tone: "primary", tooltip: "Rue fights" });
+  const door = await mount("sheet", "career", { host: { vm: vmOf({ ...S.scenarios.career.career.boss, status: "Door open", challenge }) } });
+  const row = door.m.node("sh-boss").children[0];
+  const right = row.children.at(-1);
+  assert.deepEqual(right.children.map((n) => n.id), ["sh-boss-est", "sh-boss-go"], "estimate, then Challenge");
+  // a fight with an estimate: the estimate goes beside the status, the title row is the Retreat's
+  const fe = await mount("sheet", "career", { host: { vm: vmOf({ ...pipBoss, estimate: { text: "Even 1.02×", color: "#F2B84B" } }) } });
+  click(fe.m, "sh-boss-go");
+  assert.ok(fe.m.text().includes("Retreat? (a Postmortem)"));
+  assert.equal(inTitle(fe.m, fe.m.node("sh-boss-est")), false, "fighting: the estimate beside the status");
+  const status = fe.m.findAll((n) => n.type === "text" && n.text === pipBoss.status)[0];
+  assert.equal(fe.m.node("sh-boss-est").parent, status.parent.parent, "on the status line");
+  assert.deepEqual([...errorsOf(f.m), ...errorsOf(c.m), ...errorsOf(door.m), ...errorsOf(fe.m)], []);
+});
+
+test("sheet skills: the left column scrolls, and the SP note sits with the respec rules above the ladder", async () => {
+  const note = "Intern points are refunded at Lv 10, when the class arrives.";
+  const vm = { ...S.scenarios.skills, skills: { ...S.scenarios.skills.skills, note } };
+  const { m } = await mount("sheet", "skills", { host: { vm } });
+  assertClean(m, "skills + note");
+  const col = m.node("sh-skills-l");
+  assert.ok(col && col.has("overflow_y_scroll"), "the column scrolls (it ran under the footer)");
+  const noteEl = m.node("sh-sp-note");
+  assert.ok(noteEl, "the note");
+  assert.equal(noteEl.parent, m.node("sh-respec").parent, "with the respec button and its rules");
+  const blocks = col.children[0].children;
+  const at = (pred) => blocks.findIndex(pred);
+  assert.ok(at((n) => n === noteEl.parent) < at((n) => n.children.some((c) => typeof c.id === "string" && c.id.startsWith("sh-lad-"))), "above the ladder");
+  // the effect and next-rank lines wrap instead of cutting their numbers
+  const card = m.node("sh-sk:area");
+  const lines = m.findAll((n) => n.type === "text" && (n.text === S.scenarios.skills.skills.skills.find((k) => k.key === "sk:area").effect));
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].parent.has("truncate"), false, "the effect wraps");
+  assert.ok(card);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -427,11 +550,11 @@ test("icons: no svg sits under a hover text_color (herdr would not recolour it);
   M.resetState();
   const probe = await M.mountView(class extends View {
     render() {
-      return div().id("probe").hover((s) => s.text_color("#ffffff")).child(div().child(svg("mods/mapledr/art/ui/close.svg").w(12).h(12)));
+      return div().id("probe").hover((s) => s.text_color("#ffffff")).child(div().child(svg("mods/down-the-stack/art/ui/close.svg").w(12).h(12)));
     }
   }, { props: {} });
   probe.render();
-  assert.deepEqual(hoverIconMisses(probe), ["probe → mods/mapledr/art/ui/close.svg"]);
+  assert.deepEqual(hoverIconMisses(probe), ["probe → mods/down-the-stack/art/ui/close.svg"]);
   for (const kind of ["sheet", "herd"]) {
     const { samples } = KIND[kind];
     for (const name of Object.keys(samples.scenarios)) {
@@ -471,8 +594,8 @@ test("tabs, icon buttons and slot chips hover with their background; icons carry
 });
 
 test("herd header: the counts in muted, the waiting part in the blocked colour; the sheet's status line in muted", async () => {
-  const { ink } = await import("../mods/mapledr/ui/party.js");
-  const { C } = await import("../mods/mapledr/ui/kit.js");
+  const { ink } = await import("../mods/down-the-stack/ui/party.js");
+  const { C } = await import("../mods/down-the-stack/ui/kit.js");
   for (const theme of THEMES) {
     const { m } = await mount("herd", "upgrades", { theme });
     const t = SheetMod.dialogTheme(SheetMod.dialogTokens());
@@ -548,6 +671,30 @@ test("herd tracker: a zone row shows its reports", async () => {
   assert.ok(m.text().includes("No reports yet."));
 });
 
+test("herd tracker: a locked zone's number reads on its well (dim ink), an open zone's dark ink on its accent", async () => {
+  for (const theme of THEMES) {
+    const { m } = await mount("herd", "tracker", { theme });
+    const t = SheetMod.dialogTheme(SheetMod.dialogTokens());
+    const numOf = (key) => m.node(`hd-z-${key}`).children[0].children[0];
+    assert.equal(numOf("lint_meadows").last("text_color")[0], "#16141F", theme);
+    const locked = numOf("threadlock_keep");
+    assert.equal(locked.last("bg")[0], t.well, theme);
+    assert.equal(locked.last("text_color")[0], t.dim, `${theme}: not the dark ink on the dark well`);
+    assert.ok(m.findAll((n) => n.type === "text" && n.text === "Locked").length >= 1, "a locked row says Locked");
+  }
+});
+
+test("herd roster: with nobody on it the roster says how a hero comes (its emptyText); a roster with heroes does not", async () => {
+  const { m } = await mount("herd", "rosterEmpty");
+  assertClean(m, "rosterEmpty");
+  const line = m.node("hd-roster-empty");
+  assert.ok(line, "the empty line");
+  assert.ok(m.text().includes("No heroes yet. Start an agent to hire one"));
+  assert.ok(m.text().includes("Heroes retired at Lv 30+ rest here"), "the Hall of Fame's own empty line stays");
+  const full = await mount("herd", "roster");
+  assert.equal(full.m.node("hd-roster-empty"), null);
+});
+
 test("herd bosses: Challenge and (confirmed) Retreat", async () => {
   const { m, host } = await mount("herd", "bosses");
   click(m, "hd-ch-octopus_merge");
@@ -564,7 +711,7 @@ test("herd bosses: Challenge and (confirmed) Retreat", async () => {
 test("herd roster: Sheet opens the hero's sheet; Retire confirms first", async () => {
   const { m, host } = await mount("herd", "roster");
   click(m, "hd-sheet-r:2");
-  assert.deepEqual(M.calls().openOverlay.map((c) => c.spec), [{ mod: "mapledr", kind: "dialog", width: 760, height: 500, props: { role: "sheet", heroId: 2 } }]);
+  assert.deepEqual(M.calls().openOverlay.map((c) => c.spec), [{ mod: "down-the-stack", kind: "dialog", width: 760, height: 500, props: { role: "sheet", heroId: 2 } }]);
   click(m, "hd-ret-r:7");
   click(m, "hd-ret-r:7");
   assert.deepEqual(host.commands, [["retire", { heroId: 7 }]]);
@@ -605,14 +752,44 @@ test("herd settings: herd.cfg switches, choices, stage height (layout.resize), H
   role.inputs.herdName.set_value("Night Shift");
   click(m, "hd-rename-save");
   assert.deepEqual(host.commands.at(-1), ["rename", { herd: true, name: "Night Shift" }]);
-  assert.ok(m.ok, errorsOf(m).join("; "));
+  assert.deepEqual(errorsOf(m), []);
   // no hud block in the layout: the switch is disabled
   const bare = await mount("herd", "settings");
   click(bare.m, "hd-sw-hud");
   assert.equal(runs("layout.toggle").length, 0);
 });
 
-test("herd: mapledr.herd closes the panel; sheet and calm act like the chrome roles", async () => {
+test("herd settings (D§11.15): loot glow, collapse the stage, the autopilot master switch; inactive systems do nothing", async () => {
+  const { m, host } = await mount("herd", "settingsOff");
+  // the six rarities, each in its colour; the current one picked
+  for (const [id, color] of [[0, "#A0A4AB"], [3, "#B36BFF"], [5, "#FF7AA8"]]) {
+    const opt = m.node(`hd-opt-glow-${id}`);
+    assert.ok(opt, `option ${id}`);
+    const tc = opt.methods.find((x) => x[0] === "text_color")[1][0];
+    assert.ok(tc.toUpperCase().startsWith(color), `${id}: ${tc}`);
+  }
+  click(m, "hd-opt-glow-3"); // already picked: inert
+  click(m, "hd-opt-glow-5");
+  click(m, "hd-sw-collapse");
+  click(m, "hd-sw-auto.equip"); // inactive while autopilot is off
+  click(m, "hd-sw-auto.farm");
+  click(m, "hd-sw-auto");
+  assert.deepEqual(host.commands, [
+    ["setting", { key: "glow", value: 5 }],
+    ["setting", { key: "collapse", value: false }],
+    ["setting", { key: "auto", value: true }],
+  ]);
+  assert.ok(m.node("hd-set-auto.equip").methods.some((x) => x[0] === "opacity"), "inactive rows are dimmed");
+  assert.match(m.node("hd-set-auto.equip").methods.find((x) => x[0] === "tooltip")[1][0], /Autopilot is off/);
+  const on = await mount("herd", "settings");
+  assert.equal(on.m.node("hd-set-auto.equip").methods.some((x) => x[0] === "opacity"), false);
+  click(on.m, "hd-sw-auto.equip");
+  click(on.m, "hd-sw-collapse");
+  assert.deepEqual(on.host.commands, [["setting", { key: "auto.equip", value: false }], ["setting", { key: "collapse", value: true }]]);
+  assert.ok(clean(m, on.m), errorsOf(m).concat(errorsOf(on.m)).join("; "));
+});
+
+test("herd: down-the-stack.herd closes the panel; sheet and calm act like the chrome roles", async () => {
   const { role } = await mount("herd", "upgrades");
   assert.equal(role.command("herd"), true);
   assert.deepEqual(M.calls().closeOverlay.map((c) => c.id), ["o2"]);

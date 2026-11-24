@@ -1,17 +1,18 @@
-# herdr-app layouts: schema, `main`, packaging, and the `mapledr` draft
+# herdr-app layouts: schema, `main`, packaging, and the Down the Stack draft
 
 Source: `/home/user/herdrdev/herdr-app` (master, ~0.1.17). Paths below are relative to it.
 Read only: nothing was built or run. "UNCONFIRMED" marks things I could not confirm from source.
 
 Files written next to these notes during the research (not kept in the repo; they became
-`layouts/Down-the-Stack.json` and `mods/mapledr/preview.svg`):
-- `mapledr.json`: the draft layout (section 3)
-- `mapledr.svg`: the draft settings preview (320x200, same style as `win98.svg`)
+`layouts/Down-the-Stack.json` and `mods/down-the-stack/preview.svg`):
+- the draft layout (section 3), at first named after the repository's codename (see below);
+- the draft settings preview (320x200, same style as `win98.svg`).
 
 Shipped naming (decided after these notes): the layout ships as `layouts/Down-the-Stack.json`. herdr
-has no display title for a layout and shows the file name (section 4, "The settings card name").
-The mod folder stays `mapledr`. The keys section is therefore `layout:Down-the-Stack`, while the
-actions stay `mapledr.<cmd>`. "`mapledr.json`" below is the research draft's name.
+has no display title for a layout and shows the file name (section 3, "The settings card name").
+herdr also shows the mod folder name (Keys overlay, failed-command toasts), so the mod folder is
+`mods/down-the-stack/`. The keys section is `layout:Down-the-Stack` and the actions are
+`down-the-stack.<cmd>`. The notes below use the shipped names, also where they describe the draft.
 
 ---
 
@@ -32,7 +33,7 @@ actions stay `mapledr.<cmd>`. "`mapledr.json`" below is the research draft's nam
    *every pane's nameplate* each have their own store. Game state that several roles share must not go
    in `localStorage`. CORRECTED (critic): live state is shared through **module scope** (one evaluation per
    source revision, shared by every copy: `vendor/gpui-kit/crates/shell/src/engine/quickjs/mod.rs:2349-2398`,
-   test `src/mods/render_tests.rs:282-338`). It is persisted with `writeTextFile` into `data/mapledr/save.json`.
+   test `src/mods/render_tests.rs:282-338`). It is persisted with `writeTextFile` into `data/down-the-stack/save.json`.
    `shared()/setShared()` is for rare signals only (runtime.md, Critic verification Q1/Q2).
 4. **`mod.json` must say `"place": "none"`.** A missing `place` defaults to `"right"`
    (`window.rs:4527`). The first time Herdr sees the folder it then docks a copy into the shown
@@ -109,7 +110,7 @@ generic `data did not match any variant of untagged enum Content` in `layout.err
   Rendered as `linear_gradient(angle, a@0, b@1)` (`window.rs:5598-5600`).
 - `{ "image": "path", "fit": "cover"|"contain" }`, where fit defaults to `cover`. The path is joined
   to the **app home** (`mods::app_dir().join(image)`, `window.rs:5601-5606`), so
-  `"mods/mapledr/art/bg.png"` works. It is drawn as an absolutely positioned child behind the content.
+  `"mods/down-the-stack/art/bg.png"` works. It is drawn as an absolutely positioned child behind the content.
 
 ### 1.4 Pane frame: `{tab:"active", pane:{...}}` (`PaneFrame`, `src/layout.rs:284-310`)
 
@@ -421,11 +422,11 @@ count as present (`window.rs:249`).
 
 ---
 
-## 3. Recommended draft: `mapledr.json`
+## 3. Recommended draft (shipped as `Down-the-Stack.json`)
 
 The file is in this folder. It is `main.json` with these changes:
 
-1. **`party` replaces `agents`** in `sidebar-lists`: `{ "mod": "mapledr", "props": { "role": "party" } }`,
+1. **`party` replaces `agents`** in `sidebar-lists`: `{ "mod": "down-the-stack", "props": { "role": "party" } }`,
    `weight 1.4`, `min 140` (portraits and bars need more height than the plain list). The party mod
    must take over what the `agents` mod did:
    - call `setAgentOrder(list.map(a => a.address))` in `render()`, so `agent.next/prev/select`
@@ -434,7 +435,7 @@ The file is in this folder. It is `main.json` with these changes:
    - on macOS, draw the `»` unfold control. workspace-chrome hides its toggle on the macOS rail and
      relies on the agents list's `»` (workspace-chrome/main.js:52-53).
    - Without these, `cmd-b`/`ctrl-shift-b` still hides or shows the whole sidebar.
-2. **The pane header is our nameplate:** `{ "mod": "mapledr", "props": { "role": "nameplate" } }`,
+2. **The pane header is our nameplate:** `{ "mod": "down-the-stack", "props": { "role": "nameplate" } }`,
    `height 34` (one name/level row plus HP/XP bars), `top`, `always`, `lone: true`.
    `role` is preserved; Herdr adds `pane` and `terminal` (section 0, point 2).
    The nameplate should keep the shipped `pane` behaviour: click → `pane.focus {pane}`; on hover,
@@ -443,12 +444,12 @@ The file is in this folder. It is `main.json` with these changes:
 3. **`stage`** is a new block in `work`, between `work-body` and `status`:
    `size {px:210}`, `min 120`, `max 420`. `background` is a gradient `["mdr_sky","mdr_dusk"]`, which
    shows while the mod loads or if it fails; the mod paints its own parallax over it.
-   Content is `{mod:"mapledr", props:{role:"stage"}}`. It spans only the work area, so the sidebar
+   Content is `{mod:"down-the-stack", props:{role:"stage"}}`. It spans only the work area, so the sidebar
    keeps full height. `work` is `resizable:false`, as in main, so its height is not draggable. Resize
    it from the mod or a key with `run("layout.resize",{id:"stage",px})`; that is saved as a click.
    Clicks in a non-pane mod block leave the keyboard with the terminal (`window.rs:4776-4780`), so
    clicking a mob doesn't steal typing.
-4. **`hud`** (optional) is 26px, **`hidden: true`** by default, `{role:"hud"}`, for a MapleStory-style
+4. **`hud`** (optional) is 26px, **`hidden: true`** by default, `{role:"hud"}`, for a classic MMO-style
    HP/MP/EXP strip. A hidden block's copy starts only when first shown (AGENTS.md:942-947), so it
    costs nothing until toggled (`layout.toggle:hud`). Alternatives: draw the EXP strip along the
    stage's bottom edge (the preview does that), or replace `workspace-status` with a HUD that also
@@ -457,10 +458,10 @@ The file is in this folder. It is `main.json` with these changes:
    `tabs` (with `+` new-menu and window buttons), the `panel`/`panel-body`/`files`/`changes` ids, and
    `status`. The root keeps `titlebar:"none"`, `traffic_lights [12,16]`, `canvas`, and
    `terminal_padding [14,12]`.
-6. The root `preview` is `"mods/mapledr/preview.svg"`. The path is relative to the app home
+6. The root `preview` is `"mods/down-the-stack/preview.svg"`. The path is relative to the app home
    (asset root = `mods::app_dir()`, `src/main.rs:186`), so the picture travels **inside the mod
    folder**. Installers copy only `layouts/<name>.json` and `mods/<name>/` (AGENTS.md:489-505); a
-   `layouts/mapledr.svg` could be left behind.
+   preview kept beside the layout (`layouts/<name>.svg`) could be left behind.
 
 ### Colors and theme
 
@@ -475,13 +476,13 @@ The file is in this folder. It is `main.json` with these changes:
 - For a full fantasy look (warm dusk everywhere), add to the root, for example,
   `"theme": "ink"` plus overrides such as `"chrome": "#1d1626"`, `"canvas": "#241a2f"`,
   `"accent": "#e3b04b"`, `"border": "#ffffff1a"`. Caveats: hex overrides apply in light mode too and
-  over a theme the person picks. A `themes/mapledr.json` would be "the layout's own" (Settings
-  offers it only while `mapledr` shows; `frame/settings/main.js:362-364`). But installers may not
+  over a theme the person picks. A `themes/Down-the-Stack.json` would be "the layout's own" (Settings
+  offers it only while `Down-the-Stack` shows; `frame/settings/main.js:362-364`). But installers may not
   copy a `themes/` file, and a missing theme only reports an error and falls back to graphite.
   If you ship one anyway, say so in RECIPE.md "Watch out".
 - The settings card name is the file name: `LOOKS[name] ?? name` (`frame/settings/main.js:18`, `316`).
-  There is no display-name field, so a `mapledr.json` would show as "mapledr". The shipped file is
-  `Down-the-Stack.json` for this reason.
+  There is no display-name field, so a layout file named after the codename would show the
+  codename. The shipped file is `Down-the-Stack.json` for this reason.
 - The same name, or the mod folder name, is shown everywhere else herdr lists layouts or mod actions:
   - Palette: one row per installed layout, titled `Layout: ${Cap(name)}` (only main, terminals and
     win98 have nicer titles), so "Layout: Down-the-Stack" (`frame/palette/main.js:154-157`).
@@ -491,9 +492,11 @@ The file is in this folder. It is `main.json` with these changes:
   - win98 Start menu: the raw name; only win98 itself is renamed, to "Herdr 98"
     (`mods/win98/taskbar.js:209-210`).
   - Keys overlay: the key, its section in brackets, then the action with `.`/`_` turned into spaces.
-    So `ctrl-shift-s  (layout:Down-the-Stack)` reads `mapledr sheet` (`mods/help/main.js:17-22,83`).
+    So `ctrl-shift-s  (layout:Down-the-Stack)` reads `down-the-stack sheet`: `-` stays
+    (`mods/help/main.js:17-22,83`).
   - Mod palette entries show their own `title` (ours say "Down the Stack: …"). But a command that
-    fails toasts `<mod>.<cmd> failed` (`src/window.rs:3076-3078`).
+    fails toasts `<mod>.<cmd> failed` (`src/window.rs:3076-3078`), and a copy that fails to load
+    says `<mod> did not load` (`src/window.rs:4795`).
   - So a layout or mod name is visible to the person. Pick one you are happy to show, or accept that
     the id shows in herdr's chrome.
 
@@ -506,11 +509,11 @@ The file is in this folder. It is `main.json` with these changes:
   padding (≈112x62 box; `frame/settings/main.js:288-309`). The fit for a non-matching aspect ratio is
   the GPUI default (UNCONFIRMED: probably contain). Keep 320x200 like win98. Avoid `<text>`: text
   needs fonts in the SVG renderer (UNCONFIRMED).
-- The draft `mapledr.svg` (8.5 KB, same 320x200 style) shows: sidebar (spaces + 3 party cards with
+- The draft preview SVG (8.5 KB, same 320x200 style) shows: sidebar (spaces + 3 party cards with
   portrait, level badge, HP and XP bars), tab pills, two pane cards with nameplate headers (the
   focused one framed gold), the dusk stage band (hills, platform, 3 heroes, 2 mobs, boss with HP bar,
   EXP strip), and the status bar. I checked it with a small Pillow rasterizer
-  (`../render/mapledr-preview.png`); no SVG renderer was available.
+  (a PNG next to the research notes, not kept); no SVG renderer was available.
 - `preview.png` for sharing is a real screenshot: `herdr-app shot preview.png` (AGENTS.md:67-76).
 
 ### Keys for the layout (`keys.json`, merged into the person's)
@@ -520,26 +523,30 @@ The file is in this folder. It is `main.json` with these changes:
   "layout:Down-the-Stack": {
     "ctrl-shift-g": "layout.toggle:stage",
     "ctrl-shift-j": "layout.toggle:hud",
-    "ctrl-shift-i": "mapledr.inventory"
+    "ctrl-shift-i": "down-the-stack.inventory"
   }
 }
 ```
 
+(The research draft. The shipped section is `keys.example.json`: `layout.toggle:stage` and
+`down-the-stack.sheet` / `.herd` / `.calm`.)
+
 - Section `layout:<name>` applies while `layouts/<name>.json` shows. The Keys overlay prints the
-  section name next to each key, and the action as words (`mapledr.sheet` → "mapledr sheet"). It maps to the GPUI context
+  section name next to each key, and the action as words (`down-the-stack.sheet` → "down-the-stack sheet"). It maps to the GPUI context
   `layout == <name>` set on the window root (`keys.rs:119-130`, `window.rs:5675`).
   Precedence: `terminal` > `layout:` > `global` (AGENTS.md:548-550). A key also in `terminal`
-  (`ctrl-shift-c/v/f`, `ctrl-v`, ...) loses while a terminal has focus. `mod:mapledr` applies where a
-  mapledr copy has focus (`window.rs:4761`).
+  (`ctrl-shift-c/v/f`, `ctrl-v`, ...) loses while a terminal has focus. `mod:down-the-stack` applies
+  where a down-the-stack copy has focus (`window.rs:4761`).
 - An action is `"<command>[:<first arg>]"`, `{"command","args"}`, `send:<text>`, `terminal`, or
   `"<mod>.<command>"`. The last goes to that mod's `nextCommand()` and reaches **shown copies only**.
-  `mapledr.*` is skipped silently while `mods/mapledr` doesn't exist (`gone_mod`, `keys.rs:153-157`).
+  `down-the-stack.*` is skipped silently while `mods/down-the-stack` doesn't exist (`gone_mod`,
+  `keys.rs:153-157`).
 - **One bad entry rejects the whole keys.json**: `parse` returns `Err` if any problem
   (`keys.rs:245`). The app keeps the last good bindings and writes `keys.error`. Unknown sections
   are errors (`keys.rs:128`). `ctrl-alt-shift-escape` is reserved.
 - The shipped keys leave `ctrl-shift-g/j/i` unbound on Linux and Windows, and the macOS defaults use
   no ctrl-shift letters (`defaults/keys.json`, `keys.macos.json`). Binding them takes the key away
-  from terminal programs while mapledr shows (usually read as ctrl-g/j/i; Kitty-protocol programs can
+  from terminal programs while Down-the-Stack shows (usually read as ctrl-g/j/i; Kitty-protocol programs can
   tell them apart). Avoid `ctrl-shift-u` (GTK/IBus Unicode entry on Linux; general knowledge, not
   from this source).
 - On upgrade Herdr refreshes only a byte-for-byte untouched shipped keys.json (`keys.rs:174-189`),
@@ -552,11 +559,11 @@ The file is in this folder. It is `main.json` with these changes:
 
 - **Folder** (in a public GitHub repo, one folder per item), laid out like the app home:
   ```
-  mapledr/
+  down-the-stack/
     RECIPE.md
     preview.png                  screenshot (herdr-app shot)
     layouts/Down-the-Stack.json
-    mods/mapledr/                mod.json {"place":"none", ...}, main.js, roles, art/, fonts/?, preview.svg
+    mods/down-the-stack/         mod.json {"place":"none", ...}, main.js, roles, art/, fonts/?, preview.svg
     keys.json                    optional: {"layout:Down-the-Stack": {...}} (AGENTS.md names keys.json for mods; a layout folder "laid out like this home" can carry one too)
   ```
 - **Repo topic:** `herdr-layout` (`herdr-mod` for a mod). It shows up at herdr.dev/layouts within the
@@ -567,9 +574,9 @@ The file is in this folder. It is `main.json` with these changes:
   or folder, the `mod` names in the layout, and the mod's own `mods/<name>/` paths; merge keys.json
   sections and ask before replacing a key the person already uses; run `herdr-app check` on each mod,
   then `layout.switch {name}`.
-  Make renames easy. Spell asset paths as the literal `"mods/mapledr/..."` and overlay names as
-  `mod: "mapledr"`; `mod.clone` rewrites exactly these patterns (`mods.rs:247-257`). Our
-  `mapledr.<cmd>` actions and the layout's `preview` path also contain the mod name; the
+  Make renames easy. Spell asset paths as the literal `"mods/down-the-stack/..."` and overlay names
+  as `mod: "down-the-stack"`; `mod.clone` rewrites exactly these patterns (`mods.rs:247-257`). Our
+  `down-the-stack.<cmd>` actions and the layout's `preview` path also contain the mod name; the
   `layout:Down-the-Stack` keys section contains the layout name.
 - **RECIPE.md order** (a brief another agent can rebuild from):
   1. `# Name`, one paragraph of what the person sees, `![Name](preview.png)`

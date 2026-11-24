@@ -1,13 +1,14 @@
 #!/usr/bin/env node
-// QuickJS-ng harness for the mapledr mod ("Down the Stack").
+// QuickJS-ng harness for the Down the Stack mod (mods/down-the-stack).
 //
 //   npm run qjs -- [--only <phase>[,<phase>...]] [--kinds mid,late] [--ticks 300] [--seconds 120]
-//                  [--long 20000] [--long-kind late] [--json out.json] [--repo <repo root>]
+//                  [--long 20000] [--long-kind late] [--reload-kinds mid,stress30] [--json out.json]
+//                  [--repo <repo root>]
 //   (= node tools/qjs/run.mjs ...; needs the devDependencies: `npm install`. Results go to
 //   out/qjs/results.json unless --json says otherwise.)
 //
 // Phases (default: all, in this order):
-//   lint      static scan of mods/mapledr (acorn): syntax features, risky built-ins, regex flags,
+//   lint      static scan of mods/down-the-stack (acorn): syntax features, risky built-ins, regex flags,
 //             assignments that hit herdr's frozen prototypes (the "override mistake")
 //   builtins  the same probe script in QuickJS-ng and V8: sort stability, number formatting, JSON,
 //             Date, regex, Intl/locale, frozen-prototype behaviour; every differing answer listed
@@ -26,15 +27,24 @@
 //             divergence
 //   fuzz      external strings that collide with frozen Object.prototype names ("constructor",
 //             "__proto__", "toString", ...) as hero/herd names, titles, program keys, addresses
+//   reload    hot reload in one context, as herdr's watch.rs reload does it: the mod's graph
+//             evaluated again as build 2 to 6 ("<file>?v=<n>" module records) in the VM that
+//             runs build 1; per copy a new instance, then the old build released (timers and
+//             tasks cancelled, no close()). Checks the handover (the world continues exactly, no
+//             rollback to the save), the old host's retirement (never pumps or writes again, also
+//             with a save in flight, with a copy whose reload failed, and when another window's
+//             save makes it decline the handover), one 1 s timer and one task per copy, no stale
+//             cx, no new globals. --reload-kinds (default mid,stress30)
 //   long      memory: one world through the real pump for --long seconds (default 20000);
 //             QuickJS heap at 1k/5k/20k and every array/Map/Set size reachable from the world,
 //             host and module caches
 //
 // The engine is quickjs-emscripten's QuickJS-ng release-sync wasm build (an interpreter, no JIT),
 // with herdr's runtime limits (256 MiB heap, 1 MiB stack: sandbox.rs:407-419) and herdr's sandbox
-// prelude (frozen prototypes, no eval/Function: sandbox.rs:166-212). herdr runs quickjs-jit
-// (QuickJS-ng + a tiered Cranelift JIT, natively), so wasm-interpreter times are a conservative
-// upper bound for herdr's.
+// prelude (frozen prototypes, no eval/Function: sandbox.rs:166-212). herdr 0.1.17 runs quickjs-jit's
+// plain interpreter, with no JIT tier (window.rs:518 -> gpui-shell engine/quickjs/mod.rs:1787-1801,
+// build_interpreter()), natively: wasm-interpreter times overstate herdr's only by the gap between
+// wasm and native code.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -61,9 +71,9 @@ const opt = (name, def) => {
 };
 const flag = (name) => argv.includes(`--${name}`);
 const REPO = path.resolve(opt("repo", path.join(HERE, "..", "..")));
-const MOD_DIR = path.join(REPO, "mods", "mapledr");
+const MOD_DIR = path.join(REPO, "mods", "down-the-stack");
 const SHIMS = path.join(HERE, "shims");
-const ALL = ["lint", "builtins", "modeval", "check", "roles", "load", "worlds", "window", "diff", "fuzz", "long"];
+const ALL = ["lint", "builtins", "modeval", "check", "roles", "load", "worlds", "window", "diff", "fuzz", "reload", "long"];
 const ONLY = (opt("only", "") || "").split(",").filter(Boolean);
 for (const o of ONLY) if (!ALL.includes(o)) { console.error(`unknown phase ${o} (one of ${ALL.join(", ")})`); process.exit(2); }
 const PHASES = ONLY.length ? ONLY : ALL;
@@ -71,10 +81,22 @@ const TICKS = Number(opt("ticks", 300));
 const SECONDS = Number(opt("seconds", 120));
 const LONG = Number(opt("long", 20000));
 const LONG_KIND = opt("long-kind", "late");
+const RELOAD_KINDS = opt("reload-kinds", "mid,stress30").split(",").filter(Boolean);
 const JSON_OUT = opt("json", path.join(REPO, "out", "qjs", "results.json"));
 
 const NOW = Date.UTC(2026, 10, 24, 9, 30, 0); // tools/fixtures.mjs NOW (a Tuesday morning)
 const RENDER_BUDGET = 50, CALLBACK_BUDGET = 500, MODULE_BUDGET = 500, TICK_TARGET = 5;
+
+// Every time this harness reports (and flags against a budget) is the lower of the wall time and
+// this process's CPU time over the same span: the engine runs on this thread, so waiting for a CPU
+// (other processes on a busy machine) adds wall time but no CPU time, and it never flags work that
+// did not happen. Work the engine does counts in both.
+const cpuMs = () => { const c = process.cpuUsage(); return (c.user + c.system) / 1000; };
+function stopwatch() {
+  const t0 = performance.now();
+  const c0 = cpuMs();
+  return { ms: () => Math.min(performance.now() - t0, cpuMs() - c0) };
+}
 
 const allow = JSON.parse(fs.readFileSync(path.join(REPO, "tools", "api-allowlist.json"), "utf8"));
 const ELEMENT_METHODS = allow.element_methods;
@@ -110,18 +132,29 @@ const INSTRUMENT = {
   "game/save.js": "export const __qjsDbg = () => ({ defaultJson: defaultJson.size });",
 };
 
+// Builds, as herdr names them: every file of an application build is the module
+// "<absolute path>?v=<generation>" (quickjs/mod.rs module_name, AppModules::resolve), so a hot
+// reload evaluates a new revision as new module records in the same context (load_app, from
+// watch.rs reload). A name without a tag is the first build. The host modules ("herdr",
+// "gpui-kit", "gpui-base": herdr's "<name>?m=<export surface>") stay one instance across builds.
+const GEN_TAG = /\?v=\d+$/;
+const tagOf = (name) => (GEN_TAG.exec(name) || [""])[0];
+const untag = (name) => name.replace(GEN_TAG, "");
+
 function normalize(base, req) {
   if (req === "herdr" || req === "gpui-kit" || req === "gpui-base") return path.join(SHIMS, `${req}.js`);
-  if (req.startsWith("@mod/")) return path.join(MOD_DIR, req.slice(5));
-  if (req.startsWith("./") || req.startsWith("../")) return path.resolve(path.dirname(base), req);
+  const tag = tagOf(base);
+  if (req.startsWith("@mod/")) return path.join(MOD_DIR, req.slice(5)) + tag;
+  if (req.startsWith("./") || req.startsWith("../")) return path.resolve(path.dirname(untag(base)), req) + tag;
   if (req.startsWith("/")) return req;
   throw new Error(`herdr has no module "${req}" (imported from ${base})`);
 }
 
 function loadSource(name, instrument) {
-  let src = fs.readFileSync(name, "utf8");
-  if (instrument && name.startsWith(MOD_DIR + path.sep)) {
-    const rel = path.relative(MOD_DIR, name).split(path.sep).join("/");
+  const file = untag(name);
+  let src = fs.readFileSync(file, "utf8");
+  if (instrument && file.startsWith(MOD_DIR + path.sep)) {
+    const rel = path.relative(MOD_DIR, file).split(path.sep).join("/");
     if (INSTRUMENT[rel]) src += "\n" + INSTRUMENT[rel] + "\n";
   }
   return src;
@@ -161,6 +194,7 @@ function newVM({ instrument = false } = {}) {
     h.dispose();
   };
   fn("__hrnow", () => ctx.newNumber(performance.now()));
+  fn("__cpunow", () => ctx.newNumber(cpuMs())); // driver.js timed(): min(wall, CPU), as stopwatch() above
   // heap in use (QuickJS JS_ComputeMemoryUsage), callable mid-run: a drop across a render = a GC cycle ran in it
   fn("__mem", () => { const h = rt.computeMemoryUsage(); const m = ctx.getNumber(ctx.getProp(h, "memory_used_size")); h.dispose(); return ctx.newNumber(m); });
   fn("__print", (h) => { const s = ctx.getString(h); if (log.length < 500) log.push(s); return ctx.undefined; });
@@ -193,12 +227,12 @@ function evalGlobal(ctx, code, name) {
   return v;
 }
 
-/** Evaluate a module (by file path) and settle its evaluation promise. */
-function evalModule(vm, file) {
+/** Evaluate a module (by file path; `name` is its module name, e.g. tagged with a build) and settle its evaluation promise. */
+function evalModule(vm, file, name = file) {
   const { rt, ctx } = vm;
   const code = fs.readFileSync(file, "utf8");
-  const t0 = performance.now();
-  const r = ctx.evalCode(code, file, { type: "module" });
+  const sw = stopwatch();
+  const r = ctx.evalCode(code, name, { type: "module" });
   if (r.error) {
     const e = ctx.dump(r.error);
     r.error.dispose();
@@ -216,7 +250,7 @@ function evalModule(vm, file) {
   }
   if (st.type === "fulfilled" && st.value && st.value !== settled) st.value.dispose();
   settled.dispose();
-  return performance.now() - t0;
+  return sw.ms();
 }
 
 /** Load a module by import specifier through a tiny wrapper module. */
@@ -230,14 +264,35 @@ function importInto(vm, spec) {
   }
 }
 
+/**
+ * A hot reload's module evaluation (watch.rs reload → load_app): the mod's graph again in the same
+ * context as build `gen` ("<file>?v=<gen>": every module a new record, globalThis and the host
+ * modules shared). The entry leaves the new build's main.js class and getHost on
+ * globalThis.__builds[gen] for the driver. Returns the evaluation time (ms).
+ */
+function importBuild(vm, gen) {
+  const file = path.join(os.tmpdir(), `mdr-qjs-build-${process.pid}-${gen}-${Math.random().toString(36).slice(2)}.js`);
+  fs.writeFileSync(file, [
+    `import DownTheStack from "@mod/main.js";`,
+    `import { getHost } from "@mod/host.js";`,
+    `import * as W from "@mod/game/world.js";`,
+    `(globalThis.__builds || (globalThis.__builds = {}))[${gen}] = { DownTheStack, getHost, W };`,
+  ].join("\n") + "\n");
+  try {
+    return evalModule(vm, file, `${file}?v=${gen}`);
+  } finally {
+    fs.unlinkSync(file);
+  }
+}
+
 function call(vm, name, arg) {
   const { rt, ctx } = vm;
   const drv = ctx.getProp(ctx.global, "__drv");
   const f = ctx.getProp(drv, name);
   const a = ctx.newString(JSON.stringify(arg ?? {}));
-  const t0 = performance.now();
+  const sw = stopwatch();
   const r = ctx.callFunction(f, drv, a);
-  const wall = performance.now() - t0;
+  const wall = sw.ms();
   a.dispose(); f.dispose(); drv.dispose();
   if (r.error) {
     const e = ctx.dump(r.error);
@@ -246,9 +301,9 @@ function call(vm, name, arg) {
   }
   const s = ctx.getString(r.value);
   r.value.dispose();
-  const tj = performance.now();
+  const sj = stopwatch();
   rt.executePendingJobs();
-  const jobs = performance.now() - tj;
+  const jobs = sj.ms();
   const out = JSON.parse(s);
   if (out && typeof out === "object") { out.__wallMs = +wall.toFixed(1); out.__jobsMs = +jobs.toFixed(2); }
   return out;
@@ -376,7 +431,9 @@ phases.roles = async () => {
   const res = {};
   for (const role of F.roles) {
     const fx = role.fixture;
-    let kind = null, ex = null;
+    // the world a role runs on: its `kind` (a demo kind, or "stress30": driver.js builds the same
+    // 30-hero herd as tools/fixtures.mjs stressWorld), else the demo whose fixture it is
+    let kind = role.kind && (role.kind === "stress30" || demo.DEMO_KINDS.includes(role.kind)) ? role.kind : null, ex = null;
     for (const k of demo.DEMO_KINDS) for (const e of extras) if (!kind && F.demoFixture(k, e) === fx) { kind = k; ex = e; }
     const arg = {
       name: role.name, props: role.props, fixture: JSON.parse(JSON.stringify(fx, (k, v) => (typeof v === "function" ? undefined : v))),
@@ -404,7 +461,7 @@ phases.load = async () => {
     const t0 = t.replace(/"crc":"[0-9a-f]*"/, '"crc":""').replace(/^\{"v":\d+/, '{"v":99');
     return t0.replace('"crc":""', `"crc":"${S.crc32(t0)}"`);
   };
-  const DIR = "/mock/home/data/mapledr";
+  const DIR = "/mock/home/data/down-the-stack";
   const { vm: v0 } = bootDriver();
   const good = call(v0, "saveText", { kind: "stress30" }).text;
   const older = call(v0, "saveText", { kind: "mid" }).text;
@@ -532,6 +589,94 @@ phases.fuzz = () => {
   return r;
 };
 
+// Hot reload in one context (driver.js "Hot reload"): the mod's graph evaluated again as build 2, 3
+// and 4 in the VM that runs build 1, each copy re-instantiated and its old build released, as
+// herdr's watch.rs reload does. Build 2 is a plain reload after 45 s of play, build 3
+// comes while a save is in flight (its save.json write landed, its answer never comes back), build
+// 4 one second after build 3 loaded (before its first save), build 5's stage instance fails
+// (herdr keeps the old one running) while its save, at the save.bak write, is answered after the
+// handover, and build 6 comes after another window wrote save.json (the old host declines the
+// handover: the new host loads the file) while the party's instance fails, so the old host must be
+// retired all the same.
+phases.reload = () => {
+  const res = {};
+  for (const kind of RELOAD_KINDS) {
+    const { vm } = bootDriver();
+    const settleAll = () => {
+      let held = 0, ms = 0;
+      for (let k = 0; k < 256; k++) {
+        const sw = stopwatch();
+        const n = Number(callRaw(vm, "settleIO", "{}")); // the continuations run in the drain after it
+        ms += sw.ms();
+        if (!n) break;
+        held += n;
+      }
+      return { held, ms: +ms.toFixed(1) };
+    };
+    const seconds = (n) => { for (let i = 0; i < n; i++) { callRaw(vm, "reloadStep", "{}"); settleAll(); } };
+    const start = call(vm, "reloadStart", { kind, layout: LAYOUT });
+    settleAll(); // build 1 loads save.json
+    seconds(45); // saves (periodic, 2 s after major events), and progress since the last one
+    const r = { kind, copies: start.copies, heroes: start.heroes, builds: [] };
+    out(`\n== reload ${kind}: ${start.heroes} heroes, ${start.copies} copies (stage, party, hud, 2 nameplates, Herd panel)`);
+    const FAILED = "the stage's reload fails, its save answers after the handover";
+    const DECLINED = "another window saved, the handover is declined, the party's reload fails";
+    for (const [gen, mode, wait] of [[2, "plain", 0], [3, "save in flight", 20], [4, "before the new build's first save", 1], [5, FAILED, 20], [6, DECLINED, 20]]) {
+      seconds(wait);
+      const heap0 = memory(vm).memory_used_size;
+      const evalMs = importBuild(vm, gen);
+      let inflight = null;
+      if (mode === "save in flight") {
+        call(vm, "reloadInflight", {});
+        for (let k = 0; k < 6; k++) {
+          inflight = call(vm, "reloadIO", {});
+          if (inflight.saveWritten) break;
+          callRaw(vm, "settleIO", "{}");
+        }
+      } else if (mode === FAILED) {
+        // the stage copy's save is at its save.bak write when the reload comes; the new stage
+        // instance fails, so herdr keeps the old one running (watch.rs reload returns before the
+        // release) and that write is answered once the new build has taken the world over
+        call(vm, "reloadInflight", {});
+        inflight = call(vm, "reloadIO", {});
+      }
+      // another window (another VM sharing the save) writes save.json just before the reload
+      if (mode === DECLINED) call(vm, "reloadForeign", {});
+      const declined = mode === DECLINED;
+      const sw = call(vm, "reloadSwap", { gen, keep: mode === FAILED ? ["stage"] : declined ? ["party"] : [] });
+      const lw = stopwatch();
+      if (mode === FAILED) for (let k = 0; k < 16 && !call(vm, "reloadLoaded", {}).loaded; k++) if (callRaw(vm, "settleIO", JSON.stringify({ only: gen })) === "0") break;
+      const load = settleAll(); // the new host's load task: save.json, save.bak, the handover
+      load.ms = +lw.ms().toFixed(1);
+      const chk = call(vm, "reloadCheck", { declined });
+      // (a host that loaded save.json, not a handover, writes on the 30 s beat)
+      const later = declined ? 35 : 20;
+      seconds(later);
+      const after = call(vm, "reloadAfter", { declined });
+      const heap1 = memory(vm).memory_used_size;
+      const fail = chk.fail.concat(after.fail);
+      if (mode === "save in flight" && !inflight.saveWritten) fail.push("the in-flight save never wrote save.json before the reload (harness)");
+      if (mode === FAILED && (inflight.saveWritten || !inflight.held)) fail.push("the stage's save was not at its save.bak write at the reload (harness)");
+      if (!chk.inFlight && inflight) fail.push("no save was in flight at the reload (harness)");
+      const b = { gen, mode, evalMs: +evalMs.toFixed(1), initMs: sw.initMs, loadMs: load.ms, heapBefore: heap0, heapAfter: heap1, check: chk, after, fail };
+      r.builds.push(b);
+      out(`  build ${gen} (${mode}): module graph ${b.evalMs} ms, new instances' init ${sw.initMs.join("/")} ms, load + handover ${load.ms} ms; from "${chk.from}", tick ${chk.tickBefore} at the reload → ${chk.tick} after ${declined ? `(the other window's save.json, tick ${chk.fileTick}, loaded; the old host retired)` : `(save.json had ${chk.fileTick}: ${chk.unsavedTicks} ticks kept that a restart would lose)`}`);
+      out(`    new copies: timers ${JSON.stringify(chk.timers)}, pending tasks ${JSON.stringify(chk.tasks)}; old copies at release: timers ${JSON.stringify(chk.releasedTimersAtRelease)}, pending tasks ${JSON.stringify(chk.releasedPendingAtRelease)}${chk.kept.length ? `; still on the old build: ${chk.kept.join(", ")}` : ""}`);
+      out(`    ${later} s later: save.json tick ${after.fileTick} (world ${after.tick}), ${after.writes} writes, all by build ${gen}; heap ${(heap0 / 1048576).toFixed(2)} → ${(heap1 / 1048576).toFixed(2)} MiB; the retired host still holds a world of ${after.retainedWorldBytes} B and ${after.retainedMemo} memoised views`);
+      if (after.shimErrs.length) out(`    shim errors: ${JSON.stringify(after.shimErrs.slice(0, 5))}`);
+      if (after.copyErrors.length) out(`    task errors: ${JSON.stringify(after.copyErrors.slice(0, 5))}`);
+      for (const f of fail) { out(`    FAIL ${f}`); flags.push(`reload ${kind} build ${gen} (${mode}): ${f}`); }
+      for (const e of after.copyErrors) flags.push(`reload ${kind} build ${gen}: task error ${e.split("\n")[0]}`);
+      flagIf(evalMs > MODULE_BUDGET / 2, `reload ${kind} build ${gen}: module eval ${b.evalMs} ms > 50% of the ${MODULE_BUDGET} ms budget`);
+      flagIf(load.ms > CALLBACK_BUDGET / 2, `reload ${kind} build ${gen}: load + handover ${load.ms} ms > 50% of the ${CALLBACK_BUDGET} ms budget`);
+      flagIf(sw.initMs.some((x) => x > CALLBACK_BUDGET / 2), `reload ${kind} build ${gen}: an init took > 50% of the ${CALLBACK_BUDGET} ms budget`);
+    }
+    vm.ctx.dispose(); vm.rt.dispose();
+    res[kind] = r;
+  }
+  return res;
+};
+
 phases.long = () => {
   const { vm } = bootDriver({ instrument: true });
   call(vm, "longStart", { kind: LONG_KIND, layout: LAYOUT, viewsEvery: 10 });
@@ -569,7 +714,7 @@ phases.long = () => {
 
 out(`QuickJS-ng harness: ${results.engine}; repo ${REPO}`);
 out(`budgets (ARCHITECTURE §2.5, sandbox.rs:436-444): render ${RENDER_BUDGET} ms, callbacks ${CALLBACK_BUDGET} ms, module eval ${MODULE_BUDGET} ms; flags at 50%`);
-out(`note: wasm interpreter (no JIT) = conservative upper bound for herdr's quickjs-jit`);
+out(`note: wasm interpreter; herdr runs the same plain interpreter (no JIT tier) natively, so these times are a modest upper bound`);
 for (const p of PHASES) {
   out(`\n######## ${p}`);
   const t0 = performance.now();

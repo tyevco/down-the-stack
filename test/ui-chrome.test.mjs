@@ -9,11 +9,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 const M = await import("../tools/mock/index.mjs");
-const { View } = await import("gpui-kit");
+const { View, div } = await import("gpui-kit");
 const { props } = await import("herdr");
-const PartyMod = await import("../mods/mapledr/ui/party.js");
-const PlateMod = await import("../mods/mapledr/ui/nameplate.js");
-const HudMod = await import("../mods/mapledr/ui/hud.js");
+const PartyMod = await import("../mods/down-the-stack/ui/party.js");
+const PlateMod = await import("../mods/down-the-stack/ui/nameplate.js");
+const HudMod = await import("../mods/down-the-stack/ui/hud.js");
 const P = await import("../tools/vm-samples/party.mjs");
 const N = await import("../tools/vm-samples/nameplate.mjs");
 const H = await import("../tools/vm-samples/hud.mjs");
@@ -56,7 +56,33 @@ const ids = (m) => new Set(m.findAll((n) => n.id != null).map((n) => n.id));
 const runs = (name) => M.calls().run.filter((c) => c.name === name);
 const overlays = () => M.calls().openOverlay.map((c) => c.spec);
 const has = (m, method) => m.findAll((n) => n.methods.some((x) => x[0] === method)).length > 0;
-const errorsOf = (m) => m.errors.map((e) => `${e.code}: ${e.message}`);
+// herdr's render budget is wall-clock time, and the mock flags any render over it ("budget"). Under
+// load (parallel test files, a browser shooting previews) a slow render says nothing about the
+// code: load only adds time, waiting for a CPU. So a view the mock flagged is rendered again, each
+// render's cost taken as the lower of the mock's script time (stats.lastRenderMs, its stopwatch)
+// and the process's CPU time for the whole render (no waiting; the mock's own checks and GC
+// threads are in it), and the best of 5 must fit. Every other validator error counts as it is.
+const isRenderBudget = (e) => e.code === "budget" && /^render took/.test(String(e.message));
+/** One render's cost (ms): min(the mock's script time, CPU time of the whole render). */
+function renderCost(m) {
+  const c0 = process.cpuUsage();
+  m.render();
+  const c = process.cpuUsage(c0);
+  return Math.min(m.stats.lastRenderMs, (c.user + c.system) / 1000);
+}
+function bestRenderMs(m, n = 5) {
+  let best = Infinity;
+  for (let k = 0; k < n; k++) best = Math.min(best, renderCost(m));
+  return best;
+}
+function errorsOf(m) {
+  const out = m.errors.filter((e) => !isRenderBudget(e)).map((e) => `${e.code}: ${e.message}`);
+  if (m.errors.some(isRenderBudget) && m.view) {
+    const best = bestRenderMs(m);
+    if (best > M.BUDGET.render) out.push(`budget: the best of 5 renders took ${best.toFixed(1)} ms (herdr's budget is ${M.BUDGET.render} ms)`);
+  }
+  return out;
+}
 const dupes = (m) => m.warnings.filter((w) => w.code === "duplicate-id" || w.code === "many-elements").map((w) => w.message);
 
 function assertClean(m, label) {
@@ -134,6 +160,27 @@ test("the pure renderers build a tree from a VM inside a plain render pass", asy
   }
 });
 
+test("a render the mock timed over herdr's budget once (load) is judged by its best of 5; a slow one still fails", async () => {
+  // busy until both this process's CPU time and the wall clock have run `ms`, under any load (the
+  // CPU time alone can pass `ms` early: it counts V8's helper threads too, whose time lands in
+  // steps; the panels tests saw that flake, test/view-panels.test.mjs)
+  const spin = (ms) => {
+    const c0 = process.cpuUsage();
+    const t0 = performance.now();
+    for (let c = { user: 0, system: 0 }; (c.user + c.system) / 1000 < ms || performance.now() - t0 < ms; c = process.cpuUsage(c0)) { /* busy */ }
+  };
+  M.resetState();
+  let n = 0;
+  const once = await M.mountView(class extends View { render() { if (n++ === 0) spin(80); return div().child("x"); } }, { props: {} });
+  once.render();
+  assert.ok(once.errors.some(isRenderBudget), "the mock flagged the slow render");
+  assert.deepEqual(errorsOf(once), [], "a one-off: the best of 5 fits");
+  M.resetState();
+  const always = await M.mountView(class extends View { render() { spin(80); return div().child("x"); } }, { props: {} });
+  always.render();
+  assert.match(errorsOf(always).join(), /^budget: the best of 5 renders took \d+\.\d ms/, "a render that is always slow still fails");
+});
+
 // ---------------------------------------------------------------------------------------------
 // party behaviour (herdr's agents list + the game)
 
@@ -141,7 +188,7 @@ test("party: setAgentOrder(vm.agentOrder) on render, like herdr's agents list; n
   const { m } = await mount("party", P.scenarios.six);
   const last = M.calls().setAgentOrder.at(-1);
   assert.deepEqual(last.addresses, P.scenarios.six.agentOrder);
-  assert.ok(m.ok);
+  assert.deepEqual(errorsOf(m), []);
   await mount("party", null);
   assert.equal(M.calls().setAgentOrder.length, 0);
 });
@@ -159,7 +206,7 @@ test("party: clicking a row marks it seen and focuses its pane (pane.focus, as h
   m.fire("pr-h:2");
   assert.deepEqual(host.commands, [["markSeen", { heroId: 2 }]]);
   assert.deepEqual(runs("pane.focus").map((c) => c.args), [{ pane: "p2" }]);
-  assert.ok(m.ok, errorsOf(m).join());
+  assert.deepEqual(errorsOf(m), []);
 });
 
 test("party: a row without a pane id focuses the pane showing its terminal, else peeks it (never 'no such pane')", async () => {
@@ -199,7 +246,7 @@ test("party: right-click, the portrait and the hover sheet button open the chara
   m.fire("ps-h:3");
   const sheets = overlays();
   assert.equal(sheets.length, 3);
-  for (const s of sheets) assert.deepEqual(s, { mod: "mapledr", kind: "dialog", width: 760, height: 500, props: { role: "sheet", heroId: 3 } });
+  for (const s of sheets) assert.deepEqual(s, { mod: "down-the-stack", kind: "dialog", width: 760, height: 500, props: { role: "sheet", heroId: 3 } });
   assert.equal(runs("pane.focus").length, 0, "portrait / button clicks stop propagation");
 });
 
@@ -254,7 +301,7 @@ test("party: the Forkling chip shows its sub-agent (peek, or its pane once kept)
   assert.equal(runs("agent.focus").length, 0);
   assert.equal(runs("pane.focus").length, 0);
   assert.deepEqual(host.commands, []);
-  assert.ok(m.ok, errorsOf(m).join());
+  assert.deepEqual(errorsOf(m), []);
   // a kept sub-agent (terminal.keep gave it a pane): its pane, as the agents list does
   const kept = await mount("party", P.scenarios.six, { fixture: { panes: [{ ...N.panes.focused, pane: "p12", terminal: "t1.2" }] } });
   kept.m.fire("pc-c:1:fork");
@@ -344,21 +391,142 @@ test("chrome buttons hover with a background: no hover text colour where an svg 
   assert.ok(lum(PartyMod.lift(light)) < lum(light.raised));
 });
 
-test("party / nameplate contrast: status stripes clear 3:1 on light themes; secondary text uses the muted token", async () => {
-  const lin = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
-  const L = (h) => { const [r, g, b] = [1, 3, 5].map((i) => lin(parseInt(h.slice(i, i + 2), 16))); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
-  const ratio = (a, b) => { const x = L(a), y = L(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
-  const C = { working: "#4CC38A", blocked: "#F2A93B", done: "#FFD447", idle: "#8A8F98" };
+// Colour science for the status-mark tests, computed here independently of ui/party.js: WCAG
+// contrast, OKLab (Ottosson) and the Machado-Oliveira-Fernandes (2009) severity-1 CVD simulation.
+const COL = (() => {
+  const rgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255);
+  const lin = (c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const linRgb = (h) => rgb(h).map(lin);
+  const lum = (h) => { const [r, g, b] = linRgb(h); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+  const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+  /** "#rrggbb[aa]" over an opaque "#rrggbb". */
+  const over = (fg, bg) => {
+    const a = fg.length === 9 ? parseInt(fg.slice(7, 9), 16) / 255 : 1;
+    const f = rgb(fg.slice(0, 7)), b = rgb(bg);
+    return "#" + f.map((v, i) => Math.round((v * a + b[i] * (1 - a)) * 255).toString(16).padStart(2, "0")).join("");
+  };
+  const lab = ([r, g, b]) => {
+    const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+    const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+    const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+    return [0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s, 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s, 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s];
+  };
+  const MACHADO = {
+    protan: [[0.152286, 1.052583, -0.204868], [0.114503, 0.786281, 0.099216], [-0.003882, -0.048116, 1.051998]],
+    deutan: [[0.367322, 0.860646, -0.227968], [0.280085, 0.672501, 0.047413], [-0.01182, 0.04294, 0.968881]],
+  };
+  const sim = (h, kind) => { const c = linRgb(h); return MACHADO[kind].map((row) => Math.max(0, Math.min(1, row[0] * c[0] + row[1] * c[1] + row[2] * c[2]))); };
+  /** OKLab distance ×100; kind: undefined (normal vision), "protan" or "deutan". */
+  const dE = (a, b, kind) => { const p = lab(kind ? sim(a, kind) : linRgb(a)), q = lab(kind ? sim(b, kind) : linRgb(b)); return 100 * Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]); };
+  /** [L, C, h°] in OKLCH. */
+  const lch = (h) => { const [L, a, b] = lab(linRgb(h)); return [L, Math.hypot(a, b), ((Math.atan2(b, a) * 180) / Math.PI + 360) % 360]; };
+  return { ratio, over, dE, lch };
+})();
+const DESIGN = { working: "#4CC38A", blocked: "#F2A93B", done: "#FFD447", idle: "#8A8F98" }; // D§11.1
+const STATUS = Object.keys(DESIGN);
+
+/** The stripes for a herdr theme token map, and the three backgrounds a party row shows. */
+function marksOn(th) {
+  const t = { bg: th.background, chrome: th.chrome, hover: th.hover, selected: th.selected, fg: th.foreground };
+  const bgs = { chrome: th.chrome, hover: COL.over(th.hover, th.chrome), selected: COL.over(th.selected, th.chrome) };
+  return { t, bgs, s: Object.fromEntries(STATUS.map((k) => [k, PartyMod.stripeColor(DESIGN[k], k, t)])) };
+}
+
+test("status marks (D§11.1): every status clears 3:1 on every row background and stays distinct, light and dark", async () => {
+  for (const name of ["paper", "graphite", "ink", "moss"]) {
+    const th = M.resolveTheme(name);
+    const light = name === "paper";
+    const { bgs, s } = marksOn(th);
+    for (const k of STATUS) {
+      assert.match(s[k], /^#[0-9a-fA-F]{6}$/, `${name} ${k}`);
+      for (const [where, bg] of Object.entries(bgs)) {
+        const r = COL.ratio(s[k], bg);
+        assert.ok(r >= 3, `${name} ${k} ${s[k]} on the ${where} row ${bg}: ${r.toFixed(2)}:1`);
+      }
+    }
+    // distinct: OKLab ×100 ≥ 15 with normal vision for every pair, ≥ 6 under protan / deutan (the
+    // floor a mark may use when the status is also said another way: the face, "!", "N need you")
+    for (let i = 0; i < STATUS.length; i++) {
+      for (let j = i + 1; j < STATUS.length; j++) {
+        const [a, b] = [STATUS[i], STATUS[j]];
+        const n = COL.dE(s[a], s[b]);
+        const cvd = Math.min(COL.dE(s[a], s[b], "protan"), COL.dE(s[a], s[b], "deutan"));
+        assert.ok(n >= 15, `${name} ${a} ${s[a]} vs ${b} ${s[b]}: ΔE ${n.toFixed(1)}`);
+        assert.ok(cvd >= 6, `${name} ${a} vs ${b} under CVD: ΔE ${cvd.toFixed(1)}`);
+      }
+    }
+    if (light) {
+      // not muddy: the coloured steps keep their chroma; blocked stays orange (never toward the
+      // HP red, D§11.1), done stays gold, and blocked is the darker of the two
+      for (const k of ["working", "blocked", "done"]) assert.ok(COL.lch(s[k])[1] >= 0.1, `${k} ${s[k]} chroma ${COL.lch(s[k])[1].toFixed(3)}`);
+      const hb = COL.lch(s.blocked)[2], hd = COL.lch(s.done)[2];
+      assert.ok(hb >= 40 && hb <= 75, `blocked hue ${hb.toFixed(0)}`);
+      assert.ok(hd >= 75 && hd <= 100, `done hue ${hd.toFixed(0)}`);
+      assert.ok(COL.lch(s.blocked)[0] < COL.lch(s.done)[0]);
+      // the steps they replace (the design colours mixed with black) failed both rules
+      assert.ok(COL.ratio("#9e832c", bgs.selected) < 3 && COL.dE("#855d20", "#9e832c") < 15, "the old light done / blocked");
+    } else {
+      for (const k of ["working", "done", "idle"]) assert.equal(s[k], DESIGN[k], `${name}: the design's ${k}`);
+      assert.ok(COL.dE(DESIGN.blocked, DESIGN.done) < 15, "the design's amber is too close to its gold for a 3 px mark");
+    }
+  }
+});
+
+test("status marks follow the row's chrome, not the theme background, and clear 3:1 on any theme's tints", () => {
+  const check = (t, label) => {
+    const bgs = [t.chrome, COL.over(t.hover, t.chrome), COL.over(t.selected, t.chrome)];
+    for (const k of STATUS) {
+      const c = PartyMod.stripeColor(DESIGN[k], k, t);
+      for (const bg of bgs) assert.ok(COL.ratio(c, bg) >= 3, `${label} ${k} ${c} on ${bg}: ${COL.ratio(c, bg).toFixed(2)}`);
+    }
+  };
+  // herdr's win98 theme overrides the background to black but not the chrome, which stays light
+  const win98 = M.resolveTheme("paper", { background: "#000000", foreground: "#000000", hover: "#dfdfdf" });
+  const w = { bg: win98.background, chrome: win98.chrome, hover: win98.hover, selected: win98.selected };
+  check(w, "win98");
+  assert.equal(PartyMod.stripeColor(DESIGN.done, "done", w), marksOn(M.resolveTheme("paper")).s.done, "the light steps");
+  // a person's theme whose tints would leave a step under 3:1: the mark deepens (light) or
+  // lightens (dark) just enough
+  check({ bg: "#c4c4c4", chrome: "#b8b8b8", hover: "#0000000c", selected: "#00000012" }, "grey light");
+  check({ bg: "#3a3a3a", chrome: "#404040", hover: "#ffffff0e", selected: "#ffffff17" }, "grey dark");
+  const idle = PartyMod.stripeColor(DESIGN.idle, "idle", { bg: "#3a3a3a", chrome: "#404040", hover: "#ffffff0e", selected: "#ffffff17" });
+  assert.notEqual(idle, DESIGN.idle, "lightened on a mid-grey dark chrome");
+  // a theme colour given as "#rgb" (herdr hands theme colours on verbatim; kit.hex keeps "#rgb"):
+  // a light "#eee" chrome is light, and gets the light steps
+  const short = { bg: "#fff", chrome: "#eee", hover: "#0000000c", selected: "#00000012", fg: "#111" };
+  check({ ...short, chrome: "#eeeeee" }, "#rgb chrome");
+  assert.equal(PartyMod.stripeColor(DESIGN.done, "done", short), PartyMod.stripeColor(DESIGN.done, "done", { ...short, chrome: "#eeeeee" }));
+  assert.ok(PartyMod.isLight(short), "a \"#fff\" background is light");
+  // the marks are cached by every input: the same chrome with a heavier selected tint gets its own,
+  // deeper step
+  const plain = { bg: "#b8b8b8", chrome: "#b8b8b8", hover: "#00000000", selected: "#00000000" };
+  const heavy = { ...plain, selected: "#00000040" };
+  check(plain, "plain grey");
+  check(heavy, "grey, heavy selected tint");
+  assert.notEqual(PartyMod.stripeColor(DESIGN.done, "done", plain), PartyMod.stripeColor(DESIGN.done, "done", heavy));
+  // unknown statuses (never from game/view: statusWord maps them to idle) still clear 3:1
+  check({ ...w }, "win98 again");
+  assert.match(PartyMod.stripeColor("#F2A93B", "constructor", w), /^#[0-9a-f]{6}$/);
+});
+
+test("status marks: the party's stripes, a folded group's dot and the HUD's count dots use them", async () => {
+  for (const name of ["paper", "graphite"]) {
+    const { s } = marksOn(M.resolveTheme(name));
+    const { m } = await mount("party", P.scenarios.six, { theme: name });
+    const stripes = m.findAll((n) => n.methods.some((x) => x[0] === "w" && x[1][0] === 3) && n.methods.some((x) => x[0] === "bg"))
+      .map((n) => n.methods.findLast((x) => x[0] === "bg")[1][0]);
+    assert.deepEqual(new Set(stripes), new Set(STATUS.map((k) => s[k])), `${name}: one stripe colour per status`);
+    const hud = await mount("hud", H.scenarios.normal, { width: 1170, height: 26, theme: name });
+    for (const [id, k] of [["hud-working", "working"], ["hud-blocked", "blocked"], ["hud-shipped", "done"]]) {
+      const dot = hud.m.node(id).children.find((n) => n.methods.some((x) => x[0] === "rounded_full"));
+      assert.equal(dot.methods.findLast((x) => x[0] === "bg")[1][0], s[k], `${name} ${id}`);
+    }
+  }
+});
+
+test("party / nameplate contrast: secondary text uses the muted token", async () => {
   for (const name of ["paper", "graphite"]) {
     const th = M.resolveTheme(name);
-    const t = { bg: th.background, chrome: th.chrome, fg: th.foreground };
-    for (const [status, color] of Object.entries(C)) {
-      const s = PartyMod.stripeColor(color, status, t);
-      if (name === "graphite") assert.equal(s, color, "dark themes: the game colour as is");
-      assert.ok(ratio(s, th.chrome) >= 3, `${name} ${status} stripe ${s}: ${ratio(s, th.chrome).toFixed(2)}`);
-    }
-    // blocked stays darker than done, so the two stay apart
-    if (name === "paper") assert.ok(L(PartyMod.stripeColor(C.blocked, "blocked", t)) < L(PartyMod.stripeColor(C.done, "done", t)));
     const { m } = await mount("party", P.scenarios.six, { theme: name });
     const colorOf = (text) => m.findAll((n) => n.type === "text" && n.text === text)[0]?.parent.methods.findLast((x) => x[0] === "text_color")?.[1][0];
     assert.equal(colorOf("Junior Refactorer · 2-2 Nested Tunnels"), th.muted, `${name}: row line 2`);
@@ -437,13 +605,41 @@ test("party: a narrow sidebar drops chips (then the level) instead of pushing a 
   assert.ok((await mount("party", six, { width: 268 })).m.node(`pc-c:${rue.heroId}:boss`));
 });
 
+test("save trouble (D§13.1): the party footer, the rail and the HUD show a cue that opens the Herd panel", async () => {
+  const herd = { mod: "down-the-stack", kind: "dialog", width: 760, height: 520, props: { role: "herd" } };
+  const party = await mount("party", P.scenarios.saveTrouble);
+  const cue = party.m.node("party-save");
+  assert.ok(cue);
+  assert.ok(party.m.text().includes("Not saving"));
+  assert.match(cue.methods.find((x) => x[0] === "tooltip")[1][0], /nothing is being saved/);
+  party.m.fire("party-save");
+  assert.deepEqual(overlays(), [herd]);
+  const cueText = [];
+  M.walkLive(cue, (n) => { if (n.type === "text") cueText.push(n.text); });
+  assert.deepEqual(cueText, ["Not saving", "Herd panel ›"]);
+  assert.ok(!cueText.join("").includes("!"), "never a \"!\" (D§11.1 reserves it for an agent waiting)");
+  assert.equal((await mount("party", P.scenarios.six)).m.node("party-save"), null, "nothing while the save is fine");
+  const rail = await mount("party", P.scenarios.saveRail, { width: 52 });
+  assert.ok(rail.m.node("party-save"));
+  rail.m.fire("party-save");
+  assert.deepEqual(overlays(), [herd]);
+  const hud = await mount("hud", H.scenarios.saveTrouble, { width: 1170, height: 26 });
+  assert.ok(hud.m.node("hud-save"));
+  assert.ok(hud.m.text().includes("Save restored from backup"));
+  hud.m.fire("hud-save");
+  assert.deepEqual(overlays(), [herd], "one panel: the click stops at the pill");
+  const narrow = await mount("hud", H.scenarios.saveTrouble, { width: 640, height: 26 });
+  assert.ok(narrow.m.text().includes("Restored") && !narrow.m.text().includes("from backup"), "the short form when narrow");
+  for (const m of [party.m, rail.m, hud.m, narrow.m]) assert.deepEqual(errorsOf(m), []);
+});
+
 test("party: footer Herd and settings buttons open the Herd panel (760×520); calm toggles the setting", async () => {
   const { m, host } = await mount("party", P.scenarios.six);
   m.fire("party-herd");
   m.fire("party-settings");
   assert.deepEqual(overlays(), [
-    { mod: "mapledr", kind: "dialog", width: 760, height: 520, props: { role: "herd" } },
-    { mod: "mapledr", kind: "dialog", width: 760, height: 520, props: { role: "herd", tab: "settings" } },
+    { mod: "down-the-stack", kind: "dialog", width: 760, height: 520, props: { role: "herd" } },
+    { mod: "down-the-stack", kind: "dialog", width: 760, height: 520, props: { role: "herd", tab: "settings" } },
   ]);
   m.fire("party-calm");
   assert.deepEqual(host.commands, [["setting", { key: "calm", value: true }]]);
@@ -462,7 +658,7 @@ test("party: rail mode (vm.compact or < 160 px) shows live heroes only, and » u
     assert.deepEqual(runs("pane.focus").at(-1).args, { pane: "p1" });
     m.fire("party-unfold");
     assert.deepEqual(runs("layout.resize").at(-1).args, { id: "sidebar", px: 300 });
-    assert.ok(m.ok, errorsOf(m).join());
+    assert.deepEqual(errorsOf(m), []);
   }
 });
 
@@ -515,7 +711,7 @@ test("nameplate: asks host.view('nameplate', {terminal, pane}); a mod pane never
   const r = await mount("nameplate", N.scenarios.focused, { width: 590, height: 34, roleProps: { pane: "p50", terminal: null }, fixture: { panes: [modPane] } });
   assert.equal(r.host.views.length, 0);
   assert.ok(r.m.text().includes("files"));
-  assert.ok(r.m.ok);
+  assert.deepEqual(errorsOf(r.m), []);
 });
 
 test("nameplate: a null VM is exactly herdr's plain pane header", async () => {
@@ -557,14 +753,14 @@ test("nameplate: a zoomed pane shows the unzoom button", async () => {
   m.hover("pane-head-p1");
   m.render();
   const svgs = m.findAll((n) => n.type === "svg").map((n) => n.src);
-  assert.ok(svgs.includes("mods/mapledr/art/ui/unzoom.svg"));
-  assert.ok(!svgs.includes("mods/mapledr/art/ui/zoom.svg"));
+  assert.ok(svgs.includes("mods/down-the-stack/art/ui/unzoom.svg"));
+  assert.ok(!svgs.includes("mods/down-the-stack/art/ui/zoom.svg"));
 });
 
 test("nameplate: the hero part focuses its pane (once) and opens the character sheet", async () => {
   const { m } = await mount("nameplate", N.scenarios.blocked, plateOpts("blocked"));
   m.fire("np-hero-p2");
-  assert.deepEqual(overlays(), [{ mod: "mapledr", kind: "dialog", width: 760, height: 500, props: { role: "sheet", heroId: 2 } }]);
+  assert.deepEqual(overlays(), [{ mod: "down-the-stack", kind: "dialog", width: 760, height: 500, props: { role: "sheet", heroId: 2 } }]);
   assert.deepEqual(runs("pane.focus").map((c) => c.args), [{ pane: "p2" }]);
   const focusedPane = await mount("nameplate", N.scenarios.focused, plateOpts("focused"));
   focusedPane.m.fire("np-hero-p1");
@@ -657,7 +853,7 @@ test("nameplate: the border faces the terminal (bottom header → top border)", 
 
 test("nameplate: a missing pane renders an empty div; calm stops the face blinking", async () => {
   const gone = await mount("nameplate", N.scenarios.focused, { width: 590, height: 34, roleProps: { pane: "p404", terminal: "t404" }, fixture: { panes: [] } });
-  assert.ok(gone.m.ok);
+  assert.deepEqual(errorsOf(gone.m), []);
   assert.equal(gone.m.text(), "");
   const calm = await mount("nameplate", N.scenarios.calm, plateOpts("calm"));
   assert.ok(!has(calm.m, "frames"));
@@ -681,7 +877,7 @@ test("nameplate: the next tick's VM keeps every id", async () => {
 test("hud: a click anywhere opens the Herd panel; counts carry status colours", async () => {
   const { m } = await mount("hud", H.scenarios.normal, { width: 1170, height: 26 });
   m.fire("hud-working");
-  assert.deepEqual(overlays(), [{ mod: "mapledr", kind: "dialog", width: 760, height: 520, props: { role: "herd" } }]);
+  assert.deepEqual(overlays(), [{ mod: "down-the-stack", kind: "dialog", width: 760, height: 520, props: { role: "herd" } }]);
   const text = m.text();
   for (const s of ["48.2k", "133", "v2.3", "Pyramid of Doom", "7/10", "working", "blocked", "shipped"]) assert.ok(text.includes(s), s);
   const narrow = await mount("hud", H.scenarios.normal, { width: 400, height: 26 });
@@ -691,9 +887,15 @@ test("hud: a click anywhere opens the Herd panel; counts carry status colours", 
 
 test("hud: the sprint shows only when the fixed parts leave it room (it never paints over the counts)", () => {
   const big = { gold: "41.3M", snippets: "26.1k", release: "v7.8", sprint: { label: "The Backlog, floor 14", have: 23, need: 50 }, working: 8, blocked: 2, shipped: 2, digestDot: false };
-  assert.deepEqual(HudMod.hudFit(big, 420), { words: false, sprint: false, sprintLabel: false });
-  assert.deepEqual(HudMod.hudFit(big, 640), { words: false, sprint: true, sprintLabel: true });
-  assert.deepEqual(HudMod.hudFit(big, 1170), { words: true, sprint: true, sprintLabel: true });
+  assert.deepEqual(HudMod.hudFit(big, 420), { words: false, sprint: false, sprintLabel: false, saveLabel: null });
+  assert.deepEqual(HudMod.hudFit(big, 640), { words: false, sprint: true, sprintLabel: true, saveLabel: null });
+  assert.deepEqual(HudMod.hudFit(big, 1170), { words: true, sprint: true, sprintLabel: true, saveLabel: null });
+  // save trouble takes room first: its title with the words, its short form without; the sprint's
+  // label gives way, then the sprint
+  const saving = { ...big, save: { title: "Save didn't load: new herd", short: "New herd", tooltip: "…" } };
+  assert.deepEqual(HudMod.hudFit(saving, 640), { words: false, sprint: true, sprintLabel: false, saveLabel: "New herd" });
+  assert.deepEqual(HudMod.hudFit(saving, 560), { words: false, sprint: false, sprintLabel: false, saveLabel: "New herd" });
+  assert.deepEqual(HudMod.hudFit(saving, 1170), { words: true, sprint: true, sprintLabel: true, saveLabel: "Save didn't load: new herd" });
   assert.equal(HudMod.hudFit(H.scenarios.normal, 520).sprint, true);
   assert.equal(HudMod.hudFit(H.scenarios.zeros, 1170).sprint, false, "no sprint, nothing to fit");
 });
@@ -711,9 +913,9 @@ test("hud: loading and zeros render; the next tick keeps every id", async () => 
 });
 
 // ---------------------------------------------------------------------------------------------
-// key commands (mapledr.sheet / .herd / .calm reach whichever copy claims them)
+// key commands (down-the-stack.sheet / .herd / .calm reach whichever copy claims them)
 
-test("every chrome role answers mapledr.sheet / herd / calm the same way", async () => {
+test("every chrome role answers down-the-stack.sheet / herd / calm the same way", async () => {
   for (const kind of ["party", "nameplate", "hud"]) {
     const vm = { party: P.scenarios.six, nameplate: N.scenarios.focused, hud: H.scenarios.normal }[kind];
     const extra = { nameplate: { ...N.scenarios.focused, heroId: 1 }, party: P.scenarios.six };
@@ -732,7 +934,7 @@ test("every chrome role answers mapledr.sheet / herd / calm the same way", async
   }
 });
 
-test("mapledr.calm reads calm from the cheap HUD view, never a whole party", async () => {
+test("down-the-stack.calm reads calm from the cheap HUD view, never a whole party", async () => {
   const { m, host } = await mount("party", P.scenarios.six, { extra: { hud: { ...H.scenarios.normal, calm: true } } });
   host.views.length = 0;
   assert.equal(m.view.role.command("calm"), true);

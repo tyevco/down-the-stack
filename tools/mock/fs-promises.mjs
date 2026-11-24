@@ -17,7 +17,7 @@ const WRITE_LIMIT = 8 * 1024 * 1024;
 
 function roots(kind) {
   const copy = currentCopy();
-  const mod = copy?.modName ?? "mapledr";
+  const mod = copy?.modName ?? "down-the-stack";
   if (S.checking) {
     const store = `${APP_HOME}/data/${mod}`;
     return kind === "read" ? [`${APP_HOME}/mods/${mod}`, store] : [store];
@@ -28,7 +28,7 @@ function roots(kind) {
 function resolve(p, kind, api) {
   if (typeof p !== "string") throw new TypeError(`fs.${api}(path) expects a string path`);
   if (p.startsWith("~")) throw new TypeError(`fs.${api}: "~" is not expanded; build paths from home() or appHome()`);
-  const base = kind === "read" ? (S.checking ? `${APP_HOME}/mods/${currentCopy()?.modName ?? "mapledr"}` : USER_HOME) : APP_HOME;
+  const base = kind === "read" ? (S.checking ? `${APP_HOME}/mods/${currentCopy()?.modName ?? "down-the-stack"}` : USER_HOME) : APP_HOME;
   const abs = P.resolve(base, p);
   const allowed = roots(kind);
   if (!allowed.some((r) => abs === r || abs.startsWith(r + "/"))) {

@@ -1,4 +1,4 @@
-// Sample SheetVMs (game/view.js sheetView) for the character sheet dialog (mods/mapledr/ui/sheet.js).
+// Sample SheetVMs (game/view.js sheetView) for the character sheet dialog (mods/down-the-stack/ui/sheet.js).
 // They are the spec view.js has to produce and the fixtures for tests and previews: every visual
 // state the renderer supports has a scenario. Shapes: the typedefs at the top of ui/sheet.js
 // (SheetVM, SheetHeaderVM, GearVM, ItemVM, CardVM, ActionVM, ChipVM, SquashVM, StashVM,
@@ -7,7 +7,7 @@
 // `uiStates[name]` is the role's UI state a scenario is meant to be seen with (selection, squash
 // picking); `widths` the dialog width; `nextTick(vm)` the same VM a tick later (ids stay stable).
 
-import { AFFIXES } from "../../mods/mapledr/game/data.js";
+import { AFFIXES } from "../../mods/down-the-stack/game/data.js";
 
 export const RAR = ["#A0A4AB", "#5BD16A", "#4EA3FF", "#B36BFF", "#FF9A2E", "#FF7AA8"];
 export const RAR_NAME = ["Prototype", "Alpha", "Beta", "Release", "LTS", "Keepsake"];
@@ -406,7 +406,7 @@ function rueCareer() {
     },
     boss: {
       name: "The Octopus Merge", zone: "Merge Marshes · Lv 45", status: "Sprint 18 / 45",
-      estimate: { text: "Risky 0.61×", color: C.hp }, challenge: null,
+      estimate: { text: "Risky 0.61×", color: C.hp }, challenge: null, fighting: false,
     },
     identity: { name: "Rue Two-Spaces", hint: "Renaming is free. Badges unlock extra epithets." },
     retire: action("retire", "Retire", "retire", { heroId: RUE }, { tone: "danger", confirm: "Retire Rue for good?", tooltip: "Rue joins the Hall of Fame (+0.5% herd XP). Its gear goes to vendor/." }),
@@ -420,7 +420,7 @@ function rueCareer() {
 const NIB = 21;
 const nibHeader = {
   name: "Nib the Linted", level: "Lv 3", title: "Intern", tag: null, tagTip: null, tagTab: null,
-  sub: "mapledr · Claude Code · fighting 1-1 Squiggle Path", quest: "Set up the project",
+  sub: "herdr-app · Claude Code · fighting 1-1 Squiggle Path", quest: "Set up the project",
   status: "working",
   hp: { frac: 0.9, text: "62 / 69" },
   xp: { frac: 0.62, feFrac: 0, text: "62.0%", tooltip: "+48 XP/min = working ×1 · Onboarding +0% · Shift: 6m today (full rate until 4h)" },
@@ -668,6 +668,7 @@ function pipCareer() {
     boss: {
       name: "The Pyramid of Doom", zone: "Callback Caverns · Lv 23", status: "Fighting: 81% left", estimate: null,
       challenge: action("retreat:boss:1", "Retreat", "retreat", {}, { tone: "danger", confirm: "Retreat? (a Postmortem)", tooltip: "End the fight as a Postmortem: Wounds and Lessons are kept" }),
+      fighting: true,
     },
     identity: { name: "Pip the Unmerged", hint: "Renaming is free. Badges unlock extra epithets." },
     retire: action("retire", "Retire", "retire", { heroId: PIP }, { enabled: false, tooltip: "Retiring opens at Lv 30" }),
@@ -783,9 +784,9 @@ export async function shootDialogViews(role, argv = []) {
   const M = await import("../mock/index.mjs");
   const { View } = await import("gpui-kit");
   const { shoot } = await import("../preview/shoot.mjs");
-  const { demoWorld, DEMO_KINDS } = await import("../../mods/mapledr/game/demo.js");
-  const V = await import("../../mods/mapledr/game/view.js");
-  const Role = (await import(role === "sheet" ? "../../mods/mapledr/ui/sheet.js" : "../../mods/mapledr/ui/herdpanel.js")).default;
+  const { demoWorld, DEMO_KINDS } = await import("../../mods/down-the-stack/game/demo.js");
+  const V = await import("../../mods/down-the-stack/game/view.js");
+  const Role = (await import(role === "sheet" ? "../../mods/down-the-stack/ui/sheet.js" : "../../mods/down-the-stack/ui/herdpanel.js")).default;
   const tabs = role === "sheet" ? ["gear", "skills", "stats", "career", "journal"] : ["upgrades", "stash", "tracker", "bosses", "roster", "digest", "settings"];
   const list = argv.includes("--all") ? DEMO_KINDS.flatMap((k) => tabs.map((t) => [k, t])) : VIEW_SHOTS[role];
   const now = Date.UTC(2026, 10, 24, 9, 30, 0);

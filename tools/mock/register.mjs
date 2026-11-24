@@ -4,7 +4,7 @@
 
 import { register } from "node:module";
 
-const KEY = Symbol.for("mapledr.mock.hooks");
+const KEY = Symbol.for("down-the-stack.mock.hooks");
 if (!globalThis[KEY]) {
   Object.defineProperty(globalThis, KEY, { value: true });
   register("./hooks.mjs", import.meta.url);

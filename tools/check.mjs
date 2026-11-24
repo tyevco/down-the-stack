@@ -1,4 +1,4 @@
-// Mock `herdr-app check` for the mapledr mod, plus a role matrix (ARCHITECTURE §7.2).
+// Mock `herdr-app check` for the down-the-stack mod, plus a role matrix (ARCHITECTURE §7.2).
 //
 //   node --import ./tools/mock/register.mjs tools/check.mjs [--main path] [--fixtures path]
 //        [--role name] [--widths 360,960,1600] [--zooms 1,2] [--json] [--quiet]
@@ -15,7 +15,10 @@
 //    getHost().world from the mod's host.js before the first render; `setup({ mod, host, mock })`
 //    may do anything else. For each role: init, render; then for each zoom: settings change +
 //    re-render, and for each width: on_size_change (width × zoom window px), render,
-//    3 × 1000 ms of timers (re-rendering when notified), re-render; finally close().
+//    3 × 1000 ms of timers (re-rendering when notified), re-render; finally close(). Every stage
+//    render must stay within STAGE_BUDGET (400 elements, 150 animated nodes, D§11.9.7; the fixtures
+//    include a 3200 px stage and the 30-hero herd), or the role fails ("stage-budget"). Budget
+//    times are the mock's (tools/mock: the lower of wall and CPU time, so load cannot fail them).
 // Exit code: 0 pass, 1 errors, 2 missing inputs (main.js or the fixtures module).
 //
 // Also a library: `import { runCheck } from "./tools/check.mjs"` → { ok, exitCode, ... }.
@@ -27,11 +30,16 @@ import { pathToFileURL } from "node:url";
 import * as M from "./mock/index.mjs";
 
 const REPO = M.REPO;
-export const DEFAULT_MAIN = path.join(REPO, "mods", "mapledr", "main.js");
+export const DEFAULT_MAIN = path.join(REPO, "mods", "down-the-stack", "main.js");
 export const DEFAULT_FIXTURES = path.join(REPO, "tools", "fixtures.mjs");
 export const DEFAULT_NOW = Date.UTC(2026, 10, 24, 9, 30, 0); // a fixed Tuesday morning (UTC)
 // Logical block heights (layouts/Down-the-Stack.json: stage 200, header 34, hud 26; overlays per §4).
 const ROLE_HEIGHT = { stage: 200, party: 520, nameplate: 34, hud: 26, sheet: 500, herd: 520 };
+// The stage's per-render budget (D§11.9.7, ARCHITECTURE §6.1, §7.4): every redraw of any copy
+// redraws the whole window, so a stage render over it is an error here (the mock only warns above
+// 400 elements, for every role). Animated: a node with a loop, transition, frames or spring.
+export const STAGE_BUDGET = { elements: 400, animated: 150 };
+const ANIMATED = new Set(["loop", "transition", "frames", "spring"]);
 
 const rel = (p) => path.relative(process.cwd(), p) || p;
 
@@ -214,7 +222,7 @@ async function applyWorld(h, role) {
       const hm = await h.import("./host.js");
       host = typeof hm.getHost === "function" ? hm.getHost() : null;
     } catch (e) {
-      if (role.world !== undefined) M.report("warning", "no-host", `role "${role.name}": world given but mods/mapledr/host.js could not be imported (${e.message})`, { copy: h.copy });
+      if (role.world !== undefined) M.report("warning", "no-host", `role "${role.name}": world given but mods/down-the-stack/host.js could not be imported (${e.message})`, { copy: h.copy });
     }
   }
   if (role.world !== undefined) {
@@ -231,6 +239,48 @@ async function applyWorld(h, role) {
   if (typeof role.setup === "function") await role.setup({ mod: h, host, mock: M });
 }
 
+/** Element and animated-node counts of a copy's last render. */
+export function renderCounts(h) {
+  let elements = 0;
+  let animated = 0;
+  if (h.live) {
+    M.walkLive(h.live, (n) => {
+      if (n.type === "text" || n.type === "view") return;
+      elements++;
+      if (n.methods.some((m) => ANIMATED.has(m[0]))) animated++;
+    });
+  }
+  return { elements, animated };
+}
+
+/**
+ * Check every render of a stage copy against STAGE_BUDGET (renders from timers included): an
+ * overflow is a "stage-budget" error on the copy (the first of each kind at each size). Returns the maxima.
+ */
+function watchStageBudget(h) {
+  const max = { elements: 0, animated: 0 };
+  const seen = new Set();
+  const fail = (key, msg) => { // the first overflow of each kind at each size
+    if (seen.has(key)) return;
+    seen.add(key);
+    M.report("error", "stage-budget", msg, { copy: h.copy });
+  };
+  const render = h.render.bind(h);
+  h.render = (...args) => {
+    const tree = render(...args);
+    if (tree) {
+      const c = renderCounts(h);
+      max.elements = Math.max(max.elements, c.elements);
+      max.animated = Math.max(max.animated, c.animated);
+      const size = h.size_ ? ` at ${h.size_.width}×${h.size_.height} window px` : "";
+      if (c.elements > STAGE_BUDGET.elements) fail(`el${size}`, `a stage render built ${c.elements} elements${size} (budget ${STAGE_BUDGET.elements}, D§11.9.7)`);
+      if (c.animated > STAGE_BUDGET.animated) fail(`an${size}`, `a stage render animates ${c.animated} nodes${size} (budget ${STAGE_BUDGET.animated}, D§11.9.7)`);
+    }
+    return tree;
+  };
+  return max;
+}
+
 /** One role through init, sizes × zooms, ticks and close. */
 export async function checkRole(main, role, { widths = [360, 960, 1600], zooms = [1, 2], ticks = 3, tickMs = 1000 } = {}) {
   M.resetState({ checking: false });
@@ -238,6 +288,7 @@ export async function checkRole(main, role, { widths = [360, 960, 1600], zooms =
   const nowMs = role.nowMs ?? role.fixture?.nowMs ?? DEFAULT_NOW;
   const h = await M.mountMod(main, { props: role.props ?? null, fixture: role.fixture ?? {}, nowMs });
   const result = { name: role.name, props: role.props ?? null, errors: [], warnings: [], renders: 0, maxRenderMs: 0, nodes: 0 };
+  const stageMax = role.props?.role === "stage" ? watchStageBudget(h) : null;
   const cursor = { e: 0, w: 0 };
   const take = (ctx) => {
     const { errs, warns } = collect(h, ctx, cursor);
@@ -284,6 +335,7 @@ export async function checkRole(main, role, { widths = [360, 960, 1600], zooms =
   result.renders = h.stats.renders;
   result.maxRenderMs = h.stats.maxRenderMs;
   result.nodes = h.stats.nodes;
+  if (stageMax) result.stage = stageMax;
   return result;
 }
 
@@ -343,7 +395,8 @@ export async function runCheck(opts = {}) {
       out.roles.push(r);
       out.errors.push(...r.errors.map((e) => ({ ...e, where: role.name })));
       out.warnings.push(...r.warnings.map((w) => ({ ...w, where: role.name })));
-      log(`  ${pad(role.name, 22)} ${r.errors.length ? "FAIL" : "PASS"}  renders ${pad(r.renders, 3)}  max ${pad(fmt(r.maxRenderMs), 8)}  nodes ${pad(r.nodes, 4)}  ${r.errors.length} errors, ${r.warnings.length} warnings`);
+      const budget = r.stage ? `  max ${r.stage.elements} el / ${r.stage.animated} animated` : "";
+      log(`  ${pad(role.name, 22)} ${r.errors.length ? "FAIL" : "PASS"}  renders ${pad(r.renders, 3)}  max ${pad(fmt(r.maxRenderMs), 8)}  nodes ${pad(r.nodes, 4)}  ${r.errors.length} errors, ${r.warnings.length} warnings${budget}`);
     }
   }
 

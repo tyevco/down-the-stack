@@ -83,8 +83,8 @@ export const gpuiWindow = {
 const localStorageObj = storage("local");
 const sessionStorageObj = storage("session");
 
-if (!globalThis.__mapledrMockGlobals) {
-  Object.defineProperty(globalThis, "__mapledrMockGlobals", { value: true });
+if (!globalThis.__downTheStackMockGlobals) {
+  Object.defineProperty(globalThis, "__downTheStackMockGlobals", { value: true });
   if (globalThis.window === undefined) globalThis.window = gpuiWindow;
   if (globalThis.localStorage === undefined) globalThis.localStorage = localStorageObj;
   if (globalThis.sessionStorage === undefined) globalThis.sessionStorage = sessionStorageObj;

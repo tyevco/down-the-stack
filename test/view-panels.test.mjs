@@ -17,15 +17,16 @@ import assert from "node:assert/strict";
 
 const M = await import("../tools/mock/index.mjs");
 const { View } = await import("gpui-kit");
-const V = await import("../mods/mapledr/game/view.js");
-const P = await import("../mods/mapledr/game/view/panels.js");
-const D = await import("../mods/mapledr/game/demo.js");
-const W = await import("../mods/mapledr/game/world.js");
-const I = await import("../mods/mapledr/game/items.js");
-const DATA = await import("../mods/mapledr/game/data.js");
-const F = await import("../mods/mapledr/game/formulas.js");
-const SheetMod = await import("../mods/mapledr/ui/sheet.js");
-const HerdMod = await import("../mods/mapledr/ui/herdpanel.js");
+const V = await import("../mods/down-the-stack/game/view.js");
+const P = await import("../mods/down-the-stack/game/view/panels.js");
+const D = await import("../mods/down-the-stack/game/demo.js");
+const W = await import("../mods/down-the-stack/game/world.js");
+const I = await import("../mods/down-the-stack/game/items.js");
+const DATA = await import("../mods/down-the-stack/game/data.js");
+const F = await import("../mods/down-the-stack/game/formulas.js");
+const Herd = await import("../mods/down-the-stack/game/herd.js");
+const SheetMod = await import("../mods/down-the-stack/ui/sheet.js");
+const HerdMod = await import("../mods/down-the-stack/ui/herdpanel.js");
 const S = await import("../tools/vm-samples/sheet.mjs");
 const H = await import("../tools/vm-samples/herd.mjs");
 
@@ -33,6 +34,7 @@ const NOW = Date.UTC(2026, 10, 24, 9, 30);
 const DAY = 86400000;
 const SHEET_TABS = ["gear", "skills", "stats", "career", "journal"];
 const HERD_TABS = ["upgrades", "stash", "tracker", "bosses", "roster", "digest", "settings"];
+const D_RARITY_COLORS = ["#A0A4AB", "#5BD16A", "#4EA3FF", "#B36BFF", "#FF9A2E", "#FF7AA8"];
 const FILTER = { slot: "all", minRar: 0, usable: false, sort: "score", focus: null, squash: [] };
 
 // ---------------------------------------------------------------------------------------------
@@ -313,7 +315,34 @@ async function mount(kind, world, { width = 760, zoom = 1, theme = "graphite", p
   return { m, host, role: m.view.role };
 }
 
-const errorsOf = (m) => m.errors.map((e) => `${e.code}: ${e.message}`);
+// herdr's render budget is wall-clock time, and the mock flags any render over it ("budget"). Under
+// load (parallel test files, a browser shooting previews) a slow render says nothing about the
+// code: load only adds time, waiting for a CPU. So a view the mock flagged is rendered again, each
+// render's cost taken as the lower of the mock's script time (its stopwatch, itself the lower of
+// wall and CPU time) and the process's CPU time for the whole render (no waiting; the mock's own
+// checks and GC threads are in it), and the best of 5 must fit. Every other validator error counts
+// as it is. (As in test/ui-chrome.test.mjs.)
+const isRenderBudget = (e) => e.code === "budget" && /^render took/.test(String(e.message));
+/** One render's cost (ms): min(the mock's script time, CPU time of the whole render). */
+function renderCost(m) {
+  const c0 = process.cpuUsage();
+  m.render();
+  const c = process.cpuUsage(c0);
+  return Math.min(m.stats.lastRenderMs, (c.user + c.system) / 1000);
+}
+function bestRenderMs(m, n = 5) {
+  let best = Infinity;
+  for (let k = 0; k < n; k++) best = Math.min(best, renderCost(m));
+  return best;
+}
+function errorsOf(m) {
+  const out = m.errors.filter((e) => !isRenderBudget(e)).map((e) => `${e.code}: ${e.message}`);
+  if (m.errors.some(isRenderBudget) && m.view) {
+    const best = bestRenderMs(m);
+    if (best > M.BUDGET.render) out.push(`budget: the best of 5 renders took ${best.toFixed(1)} ms (herdr's budget is ${M.BUDGET.render} ms)`);
+  }
+  return out;
+}
 function assertClean(m, label, budget = 500) {
   assert.ok(m.tree, `${label}: render failed: ${errorsOf(m).join("; ")}`);
   assert.deepEqual(errorsOf(m), [], label);
@@ -394,6 +423,195 @@ test("render: 30 heroes use slim roster rows (+ a capped Hall of Fame) and stay 
 });
 
 // ---------------------------------------------------------------------------------------------
+// layout in Chromium (tools/preview's HTML: herdr's renderer is not available here, the preview is
+// its stand-in, good for layout): what the person must see is in view at the dialog's own size
+
+/**
+ * Lays a mounted dialog out in Chromium and reports: `spills` (visible text, after clipping by its
+ * scrolling / clipping ancestors, that runs under the footer or out of the dialog), `cut` (text
+ * cut with an ellipsis, by its nearest id) and `buttons` (each asked id: in view without
+ * scrolling, i.e. whole inside every clipping ancestor and above the footer).
+ */
+async function layoutOf(page, m, { width = 760, height, theme = "graphite", buttons = [] } = {}) {
+  const { treeToHtml } = await import("../tools/preview/render.mjs");
+  const { resolveTheme } = await import("../tools/mock/theme.mjs");
+  await page.setViewportSize({ width, height });
+  await page.setContent(treeToHtml(m.tree, { width, height, zoom: 1, theme: resolveTheme(theme) }), { waitUntil: "load" });
+  await page.evaluate(() => document.fonts?.ready);
+  return page.evaluate((ids) => {
+    const root = document.querySelector('[data-id="sheet"],[data-id="herd"]');
+    const footer = document.querySelector('[data-id="sh-footer"],[data-id="hd-footer"]');
+    const rr = root.getBoundingClientRect();
+    const fr = footer.getBoundingClientRect();
+    const idOf = (el) => { for (let e = el; e; e = e.parentElement) if (e.dataset && e.dataset.id) return e.dataset.id; return "?"; };
+    const clip = (el) => {
+      const r = el.getBoundingClientRect();
+      let x0 = r.left, y0 = r.top, x1 = r.right, y1 = r.bottom;
+      for (let e = el.parentElement; e; e = e.parentElement) {
+        const cs = getComputedStyle(e);
+        if (cs.overflowX === "visible" && cs.overflowY === "visible") continue;
+        const p = e.getBoundingClientRect();
+        x0 = Math.max(x0, p.left); y0 = Math.max(y0, p.top); x1 = Math.min(x1, p.right); y1 = Math.min(y1, p.bottom);
+      }
+      return { r, x0, y0, x1, y1, empty: x1 - x0 < 1 || y1 - y0 < 1 };
+    };
+    const spills = [];
+    const cut = [];
+    for (const el of root.querySelectorAll("*")) {
+      const text = (el.textContent || "").trim();
+      if (getComputedStyle(el).textOverflow === "ellipsis" && el.scrollWidth > el.clientWidth && text) cut.push(`${idOf(el)}: ${text}`);
+      if (footer.contains(el) || ![...el.childNodes].some((n) => n.nodeType === 3 && n.textContent.trim())) continue;
+      const c = clip(el);
+      if (c.empty) continue;
+      if (c.y1 > fr.top + 0.5) spills.push(`${idOf(el)}: "${text.slice(0, 50)}" runs under the footer`);
+      else if (c.x1 > rr.right + 0.5 || c.y1 > rr.bottom + 0.5) spills.push(`${idOf(el)}: "${text.slice(0, 50)}" leaves the dialog`);
+    }
+    const shown = {};
+    for (const id of ids) {
+      const el = document.querySelector(`[data-id="${id}"]`);
+      if (!el) { shown[id] = null; continue; }
+      const c = clip(el);
+      shown[id] = { text: el.textContent.trim(), inView: !c.empty && c.y1 - c.y0 >= c.r.height - 0.5 && c.x1 - c.x0 >= c.r.width - 0.5 && c.r.bottom <= fr.top + 0.5 };
+    }
+    return { spills, cut, buttons: shown };
+  }, buttons);
+}
+
+test("layout: the career boss card's Retreat is in view at 760 × 500 during a fight (armed too); the Herd panel's fight banner too", async (t) => {
+  let pw;
+  try { pw = (await import("node:module")).createRequire(import.meta.url)("playwright"); } catch { return t.skip("playwright not installed"); }
+  const browser = await pw.chromium.launch();
+  try {
+    const page = await browser.newPage();
+    let checked = 0;
+    for (const kind of ["boss", "late"]) {
+      const world = D.demoWorld(kind, NOW).world;
+      const fight = world.rt.fights.find((f) => f.kind === "boss");
+      assert.ok(fight, `${kind}: a zone boss fight runs`);
+      for (const heroId of fight.heroIds) {
+        const { m, role } = await mount("sheet", world, { props: { heroId, tab: "career" } });
+        const boss = V.sheetView(world, { heroId, tab: "career", filter: FILTER }).career.boss;
+        if (!boss || !boss.fighting) continue; // a helper from another zone: its card is its own zone's
+        assert.equal(boss.challenge.cmd, "retreat");
+        for (const armed of [null, boss.challenge.key]) {
+          role.ui.armed = armed;
+          m.render();
+          assertClean(m, `${kind}/${heroId} career`);
+          const L = await layoutOf(page, m, { height: 500, buttons: ["sh-boss-go"] });
+          const b = L.buttons["sh-boss-go"];
+          assert.ok(b && b.inView, `${kind}/${heroId}${armed ? " armed" : ""}: Retreat in view (${JSON.stringify(b)})`);
+          assert.equal(b.text, armed ? "Retreat? (a Postmortem)" : "Retreat");
+          assert.deepEqual(L.spills, [], `${kind}/${heroId} career`);
+          // armed, the question takes the title row's room: the boss's name and status stay whole
+          assert.deepEqual(L.cut.filter((c) => c.startsWith("sh-boss")), [], `${kind}/${heroId}${armed ? " armed" : ""}: boss card lines whole`);
+          checked++;
+        }
+      }
+      // the Herd panel: the banner over the boss list, with and without the save band (D§13.4)
+      for (const save of [null, { readOnly: true, title: "Save is read-only", message: "This save is from a newer version of Down the Stack, so it was opened read-only." }]) {
+        const h = await mount("herd", world, { props: { tab: "bosses" } });
+        if (save) {
+          const view = h.host.view;
+          h.host.view = function (k, args) { return view.call(this, k, { ...args, save }); };
+          world.rt.version++;
+        }
+        for (const armed of [null, "retreat"]) {
+          h.role.ui.armed = armed;
+          h.m.render();
+          assertClean(h.m, `${kind} herd bosses`);
+          if (save) assert.ok(h.m.node("hd-save"), "the save band shows");
+          const L = await layoutOf(page, h.m, { height: 520, buttons: ["hd-retreat"] });
+          assert.ok(L.buttons["hd-retreat"]?.inView, `${kind} herd${save ? " + save band" : ""}${armed ? " armed" : ""}: Retreat in view`);
+          assert.deepEqual(L.spills, [], `${kind} herd bosses`);
+        }
+      }
+    }
+    assert.ok(checked >= 2 * 4, `fight participants checked: ${checked / 2}`);
+    // no fight: the card sits after the ladder; its Challenge / Fight again and the win estimate
+    // (D§11.13 "boss card with win estimate label and [Challenge]") share its title row, in view
+    // for every hero of every demo world, and for a Lv 33 hero whose zone door just opened
+    const door = D.demoWorld("mid", NOW).world;
+    door.state.herd.quota["3-3"] = DATA.TUNING.quotaPerMap;
+    door.state.herd.meter = Herd.sprintTarget(2);
+    door.rt.version++;
+    let cards = 0;
+    for (const [kind, world] of [["mid+door", door], ...D.DEMO_KINDS.map((k) => [k, D.demoWorld(k, NOW).world])]) {
+      for (const h of world.state.heroes) {
+        const boss = V.sheetView(world, { heroId: h.id, tab: "career", filter: FILTER }).career.boss;
+        if (!boss || boss.fighting || (!boss.challenge && !boss.estimate)) continue;
+        if (kind === "mid+door" && h.id === 1) assert.deepEqual([boss.status, boss.challenge?.label, boss.challenge?.enabled, Boolean(boss.estimate)], ["Door open", "Challenge", true, true]);
+        const { m } = await mount("sheet", world, { props: { heroId: h.id, tab: "career" } });
+        assertClean(m, `${kind}/${h.id} career`);
+        const want = [boss.challenge ? "sh-boss-go" : null, boss.estimate ? "sh-boss-est" : null].filter(Boolean);
+        const L = await layoutOf(page, m, { height: 500, buttons: want });
+        for (const id of want) assert.ok(L.buttons[id]?.inView, `${kind}/${h.id} (Lv ${h.L}): ${id} in view (${JSON.stringify(L.buttons[id])})`);
+        cards++;
+      }
+    }
+    t.diagnostic(`boss cards out of a fight checked: ${cards}`);
+    assert.ok(cards >= 10, `cards checked: ${cards}`);
+    // a career review (also a boss fight, in the hero's own slot): its Retreat on the ladder row
+    const rv = D.demoWorld("late", NOW).world;
+    const echo = rv.state.heroes.find((h) => h.id === 1);
+    echo.rev = [1, 0];
+    rv.rt.version++;
+    const rung = V.sheetView(rv, { heroId: 1, tab: "career", filter: FILTER }).career.ladder.find((l) => l.key === "staff");
+    assert.equal(W.command(rv, rung.review.challenge.cmd, rung.review.challenge.args, NOW).ok, true);
+    rv.rt.version++;
+    const { m: rm, role: rr } = await mount("sheet", rv, { props: { heroId: 1, tab: "career" } });
+    const running = V.sheetView(rv, { heroId: 1, tab: "career", filter: FILTER }).career.ladder.find((l) => l.key === "staff").review;
+    assert.equal(running.challenge.cmd, "retreat");
+    for (const armed of [null, running.challenge.key]) {
+      rr.ui.armed = armed;
+      rm.render();
+      assertClean(rm, `review${armed ? " armed" : ""}`);
+      const L = await layoutOf(page, rm, { height: 500, buttons: ["sh-rv-staff"] });
+      assert.ok(L.buttons["sh-rv-staff"]?.inView, `review${armed ? " armed" : ""}: Retreat in view`);
+      assert.deepEqual(L.spills, [], "review career");
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+test("layout: no tab of either dialog runs under its footer; skill effects, zone names and building effects stay whole", async (t) => {
+  let pw;
+  try { pw = (await import("node:module")).createRequire(import.meta.url)("playwright"); } catch { return t.skip("playwright not installed"); }
+  const browser = await pw.chromium.launch();
+  try {
+    const page = await browser.newPage();
+    // the sheets that once ran under the footer: an Intern (its SP note), a provisional class (its
+    // note), heroes in a fight (the note band), and a long-skilled Forkbinder / Rubberducker
+    const cases = [["first-day", [1]], ["mid", null], ["boss", null], ["late", [1, 12, 13]], ["blocked", [5]]];
+    for (const [kind, only] of cases) {
+      const world = D.demoWorld(kind, NOW).world;
+      const ids = only ?? world.state.heroes.map((h) => h.id);
+      for (const heroId of ids) {
+        const { m, role } = await mount("sheet", world, { props: { heroId, tab: "gear" } });
+        for (const tab of SHEET_TABS) {
+          role.ui.tab = tab;
+          m.render();
+          const L = await layoutOf(page, m, { height: 500 });
+          assert.deepEqual(L.spills, [], `sheet/${kind}/${heroId}/${tab}`);
+          if (tab === "skills") assert.deepEqual(L.cut.filter((c) => c.startsWith("sh-sk:")), [], `sheet/${kind}/${heroId}: skill cards whole`);
+        }
+      }
+      const h = await mount("herd", world, { props: { tab: "upgrades" } });
+      for (const tab of HERD_TABS) {
+        h.role.ui.tab = tab;
+        h.m.render();
+        const L = await layoutOf(page, h.m, { height: 520 });
+        assert.deepEqual(L.spills, [], `herd/${kind}/${tab}`);
+        if (tab === "upgrades") assert.deepEqual(L.cut.filter((c) => c.startsWith("hd-b:")), [], `herd/${kind}: building lines whole`);
+        if (tab === "tracker") assert.deepEqual(L.cut.filter((c) => c.startsWith("hd-z-")), [], `herd/${kind}: zone names whole`);
+      }
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
 // stability
 
 test("stability: ticking demo worlds keeps item, slot, row and boss ids (sheet gear, herd stash / bosses / tracker / roster)", async () => {
@@ -438,6 +656,45 @@ test("stability: ticking demo worlds keeps item, slot, row and boss ids (sheet g
       }
     }
   }
+});
+
+test("settings (D§11.15): loot glow, collapse the stage, and the autopilot master switch over its systems", () => {
+  const world = D.demoWorld("mid", NOW).world;
+  const rows = () => {
+    const st = V.herdView(world, { tab: "settings", filter: FILTER }).settings;
+    return Object.fromEntries(st.groups.flatMap((g) => g.rows.map((r) => [r.key, Object.assign({ group: g.key }, r)])));
+  };
+  let r = rows();
+  assert.equal(r.glow.group, "display");
+  assert.equal(r.glow.kind, "choice");
+  assert.equal(r.glow.value, 0, "every drop glows by default");
+  assert.deepEqual(r.glow.options.map((o) => o.label), ["All", "Alpha", "Beta", "Release", "LTS", "Keepsake"]);
+  assert.deepEqual(r.glow.options.map((o) => o.color), D_RARITY_COLORS);
+  assert.equal(r.glow.wide, true);
+  assert.equal(r.collapse.group, "display");
+  assert.equal(r.collapse.value, false, "off by default");
+  const auto = V.herdView(world, { tab: "settings", filter: FILTER }).settings.groups.find((g) => g.key === "autopilot").rows;
+  assert.equal(auto[0].key, "auto", "the master switch is the first row");
+  assert.equal(auto[0].setting, "auto");
+  assert.equal(auto[0].value, true);
+  assert.ok(auto.slice(1).every((x) => x.setting.startsWith("auto.") && !x.inactive));
+  // off: the systems keep their values and show as inactive
+  assert.equal(W.command(world, "setting", { key: "auto.farm", value: false }, NOW).ok, true);
+  assert.equal(W.command(world, "setting", { key: "auto", value: false }, NOW).ok, true);
+  assert.equal(W.command(world, "setting", { key: "glow", value: "lts" }, NOW).ok, true);
+  assert.equal(W.command(world, "setting", { key: "collapse", value: true }, NOW).ok, true);
+  r = rows();
+  assert.equal(r.auto.value, false);
+  for (const k of ["auto.equip", "auto.deprecate", "auto.learn", "auto.polish", "auto.buildings", "auto.maps", "auto.boss", "auto.farm", "auto.calls", "auto.career"]) {
+    assert.equal(r[k].inactive, true, k);
+    assert.match(r[k].tooltip, /Autopilot is off/);
+  }
+  assert.equal(r["auto.equip"].value, true, "kept for later");
+  assert.equal(r["auto.farm"].value, false);
+  assert.equal(r.glow.value, 4);
+  assert.equal(r.collapse.value, true);
+  // the Upgrades tab says autopilot buildings are off too
+  assert.match(V.herdView(world, { tab: "upgrades", filter: FILTER }).upgrades.note, /Auto buildings: off/);
 });
 
 test("memo: the same world version and args give the same VM; a tick or a command gives a fresh one", () => {
@@ -824,12 +1081,63 @@ test("rules: the career boss card offers Retreat while its zone boss fight runs 
     assert.equal(b.challenge.tone, "danger");
     assert.equal(b.challenge.confirm, "Retreat? (a Postmortem)");
     assert.equal(b.challenge.enabled, true);
+    assert.equal(b.fighting, true, "the card leads the Career tab while the fight is on");
     const r = W.command(world, b.challenge.cmd, b.challenge.args, NOW);
     assert.equal(r.ok, true, r.error);
     const after = V.sheetView(world, { heroId, tab: "career", filter: FILTER }).career.boss;
     assert.doesNotMatch(after.status, /^Fight/);
     assert.notEqual(after.challenge?.cmd, "retreat");
+    assert.equal(after.fighting, false, "back after the ladder");
   }
+  // no fight anywhere: every hero's card is in its place after the ladder
+  for (const kind of ["mid", "first-day", "blocked"]) {
+    const world = demo(kind);
+    for (const h of world.state.heroes) {
+      const b = V.sheetView(world, { heroId: h.id, tab: "career", filter: FILTER }).career.boss;
+      if (b) assert.equal(b.fighting, false, `${kind}/${h.id}`);
+    }
+  }
+});
+
+test("rules: a locked zone's tracker row says Locked (not 0 / 500); the empty roster says how a hero comes; the CI Forge line fits; a never-read digest has no \"last looked\"", () => {
+  const tr = V.herdView(demo("mid"), { tab: "tracker", filter: FILTER }).tracker;
+  for (const z of tr.zones) {
+    if (z.locked) assert.deepEqual(z.progress, { frac: 0, text: "Locked" }, z.key);
+    else assert.match(z.progress.text, /^[\d,]+ (\/ [\d,]+|· Fixed)$/, z.key);
+  }
+  assert.ok(tr.zones.some((z) => z.locked) && tr.zones.some((z) => !z.locked));
+  const empty = V.herdView(demo("empty"), { tab: "roster", filter: FILTER }).roster;
+  assert.deepEqual(empty.groups, []);
+  assert.equal(empty.emptyText, "No heroes yet. Start an agent to hire one: every coding agent becomes a Termling.");
+  assert.equal(typeof V.herdView(demo("mid"), { tab: "roster", filter: FILTER }).roster.emptyText, "string");
+  // the CI Forge: "Polish −N%" with what it unlocked, like the sample (the tooltip names the gold)
+  const forge = (kind) => V.herdView(demo(kind), { tab: "upgrades", filter: FILTER }).upgrades.buildings.find((b) => b.id === "ci_forge");
+  assert.match(forge("late").effect, /^Polish −\d+% · Squash · Reroll$/);
+  assert.match(forge("mid").effect, /^Polish −\d+%$/);
+  assert.match(forge("late").tooltip, /^Polish gold −4% per level/);
+  // an empty digest: "since you last looked" only once someone has
+  const d0 = V.herdView(demo("empty"), { tab: "digest", filter: FILTER }).digest;
+  assert.deepEqual([d0.since, d0.sections.length], ["Since the herd began", 0]);
+  assert.equal(d0.emptyText, "Nothing yet: levels, big drops, bosses and shipped tasks land here.");
+  const looked = D.demoWorld("mid", NOW).world;
+  assert.equal(W.command(looked, "digestSeen", {}, NOW).ok, true);
+  const d1 = V.herdView(looked, { tab: "digest", filter: FILTER, nowMs: NOW }).digest;
+  assert.match(d1.since, /^Since you last looked/);
+  assert.equal(d1.emptyText, "Nothing new since you last looked.");
+});
+
+test("rules: a running review's line starts with what is left (beside its Retreat, armed or not, the line is cut at its end)", () => {
+  const world = D.demoWorld("late", NOW).world;
+  world.state.heroes.find((h) => h.id === 1).rev = [1, 0];
+  world.rt.version++;
+  const rung = () => V.sheetView(world, { heroId: 1, tab: "career", filter: FILTER }).career.ladder.find((l) => l.key === "staff").review;
+  assert.equal(rung().challenge.cmd, "challenge");
+  assert.equal(W.command(world, "challenge", rung().challenge.args, NOW).ok, true);
+  world.rt.version++;
+  const r = rung();
+  assert.equal(r.status, "running");
+  assert.match(r.statusText, /^\d+% left against \S/);
+  assert.equal(r.challenge.cmd, "retreat");
 });
 
 test("rules: the Herd header gives the blocked count apart (waiting) so the panel can colour it", () => {
@@ -907,44 +1215,100 @@ test("samples: every sample item is one the engine could make (name, tier base, 
 // ---------------------------------------------------------------------------------------------
 // performance
 
-test("perf: view + render per call stays well inside the 50 ms render budget in V8 (QuickJS is ~30× slower)", async () => {
+// Bounds that hold under load (parallel test files, a browser shooting previews). Load only adds
+// time spent waiting for a CPU, so each figure is the lower of the wall clock and the process's
+// CPU time (which never counts waiting, but does count GC and compiler threads), taken as the best
+// of several batches after a warm-up; each batch averages a few runs, against timer granularity.
+// (The same recipe as test/view-chrome.test.mjs.)
+
+/** The best per-run cost (ms) of `batches` batches of `per` runs of fn, after one warm-up run. */
+function bestMs(fn, { batches = 7, per = 5 } = {}) {
+  fn();
+  let best = Infinity;
+  for (let b = 0; b < batches; b++) {
+    const c0 = process.cpuUsage();
+    const t0 = performance.now();
+    for (let k = 0; k < per; k++) fn();
+    const wall = performance.now() - t0;
+    const c = process.cpuUsage(c0);
+    best = Math.min(best, Math.min(wall, (c.user + c.system) / 1000) / per);
+  }
+  return best;
+}
+
+test("perf: bestMs and renderCost ignore time spent waiting for a CPU, never work done", async () => {
+  // busy until both this process's CPU time and the wall clock have run `ms`: no measure may come
+  // in under it. (The CPU time alone is not enough: it counts V8's helper threads too, whose time
+  // lands in steps, so it can pass `ms` before the loop has run that long; that made this flaky.)
+  const spin = (ms) => {
+    const c0 = process.cpuUsage();
+    const t0 = performance.now();
+    for (let c = { user: 0, system: 0 }; (c.user + c.system) / 1000 < ms || performance.now() - t0 < ms; c = process.cpuUsage(c0)) { /* busy */ }
+  };
+  const busy = bestMs(() => spin(4), { batches: 3, per: 2 });
+  assert.ok(busy >= 4 - 0.01, `CPU work counts: ${busy.toFixed(2)} ms per spin(4)`);
+  // a wait (another process holding the CPU looks the same from here: wall time, no CPU time);
+  // helper threads can add some CPU time to a window, so the best of a few windows is taken
+  const wait = (ms) => { const t = performance.now(); while (performance.now() - t < ms) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1); };
+  const idle = bestMs(() => wait(30), { batches: 4, per: 1 });
+  assert.ok(idle < 15, `waiting does not count: ${idle.toFixed(2)} ms per wait(30)`);
+  const world = demo("mid");
+  const { m, role } = await mount("sheet", world, { props: { heroId: world.state.heroes[0].id, tab: "career" } });
+  role.host.view = ((view) => function (kind, args) { wait(60); return view.call(this, kind, args); })(role.host.view);
+  world.rt.version++;
+  const waited = bestRenderMs(m, 3);
+  assert.ok(waited < M.BUDGET.render, `a render that only waited (60 ms) fits the budget: ${waited.toFixed(2)} ms`);
+  assert.deepEqual(errorsOf(m), [], "and no budget error is left (the mock's stopwatch, or errorsOf's best of 5)");
+});
+
+test("perf: view + render per call stays well inside the 50 ms render budget in V8 (QuickJS is ~30× slower)", async (t) => {
   const world = D.demoWorld("late", NOW).world;
   const heroId = world.state.heroes[0].id;
-  // cold views: memo and score caches reset by a new world version each time
+  // cold views: memo and the per-version index reset by a new world version each time, the card
+  // on another stash item each run
   const tabs = [["sheet", "gear"], ["sheet", "skills"], ["sheet", "career"], ["sheet", "stats"], ["herd", "stash"], ["herd", "bosses"], ["herd", "roster"], ["herd", "tracker"], ["herd", "digest"]];
-  const viewMs = {};
+  const stash = world.state.herd.stash;
+  const cold = [];
   for (const [k, tab] of tabs) {
-    const t0 = performance.now();
-    const n = 5;
-    for (let i = 0; i < n; i++) {
+    let i = 0;
+    const ms = bestMs(() => {
       world.rt.version++;
       P._resetPanelsMemo();
-      if (k === "sheet") V.sheetView(world, { heroId, tab, filter: { ...FILTER, focus: world.state.herd.stash[i].uid } });
-      else V.herdView(world, { tab, filter: { ...FILTER, focus: world.state.herd.stash[i].uid } });
-    }
-    viewMs[`${k}/${tab}`] = (performance.now() - t0) / n;
+      const filter = { ...FILTER, focus: stash[i++ % stash.length].uid };
+      if (k === "sheet") V.sheetView(world, { heroId, tab, filter });
+      else V.herdView(world, { tab, filter });
+    }, { batches: 5, per: 3 });
+    cold.push(`${k}/${tab} ${ms.toFixed(2)}`);
+    assert.ok(ms < 8, `${k}/${tab}: ${ms.toFixed(2)} ms per cold view (best batch)`);
   }
-  for (const [k, ms] of Object.entries(viewMs)) assert.ok(ms < 8, `${k}: ${ms.toFixed(2)} ms per cold view`);
-  // view + render through the role
-  const { m, role } = await mount("sheet", world, { props: { heroId, tab: "gear" }, ui: { selected: world.state.herd.stash[0].uid } });
+  t.diagnostic(`cold views (ms, best batch; bound 8): ${cold.join(", ")}`);
+  // view + render through the role: every tab, a fresh world version per render, each render's
+  // cost as renderCost() takes it, the best of 5; the worst tab must fit
   let worst = 0;
+  const { m, role } = await mount("sheet", world, { props: { heroId, tab: "gear" }, ui: { selected: stash[0].uid } });
   for (const tab of SHEET_TABS) {
     role.ui.tab = tab;
-    world.rt.version++;
-    const t0 = performance.now();
-    m.render();
-    worst = Math.max(worst, performance.now() - t0);
+    let best = Infinity;
+    for (let b = 0; b < 5; b++) {
+      world.rt.version++;
+      best = Math.min(best, renderCost(m));
+    }
+    worst = Math.max(worst, best);
     assertClean(m, `perf sheet/${tab}`);
   }
-  const h = await mount("herd", world, { ui: { selected: world.state.herd.stash[0].uid } });
+  const h = await mount("herd", world, { ui: { selected: stash[0].uid } });
   for (const tab of HERD_TABS) {
     h.role.ui.tab = tab;
-    world.rt.version++;
-    const t0 = performance.now();
-    h.m.render();
-    worst = Math.max(worst, performance.now() - t0);
+    let best = Infinity;
+    for (let b = 0; b < 5; b++) {
+      world.rt.version++;
+      best = Math.min(best, renderCost(h.m));
+    }
+    worst = Math.max(worst, best);
+    assertClean(h.m, `perf herd/${tab}`);
   }
-  assert.ok(worst < 40, `worst view + render ${worst.toFixed(1)} ms`);
+  t.diagnostic(`worst view + render: ${worst.toFixed(2)} ms (best of 5 per tab; bound 40)`);
+  assert.ok(worst < 40, `worst view + render ${worst.toFixed(1)} ms (best of 5 per tab)`);
 });
 
 test("rules: args.save (host.saveStatus()) becomes the Herd panel's save band (D§13.4); none while the save is fine", () => {
@@ -985,4 +1349,51 @@ test("rules: digest lines without a date read \"earlier\" (never Jan 1); first c
   assert.ok(at >= 0);
   const row = V.herdView(world, { tab: "bosses", filter: FILTER }).bosses.bosses.find((r) => r.key === DATA.BOSSES[at].id);
   assert.match(String(row.firstClear), /^First fixed \w+ \d+$/);
+});
+
+test("rules: the sheet names a terminal's work as the party does, never a bare program, shell or prompt title (quest line, Bind tooltips)", () => {
+  const world = D.demoWorld("mid", NOW).world;
+  const cast = world.rt.demo.cast.agents;
+  const t1 = cast.find((a) => a.address === "t1"); // Claude Code, working, "Fix flaky auth test"
+  const h1 = world.rt.bind.get("t1");
+  const quest = () => V.sheetView(world, { heroId: h1, tab: "gear", filter: FILTER }).header.quest;
+  advance(world, 1);
+  assert.equal(quest(), "Fix flaky auth test");
+  // the agent retitles itself after its program: the task's title still names the work
+  t1.titles = ["✳ claude"];
+  advance(world, 1);
+  assert.equal(quest(), "Fix flaky auth test");
+  // a task with no telling title (opened under its program's name): a pane name the person gave,
+  // else nothing (the old line printed the raw "✳ claude")
+  world.rt.live.get(h1).task.title = "";
+  t1.tabName = "1";
+  advance(world, 1);
+  assert.equal(quest(), null);
+  t1.paneName = "auth fixes";
+  advance(world, 1);
+  assert.equal(quest(), "auth fixes");
+  // the Career tab's Bind buttons on an off-duty hero name each live agent's work the same way
+  const t3 = cast.find((a) => a.address === "t3");
+  const h3 = world.rt.bind.get("t3");
+  Object.assign(t3, { plan: [["gone", 1e9]], phase: 0, left: 1e9, status: "gone" });
+  t1.paneName = null;
+  t1.tabName = "Claude Code"; // a tab named after its program tells nothing either
+  advance(world, 1);
+  const rebind = V.sheetView(world, { heroId: h3, tab: "career", filter: FILTER }).career.rebind;
+  assert.ok(rebind && rebind.options.length, "the off-duty hero can bind a live agent");
+  const tip = rebind.options.find((o) => o.args.address === "t1").tooltip;
+  assert.doesNotMatch(tip, /“/, tip);
+  assert.doesNotMatch(tip, /claude”/i, tip);
+  world.rt.live.get(h1).task.title = "Fix flaky auth test";
+  advance(world, 1);
+  const tip2 = V.sheetView(world, { heroId: h3, tab: "career", filter: FILTER }).career.rebind.options.find((o) => o.args.address === "t1").tooltip;
+  assert.match(tip2, /· “Fix flaky auth test” \(/, tip2);
+  // the digest's "Chests waiting" line quotes a chest's task, never a shell name an older save kept
+  const fd = D.demoWorld("first-day", NOW).world;
+  const hero = fd.state.heroes.find((h) => h.id === fd.rt.bind.get("t1"));
+  const waiting = () => V.herdView(fd, { tab: "digest", filter: FILTER }).digest.sections.find((x) => x.key === "chests").lines.find((l) => l.key === `c:${hero.id}`);
+  assert.equal(waiting().sub, "“Add retry to webhook sender”");
+  hero.pend[0].title = "zsh";
+  fd.rt.version++;
+  assert.equal(waiting().sub, null);
 });

@@ -746,5 +746,5 @@ this.inv = openOverlay({ mod: "<game>", kind: "window", frame: "none", key: "<ga
 ```js
 own(div().id(`hero-${a.address}`).cursor_pointer().on_click(() => run("agent.focus", { terminal: a.address })))
 // agent.focus shows nothing for a paneless terminal unless the layout has an `agent` block (§1.5):
-// mapledr uses pane.focus {terminal} when it has a pane, else terminal.peek (ui/party.js showTerminal)
+// Down the Stack uses pane.focus {terminal} when it has a pane, else terminal.peek (ui/party.js showTerminal)
 ```

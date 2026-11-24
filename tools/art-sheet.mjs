@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// tools/art-sheet.mjs: contact sheet of every generated asset (mods/mapledr/art + preview.svg),
+// tools/art-sheet.mjs: contact sheet of every generated asset (mods/down-the-stack/art + preview.svg),
 // on a light and a dark background, plus one stage mock per zone (sky bands, far tiles at 50%,
 // props, ground, the zone's mobs and boss) to judge the art in context.
 //
@@ -13,11 +13,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
-import { ZONES, MOBS, BOSSES, BACKLOG, CLASSES, RARITIES, ITEM_BASES } from "../mods/mapledr/game/data.js";
+import { ZONES, MOBS, BOSSES, BACKLOG, CLASSES, RARITIES, ITEM_BASES } from "../mods/down-the-stack/game/data.js";
 import { isMaskPath } from "./gen-art.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const MOD = path.join(ROOT, "mods/mapledr");
+const MOD = path.join(ROOT, "mods/down-the-stack");
 
 const args = process.argv.slice(2);
 const opt = (name, dflt) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : dflt; };

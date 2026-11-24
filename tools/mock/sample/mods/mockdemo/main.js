@@ -1,5 +1,5 @@
 // A tiny, valid herdr mod used by the mock's own tests and as a usage example.
-// It follows the mapledr rules: no host calls at top level, timers in init, hex colors only,
+// It follows the Down the Stack rules: no host calls at top level, timers in init, hex colors only,
 // sized images, filtered children, ids on animated elements.
 
 import { View, div, svg, image } from "gpui-kit";

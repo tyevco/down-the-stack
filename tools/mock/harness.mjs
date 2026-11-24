@@ -1,7 +1,7 @@
 // Lifecycle driver: mounts a mod (or a View class) the way herdr does, renders it, runs its timers
 // on the manual clock, fires handlers, and checks every finished tree.
 //
-//   const mod = await mountMod("mods/mapledr/main.js", { props: { role: "stage" }, fixture });
+//   const mod = await mountMod("mods/down-the-stack/main.js", { props: { role: "stage" }, fixture });
 //   const tree = mod.render();          // serialisable tree (null if render threw)
 //   mod.size(960, 210);                 // on_size_change on the root
 //   await mod.tick(1000);               // advance timers 1 s (re-renders if notified)
@@ -11,7 +11,7 @@
 import path from "node:path";
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
-import { S, als, report, setFixture, fixture, setChecking, setClock, flush, realDelay, deliver, clock, enterVm, leaveVm } from "./state.mjs";
+import { S, als, report, setFixture, fixture, setChecking, setClock, flush, realDelay, deliver, clock, enterVm, leaveVm, stopwatch } from "./state.mjs";
 import { assetRoots, setAssetRoot, resolveAsset } from "./config.mjs";
 import { NODE, isElement, textNode, serialize, Node } from "./elements.mjs";
 import { View, construct, makeCx, withPhase, advanceTimers } from "./view.mjs";
@@ -20,6 +20,9 @@ import "./globals.mjs";
 
 /**
  * herdr's budgets (ms), plus the mock's warning thresholds (renderWarn, moduleWarn, elements).
+ * Every timed callback (render, handler, timer, init, module evaluation) is measured with
+ * state.mjs `stopwatch()`: the lower of its wall time and the process's CPU time, so a machine
+ * busy with other work cannot push a callback over its budget, while real work still does.
  * Module evaluation runs inside the Task scope herdr opens around every load (plugin.rs
  * load_view_with_policy → ScopePhase::Task; scope.rs enter_application keeps that phase), and the
  * interrupt handler gives Task the event budget, 500 ms (sandbox.rs), not the 5 s "detached" one.
@@ -98,7 +101,8 @@ export class Mounted {
     this.live = null;
     this.tree = null;
     this.size_ = null;
-    this.stats = { renders: 0, lastRenderMs: 0, maxRenderMs: 0, nodes: 0, elements: 0, created: 0, evalMs: 0, initMs: 0 };
+    // lastRenderMs / maxRenderMs / evalMs / initMs: budget time (stopwatch); lastRenderWallMs: wall time
+    this.stats = { renders: 0, lastRenderMs: 0, lastRenderWallMs: 0, maxRenderMs: 0, nodes: 0, elements: 0, created: 0, evalMs: 0, initMs: 0 };
   }
 
   get view() { return this.copy.view; }
@@ -123,6 +127,7 @@ export class Mounted {
     let root = null;
     let failed = false;
     this._spent = 0;
+    this._wall = 0;
     try {
       const out = this._renderView(copy.view);
       root = this._root(out, "render()");
@@ -140,6 +145,7 @@ export class Mounted {
     copy.renderMs.push(ms);
     this.stats.renders++;
     this.stats.lastRenderMs = ms;
+    this.stats.lastRenderWallMs = this._wall;
     this.stats.maxRenderMs = Math.max(this.stats.maxRenderMs, ms);
     this.stats.created = S.render.created;
     if (ms > BUDGET.render) report("error", "budget", `render took ${ms.toFixed(1)} ms (herdr's budget is ${BUDGET.render} ms)`, { copy, phase: "render" });
@@ -158,12 +164,13 @@ export class Mounted {
 
   _renderView(view) {
     const { cx, scope } = makeCx(this.copy, "render");
-    const t0 = performance.now();
+    const sw = stopwatch();
     try {
       return als.run(this.copy, () => withPhase("render", () => view.render(cx)));
     } finally {
       scope.live = false;
-      this._spent = (this._spent ?? 0) + performance.now() - t0;
+      this._spent = (this._spent ?? 0) + sw.ms();
+      this._wall = (this._wall ?? 0) + sw.wall();
     }
   }
 
@@ -311,7 +318,7 @@ export class Mounted {
   _callHandler(fn, evt, key) {
     const copy = this.copy;
     const { cx, scope } = makeCx(copy, "event");
-    const t0 = performance.now();
+    const sw = stopwatch();
     try {
       const r = als.run(copy, () => withPhase("event", () => fn(evt, cx)));
       if (r && typeof r.then === "function") r.catch((e) => recordThrow(copy, e, `event ${key}`));
@@ -321,7 +328,7 @@ export class Mounted {
     } finally {
       scope.live = false;
     }
-    const ms = performance.now() - t0;
+    const ms = sw.ms();
     if (ms > BUDGET.event) report("error", "budget", `${key} handler took ${ms.toFixed(1)} ms (budget ${BUDGET.event} ms)`, { copy });
     return scope.stopped;
   }
@@ -383,6 +390,8 @@ export class Mounted {
       try {
         const r = als.run(copy, () => withPhase("event", () => view.close(cx)));
         if (r && typeof r.then === "function") {
+          // Not load-sensitive: the mock's host calls settle as promise jobs, which all run before
+          // a timer can fire, so only a close() that waits on something that never comes times out.
           const timedOut = await Promise.race([r.then(() => false), realDelay(BUDGET.close).then(() => true)]);
           if (timedOut) report("error", "budget", `close() took longer than ${BUDGET.close} ms`, { copy });
         }
@@ -471,7 +480,7 @@ async function loadInto(handle, abs, graph) {
   const url = pathToFileURL(abs).href + (graph != null ? `?mockgen=${graph}` : "");
   S.lastCopy = copy;
   S.evaluating = true;
-  const t0 = performance.now();
+  const sw = stopwatch();
   let mod;
   try {
     mod = await import(url);
@@ -481,7 +490,7 @@ async function loadInto(handle, abs, graph) {
   } finally {
     S.evaluating = false;
   }
-  handle.stats.evalMs = performance.now() - t0;
+  handle.stats.evalMs = sw.ms();
   // (Node caches a graph's modules: only the copy that evaluated it measures real work.)
   if (handle.stats.evalMs > BUDGET.module) report("error", "budget", `module evaluation took ${handle.stats.evalMs.toFixed(0)} ms (herdr's budget is ${BUDGET.module} ms: it runs inside the load's Task scope)`, { copy });
   else if (handle.stats.evalMs > BUDGET.moduleWarn) report("warning", "slow-module", `module evaluation took ${handle.stats.evalMs.toFixed(0)} ms under V8; QuickJS interprets several times slower and herdr's budget is ${BUDGET.module} ms`, { copy });
@@ -504,7 +513,7 @@ async function instantiate(handle, Class) {
     return false;
   }
   const { cx } = makeCx(copy, "async");
-  const t0 = performance.now();
+  const sw = stopwatch();
   try {
     // herdr passes `undefined` as a root view's init props; mods read props() instead.
     const r = typeof view.init === "function" ? als.run(copy, () => withPhase("event", () => view.init(undefined, cx))) : undefined;
@@ -514,7 +523,7 @@ async function instantiate(handle, Class) {
     copy.view = null;
     return false;
   }
-  handle.stats.initMs = performance.now() - t0;
+  handle.stats.initMs = sw.ms();
   if (handle.stats.initMs > BUDGET.init) report("error", "budget", `init took ${handle.stats.initMs.toFixed(1)} ms (budget ${BUDGET.init} ms)`, { copy });
   copy.view = view;
   copy.dirty = true;
@@ -558,10 +567,10 @@ export async function mountMod(mainPath, opts = {}) {
   return handle;
 }
 
-/** Mount a View class directly (no file). opts as mountMod, plus name (default "mapledr"). */
+/** Mount a View class directly (no file). opts as mountMod, plus name (default "down-the-stack"). */
 export async function mountView(Class, opts = {}) {
   prepare(opts);
-  const modName = opts.name ?? "mapledr";
+  const modName = opts.name ?? "down-the-stack";
   const props = S.checking ? null : opts.props !== undefined ? opts.props : fixture().props ?? null;
   const copy = newCopy({ modName, props, label: opts.label });
   const handle = new Mounted(copy, opts);

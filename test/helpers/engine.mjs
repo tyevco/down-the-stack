@@ -15,13 +15,13 @@
 //   space ("s1"), kit ("ref" | "none", default "ref"), rev ([L>=30, L>=60] as 0|1), ranks ("auto"
 //   | array of 7), live ({...Live overrides}), hero ({...Hero overrides}), order (slot order)}.
 
-import { newState } from "../../mods/mapledr/game/save.js";
-import { newHero, autoRanks, stats } from "../../mods/mapledr/game/heroes.js";
-import { baseIdFor } from "../../mods/mapledr/game/items.js";
-import { CLASSES, CLASS_IDX, RARITIES, AFFIX_IDX, TUNING as T } from "../../mods/mapledr/game/data.js";
-import { itemTier, iRef } from "../../mods/mapledr/game/formulas.js";
-import * as Combat from "../../mods/mapledr/game/combat.js";
-import * as Boss from "../../mods/mapledr/game/boss.js";
+import { newState } from "../../mods/down-the-stack/game/save.js";
+import { newHero, autoRanks, stats } from "../../mods/down-the-stack/game/heroes.js";
+import { baseIdFor } from "../../mods/down-the-stack/game/items.js";
+import { CLASSES, CLASS_IDX, RARITIES, AFFIX_IDX, TUNING as T } from "../../mods/down-the-stack/game/data.js";
+import { itemTier, iRef } from "../../mods/down-the-stack/game/formulas.js";
+import * as Combat from "../../mods/down-the-stack/game/combat.js";
+import * as Boss from "../../mods/down-the-stack/game/boss.js";
 
 export const T0 = 1_790_000_000_000; // a fixed epoch for tests (2026)
 

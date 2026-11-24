@@ -541,9 +541,12 @@ export function unpackFight(world, s) {
 }
 
 /**
- * Resumes the suspended fight in herd.fight once one of its participants is Questing again (or
- * with the given heroIds). Participants that left the roster drop out; Questing heroes standing in
- * the zone may rejoin. Returns the fight (pushed on rt.fights) or null.
+ * Resumes the suspended fight in herd.fight once one of its participants works in the fight's zone
+ * again (D§9.5), or with the given heroIds (a Challenge: any of them Questing). Participants that
+ * left the roster drop out, and so does one now Questing in another zone (a pinned map elsewhere is
+ * never pulled in). Answer-calls helpers joined from anywhere, so a saved helper Questing anywhere
+ * counts (repeat-kill fights are mostly helpers). Questing heroes standing in the zone may take the
+ * empty seats, then helpers. Returns the fight (pushed on rt.fights) or null.
  */
 export function resumeFight(world, ev, heroIds) {
   const { state, rt } = world;
@@ -551,17 +554,36 @@ export function resumeFight(world, ev, heroIds) {
   if (!s || bossFightRunning(world)) return null;
   const fight = unpackFight(world, s);
   if (!fight) { state.herd.fight = null; return null; }
-  const want = heroIds && heroIds.length ? heroIds : fight.heroIds;
+  const explicit = !!(heroIds && heroIds.length);
+  const want = explicit ? heroIds : fight.heroIds;
   let ids = want.filter((id) => findHero(world, id) && !fightOf(world, id));
-  const questing = ids.some((id) => questingNow(rt.live.get(id)));
-  if (!questing && !(heroIds && heroIds.length)) {
+  const inZone = (id) => {
+    const live = rt.live.get(id);
+    return questingNow(live) && zoneOf(heroMapId(findHero(world, id), live)) === fight.zone;
+  };
+  const helpers = new Set(fight.helpers);
+  const wakes = (id) => inZone(id) || (helpers.has(id) && questingNow(rt.live.get(id)));
+  if (!explicit) {
+    ids = ids.filter((id) => !questingNow(rt.live.get(id)) || wakes(id));
+    fight.helpers = fight.helpers.filter((id) => ids.indexOf(id) >= 0);
+  }
+  let p = null;
+  if (!explicit && !ids.some(wakes)) {
     // anyone else working in the zone takes the empty seats
-    const p = participants(world, fight.kind, fight.kind === "backlog" ? fight.floor : fight.bossIdx);
-    for (const id of p.heroIds) if (ids.indexOf(id) < 0 && ids.length < B.maxParticipants) ids.push(id);
+    p = participants(world, fight.kind, fight.kind === "backlog" ? fight.floor : fight.bossIdx);
+    for (const id of p.heroIds) if (ids.indexOf(id) < 0 && ids.length < B.maxParticipants && inZone(id)) ids.push(id);
   }
   ids = ids.filter((id) => findHero(world, id));
-  const any = ids.some((id) => questingNow(rt.live.get(id)));
+  const any = explicit ? ids.some((id) => questingNow(rt.live.get(id))) : ids.some(wakes);
   if (!any) return null;
+  // the fight is back: Answer-calls helpers may fill what is left (D§9.5)
+  if (p) {
+    for (const id of p.helpers) {
+      if (ids.indexOf(id) >= 0 || ids.length >= B.maxParticipants) continue;
+      ids.push(id);
+      fight.helpers.push(id);
+    }
+  }
   fight.heroIds = ids;
   for (const id of ids) refillCoffee(world, findHero(world, id));
   rt.fights.push(fight);
@@ -1430,6 +1452,7 @@ function winFight(world, fight, ev) {
   delete (herd.lessons || {})[String(idx)];
   if (first) {
     herd.boss[idx] = 1; // trophy: +1% damage and max HP for everyone (heroes.stats)
+    Herd.noteFirstClear(state, idx, nowMs(world));
     const next = BOSSES[idx].zone + 1;
     if (next >= ZONES.length) {
       herd.zone = Math.max(herd.zone || 0, BACKLOG_ZONE);

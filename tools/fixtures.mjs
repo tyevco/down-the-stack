@@ -200,6 +200,33 @@ export const roles = [
   onDemo("herd-roster", "late", { role: "herd", overlay: "o2", tab: "roster" }, DIALOG),
   onDemo("herd-digest", "mid", { role: "herd", overlay: "o2", tab: "digest" }, DIALOG),
   onDemo("herd-settings", "calm", { role: "herd", overlay: "o2", tab: "settings" }, DIALOG),
+
+  // save trouble the player is told about (host.saveStatus → args.save, the stage's notice;
+  // D§13.1, D§13.4): a newer version's save (read-only), a restore from save.bak, and a
+  // save.json that cannot be read (so nothing is saved)
+  onDemo("stage-save-readonly", "mid", { role: "stage" }, { setup: saveTrouble("readonly") }),
+  onDemo("stage-save-notsaving", "mid", { role: "stage" }, { setup: saveTrouble("unreadable") }),
+  onDemo("herd-save-readonly", "mid", { role: "herd", overlay: "o2", tab: "upgrades" }, { ...DIALOG, setup: saveTrouble("readonly") }),
+  onDemo("herd-save-restored", "mid", { role: "herd", overlay: "o2", tab: "roster" }, { ...DIALOG, setup: saveTrouble("restored") }),
+  onDemo("hud-save-unreadable", "mid", { role: "hud" }, { widths: [960], setup: saveTrouble("unreadable") }),
 ];
+
+/** A role setup that puts the host's save into one kind of trouble (see host.saveStatus()). */
+function saveTrouble(kind) {
+  return ({ host }) => {
+    if (!host || !host.world) return;
+    if (kind === "readonly") {
+      host.world.rt.readOnly = true;
+      host.stats.warning = "Save is from a newer version (v2); opened read-only";
+    } else if (kind === "restored") {
+      host.stats.loadedFrom = "bak";
+    } else if (kind === "unreadable") {
+      host.ioBlocked = true;
+      host.stats.loadedFrom = "bak";
+      host.lastSaveMs = Date.now(); // the next re-read is 30 s away, after the check
+    }
+    host.version++;
+  };
+}
 
 export default roles;

@@ -8,7 +8,7 @@ import * as F from "../mods/mapledr/game/formulas.js";
 import * as Hr from "../mods/mapledr/game/heroes.js";
 import * as I from "../mods/mapledr/game/items.js";
 import * as H from "../mods/mapledr/game/herd.js";
-import { newState } from "../mods/mapledr/game/save.js";
+import { newState, encodeState, saveSize } from "../mods/mapledr/game/save.js";
 
 const T0 = 1_790_000_000_000;
 
@@ -46,12 +46,79 @@ describe("gold and Snippets", () => {
     assert.equal(H.addSnippets(state, -20), 0);
   });
 
-  test("journal keeps the newest 60 lines", () => {
+  test("journal keeps the newest 120 lines (balance: D§13.3 says 60)", () => {
     const { state } = mkWorld();
-    for (let i = 0; i < 75; i++) H.journal(state, "ship", 1, `t${i}`, i, T0 + i);
-    assert.equal(state.herd.log.length, 60);
+    assert.equal(H.LOG_MAX, 120);
+    for (let i = 0; i < 135; i++) H.journal(state, "ship", 1, `t${i}`, i, T0 + i);
+    assert.equal(state.herd.log.length, 120);
     assert.deepEqual(state.herd.log[0], [T0 + 15, "ship", 1, "t15", 15]);
-    assert.deepEqual(state.herd.log[59], [T0 + 74, "ship", 1, "t74", 74]);
+    assert.deepEqual(state.herd.log[119], [T0 + 134, "ship", 1, "t134", 134]);
+  });
+
+  test("the journal tapers to D§13.3's 60 lines past 20 heroes, so the 30-hero worst case fits 30 KB", (t) => {
+    const { state } = mkWorld();
+    const lens = [];
+    for (const n of [1, 20, 21, 25, 30, 40]) {
+      while (state.heroes.length < n) addHero(state, 50, 1 + (state.heroes.length % 5));
+      lens.push(H.logMax(state));
+    }
+    assert.deepEqual(lens, [120, 120, 114, 90, 60, 60]);
+    // a herd that grows trims its journal at the next line
+    const { state: s2 } = mkWorld();
+    for (let i = 0; i < 130; i++) H.journal(s2, "ship", 1, `t${i}`, i, T0 + i);
+    assert.equal(s2.herd.log.length, 120);
+    while (s2.heroes.length < 30) addHero(s2, 50, 1);
+    H.journal(s2, "hire", 30, "Newcomer", 0, T0 + 999);
+    assert.equal(s2.herd.log.length, 60);
+    assert.deepEqual(s2.herd.log[59], [T0 + 999, "hire", 30, "Newcomer", 0]);
+    // D§13.3's worst case at the taper's corners (as test/save.test.mjs builds it): heroes in full
+    // Release gear with busy counters, 140 stash items, a full journal of 40-character lines
+    const worst = (n) => {
+      const { state: s } = mkWorld({ gold: 412350.25, snip: 133, zone: 2, meter: 7.4, bank: 1.5, seals: 218.6, rel: 17, day: 20781, tick: 8812345 });
+      Object.assign(s.herd, {
+        bld: [3, 2, 1, 2, 2, 0], quota: { "1-1": 40, "1-2": 40, "1-3": 40, "2-1": 40, "2-3": 12, "3-1": 31 },
+        boss: [1, 1, 0, 0, 0, 0, 0, 0, 0], bossKills: [14, 3, 0, 0, 0, 0, 0, 0, 0], wounds: { 2: [0.38, T0 + 172800000] },
+        lessons: { 2: 1 }, bt: [5210, 980, 0, 0, 0, 0, 0, 0, 0], badges: ["hello_world", "first_commit", "zero_warnings", "lucky_duck"],
+        fame: [["Bram Lintwick", 1, 54, T0 - 2000000]], backlog: { floor: 3, kills: 17 }, digestAt: T0 - 10000000,
+      });
+      const holder = { rng: 777 };
+      for (let i = 0; i < 140; i++) s.herd.stash.push(I.rollItem(holder, { ilvl: 20 + (i % 80), source: "boss", state: s, first: true }));
+      for (let k = 0; k < n; k++) {
+        const h = addHero(s, 14 + k * 3, 1 + (k % 5), {
+          xp: 1290.5, sp: [8, 4, 1, 0, 0, 0, 0], rev: [k % 2, 0], fe: 42.5, shift: { day: 20781, min: 192.25 }, hpFrac: 0.92,
+          pinMap: k === 0 ? "2-2" : null, addr: `t${k}`, lastPane: "main", lastTab: "api", spFree: 1,
+        });
+        h.st = { kills: 51234, tasks: 312, seals: 288.4, wh: 41.5, dodges: 12, healed: 300 };
+        h.cd.unblockedUntil = 120;
+        h.cd.unblockedCdUntil = 8812000;
+        h.cd.boss = {};
+        for (let b = 0; b < 9; b++) h.cd.boss[b] = 149400 - 4000 * b;
+        for (let t = 0; t < 20; t++) Hr.recordTask(h, { minutes: 4 + t * 3, blocks: t % 2, spawned: t % 7 === 0 });
+        h.pend = [{ min: 37.25, fmin: 0.75, title: "Refactor the session store adapter (#2)", at: T0 + 12345, sealFactor: 0.75 }];
+        for (let si = 0; si < 6; si++) {
+          const it = I.rollItem(h, { ilvl: h.L, source: "boss", slot: D.SLOTS[si], classId: h.cls, state: s, first: true });
+          it.pol = Math.min(3, k);
+          it.flags = 0;
+          h.eq[si] = it;
+        }
+      }
+      for (let b = 0; b < D.BOSSES.length; b++) H.noteFirstClear(s, b, T0 + b * 86400000);
+      for (let i = 0; i < 200; i++) H.journal(s, "ship", 1 + (i % 3), `Fix flaky auth test number ${i} in api/`, 2.4, T0 + i * 1000);
+      return s;
+    };
+    for (const n of [20, 25, 30]) {
+      const s = worst(n);
+      assert.equal(s.herd.log.length, H.logMax(s));
+      const size = saveSize(encodeState(s));
+      assert.ok(size.ok, `${n} heroes, ${s.herd.log.length} journal lines: ${size.bytes} B`);
+      t.diagnostic(`${n} heroes, ${s.herd.log.length} journal lines: ${size.bytes} B`);
+    }
+    // what the taper prevents: 120 lines with 30 heroes are over the budget
+    const s30 = worst(30);
+    while (s30.herd.log.length < H.LOG_MAX) s30.herd.log.unshift(s30.herd.log[0].slice());
+    const flat = saveSize(encodeState(s30));
+    t.diagnostic(`30 heroes, ${H.LOG_MAX} journal lines: ${flat.bytes} B`);
+    assert.equal(flat.ok, false);
   });
 });
 
@@ -362,6 +429,56 @@ describe("Hall of Fame (D§3.4, D§10.7)", () => {
 });
 
 describe("digest (D§10.7)", () => {
+  test("never read: one line per kill, an old save's bare-name line matched, rolled-out lines dated by the first clear or left undated", () => {
+    // digestAt 0 (never marked read); The Ignored Warning killed twice: its first kill's line was
+    // journaled with the bare name (older saves), the repeat rolled out; The Pyramid of Doom's
+    // only line rolled out too
+    const { state } = mkWorld();
+    state.herd.boss[0] = state.herd.boss[1] = 1;
+    state.herd.bossKills[0] = 2;
+    state.herd.bossKills[1] = 1;
+    H.journal(state, "boss", 0, D.BOSSES[0].name, 0, T0 + 500);
+    assert.equal(H.noteFirstClear(state, 1, T0 + 9000), true);
+    assert.equal(H.noteFirstClear(state, 1, T0 + 99000), false, "set once");
+    assert.equal(H.firstClearMs(state, 1), T0 + 9000);
+    assert.equal(H.firstClearMs(state, 2), null);
+    const d = H.digest(state);
+    const lines = d.bosses.map((b) => [b.text, b.at]);
+    assert.deepEqual(lines.slice().sort((a, b) => String(a[0]).localeCompare(String(b[0]))), [
+      [`${D.BOSSES[0].name} FIXED`, null],
+      [`${D.BOSSES[0].name} fixed again`, T0 + 500],
+      [`${D.BOSSES[1].name} FIXED`, T0 + 9000],
+    ].sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
+    assert.ok(d.bosses.every((b) => b.at !== 0), "never the epoch (a 'Jan 1' line)");
+    // once read, undated lines fall back to the read time
+    H.digestMark(state, T0 + 1000);
+    state.herd.bossKills[0] = 3;
+    const d2 = H.digest(state);
+    assert.deepEqual(d2.bosses.map((b) => [b.text, b.at]), [[`${D.BOSSES[0].name} fixed again`, T0 + 1000]]);
+  });
+
+  test("never read: kills whose lines rolled out sort after the dated first clear and before the journal's kills", () => {
+    // The Pyramid of Doom: four kills; the first clear is dated (herd.bossAt), the newest kill is
+    // still in the journal, the two between rolled out (the view lists them newest first)
+    const { state } = mkWorld();
+    const name = D.BOSSES[1].name;
+    state.herd.boss[1] = 1;
+    state.herd.bossKills[1] = 4;
+    H.noteFirstClear(state, 1, T0 + 1000);
+    H.journal(state, "boss", 0, `${name} fixed again`, 1, T0 + 90000);
+    const d = H.digest(state);
+    assert.deepEqual(d.bosses.map((b) => [b.text, b.at]), [
+      [`${name} FIXED`, T0 + 1000],
+      [`${name} fixed again`, null],
+      [`${name} fixed again`, null],
+      [`${name} fixed again`, T0 + 90000],
+    ]);
+    // nothing dated at all: still the first clear first
+    state.herd.bossAt = [];
+    state.herd.log = [];
+    assert.deepEqual(H.digest(state).bosses.map((b) => b.text), [`${name} FIXED`, `${name} fixed again`, `${name} fixed again`, `${name} fixed again`]);
+  });
+
   test("levels, drops, bosses and chests since digestAt", () => {
     const { state } = mkWorld({ digestAt: T0 + 100 });
     const h = addHero(state, 5);
@@ -391,8 +508,8 @@ describe("digest (D§10.7)", () => {
     assert.deepEqual(state.herd.digestSnap.lv, { [a.id]: 10, [b.id]: 20 });
     assert.equal(state.herd.digestAt, T0 + 100);
     assert.equal(H.digest(state).empty, true);
-    // a long night: two heroes level, a boss falls twice, 9 Release drops, Seals, a badge; then 60+
-    // journal lines of noise push all of it out of the 60-line journal
+    // a long night: two heroes level, a boss falls twice, 9 Release drops, Seals, a badge; then 120+
+    // journal lines of noise push all of it out of the 120-line journal
     a.L = 14;
     b.L = 21;
     const c = addHero(state, 3); // hired since: counts from Lv 1
@@ -402,7 +519,7 @@ describe("digest (D§10.7)", () => {
     state.herd.seals = 12.5;
     state.herd.badges.push("hello_world");
     H.journal(state, "drop", a.id, "Linted Pipe", 3, T0 + 300);
-    for (let i = 0; i < 70; i++) H.journal(state, "deprecate", null, "noise", 1, T0 + 400 + i);
+    for (let i = 0; i < 130; i++) H.journal(state, "deprecate", null, "noise", 1, T0 + 400 + i);
     const d = H.digest(state);
     assert.deepEqual(d.levels.map((l) => [l.heroId, l.from, l.level]).sort((x, y) => x[0] - y[0]),
       [[a.id, 10, 14], [b.id, 20, 21], [c.id, 1, 3]]);
@@ -437,4 +554,24 @@ describe("digest (D§10.7)", () => {
     assert.equal(ev.fxs[0].kind, "pillar");
     assert.equal(ev.majors, 1);
   });
+});
+
+test("items.js journal lines (stash-full deprecations) keep the same journal length as herd.js (logMax), not 60", async () => {
+  const I = await import("../mods/mapledr/game/items.js");
+  const D = await import("../mods/mapledr/game/demo.js");
+  const { world } = D.demoWorld("late", Date.UTC(2026, 10, 24, 9, 30));
+  const s = world.state;
+  while (s.herd.log.length < H.logMax(s)) s.herd.log.unshift(s.herd.log[0].slice());
+  const before = s.herd.log.length;
+  assert.equal(before, H.logMax(s));
+  assert.ok(before > 60, `${s.heroes.length} heroes keep ${before} lines`);
+  // fill the stash, then offer more junk: items.js journals "Stash full: deprecated ..."
+  let n = 0;
+  for (let i = 0; i < 400 && n === 0; i++) {
+    const it = I.rollItem(s.heroes[0], { ilvl: 90, source: "chest", slot: "hat", classId: s.heroes[0].cls, rar: 4, state: s });
+    I.stashPut(s, it);
+    n = s.herd.log.filter((e) => e[1] === "deprecate").length;
+  }
+  assert.ok(n > 0, "a deprecation was journalled");
+  assert.equal(s.herd.log.length, H.logMax(s), "the journal kept its length");
 });

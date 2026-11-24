@@ -1,0 +1,8 @@
+tools/qjs/shims/sandbox.js
+    WITHHOLD_DYNAMIC_CODE, FREEZE_BUILTINS and ABSENT_GLOBALS copied from herdr-app 0.1.17,
+    vendor/gpui-kit/crates/shell/src/engine/quickjs/sandbox.rs.
+    Copyright 2024 - 2026 Longbridge <https://longbridge.com>.
+    Licensed under the Apache License, Version 2.0 (tools/mock/LICENSE-APACHE-2.0).
+
+The QuickJS-ng engine itself is not in this repository: `npm install` fetches it
+(quickjs-emscripten and @jitl/quickjs-ng-wasmfile-release-sync, MIT).

@@ -86,7 +86,7 @@ const base = (heroId, tab, header, o = {}) => ({
 
 const KIP = 1;
 const kipHeader = {
-  name: "Kip the Idempotent", level: "Lv 34", title: "Senior Refactorer", tag: null,
+  name: "Kip the Idempotent", level: "Lv 34", title: "Senior Refactorer", tag: null, tagTip: null, tagTab: null,
   sub: "herdr-app · Claude Code · fighting 4-1 Fast-Forward Ford", quest: "Fix flaky auth test",
   status: "working",
   hp: { frac: 0.82, text: "1,402 / 1,710" },
@@ -343,7 +343,7 @@ function kipJournal() {
 
 const RUE = 2;
 const rueHeader = {
-  name: "Rue Two-Spaces", level: "Lv 31", title: "Junior Hotfixer", tag: null,
+  name: "Rue Two-Spaces", level: "Lv 31", title: "Junior Hotfixer", tag: null, tagTip: null, tagTab: null,
   sub: "herdr-app · Codex · fighting 3-3 The Unparsed Gate", quest: "Speed up the test runner",
   status: "blocked",
   hp: { frac: 1, text: "1,021 / 1,021" },
@@ -366,7 +366,7 @@ function rueCareer() {
       enabled: o.enabled ?? true, cost: o.current ? null : "775 Snippets", confirm: o.current ? null : `Change to ${label} for 775 Snippets?`,
       tooltip: o.tooltip ?? (o.current ? "Rue's class" : `Career change to ${label}: refunds every skill point`),
     }),
-    clsId: id, current: !!o.current, recommended: !!o.recommended, color: CLS[id],
+    clsId: id, current: !!o.current, recommended: !!o.recommended, color: CLS[id], lock: false,
   });
   const map = (id, name, o = {}) => ({
     ...action(`map:${id}`, id, "pinMap", { heroId: RUE, mapId: id }, { enabled: o.enabled ?? true, tooltip: `${id} ${name}${o.levels ? ` (Lv ${o.levels})` : ""}` }),
@@ -419,7 +419,7 @@ function rueCareer() {
 
 const NIB = 21;
 const nibHeader = {
-  name: "Nib the Linted", level: "Lv 3", title: "Intern", tag: null,
+  name: "Nib the Linted", level: "Lv 3", title: "Intern", tag: null, tagTip: null, tagTab: null,
   sub: "mapledr · Claude Code · fighting 1-1 Squiggle Path", quest: "Set up the project",
   status: "working",
   hp: { frac: 0.9, text: "62 / 69" },
@@ -465,7 +465,7 @@ function nibGear(f = {}) {
 
 const ADA = 3;
 const adaHeader = {
-  name: "Ada Null-Safe", level: "Lv 100", title: "Principal Shellmancer", tag: null,
+  name: "Ada Null-Safe", level: "Lv 100", title: "Principal Shellmancer", tag: null, tagTip: null, tagTab: null,
   sub: "billing-service · Gemini CLI · Backlog floor 31", quest: "Migrate invoices to the new ledger",
   status: "working",
   hp: { frac: 0.64, text: "118,402 / 185,006" },
@@ -583,7 +583,7 @@ function adaSkills() {
 
 const JUNO = 7;
 const junoHeader = {
-  name: "Juno of the Green Build", level: "Lv 47", title: "Senior Rubberducker", tag: "off duty",
+  name: "Juno of the Green Build", level: "Lv 47", title: "Senior Rubberducker", tag: "off duty", tagTip: null, tagTab: null,
   sub: "docs-site · Claude Code · last seen Nov 21", quest: null,
   status: "off",
   hp: { frac: 1, text: "2,904 / 2,904" },
@@ -631,6 +631,51 @@ function junoCareer() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Pip the Unmerged: Lv 14 Junior Hotfixer with a provisional class (the header tag opens Career,
+// whose current class chip locks it) while the zone boss fight runs (the boss card: Retreat)
+
+const PIP = 5;
+const PIP_PROV = "Provisional class (9 of 15 tasks): Pip's behaviour can still switch it. Lock it with its class chip on the Career tab.";
+const pipHeader = {
+  ...rueHeader,
+  name: "Pip the Unmerged", level: "Lv 14", title: "Junior Hotfixer", tag: "provisional", tagTip: PIP_PROV, tagTab: "career",
+  sub: "herdr-app · Codex · fighting The Pyramid of Doom", quest: "Untangle the retry callbacks", status: "working",
+  power: { text: "PL 15", tooltip: "Power Level 15 = Lv 14 + gear 1" },
+  focus: { pane: "p5", address: "t5" },
+};
+
+function pipCareer() {
+  const c = rueCareer();
+  const cls = (id, label) => {
+    const current = id === "hotfixer";
+    return {
+      ...action(`cls:${id}`, label, "setClass", { heroId: PIP, cls: id }, current
+        ? { confirm: "Lock Hotfixer?", tooltip: "Lock Hotfixer now (free). Provisional class (9 of 15 tasks): until then behaviour can still switch it." }
+        : { tooltip: `Switch to ${label} for free (locks it)` }),
+      clsId: id, current, recommended: current, color: CLS[id], lock: current,
+    };
+  };
+  return {
+    ...c,
+    ladder: c.ladder.map((l) => (l.key === "senior" ? { ...l, review: { name: "Senior Review", status: "locked", statusText: "At Lv 30", estimate: null, challenge: null } } : l)),
+    signature: { text: "median task 3 min · 0.4 blocks/h · 0% with sub-agents", recommended: "Hotfixer", state: "Provisional (9 of 15 tasks)", tasks: "9 tasks on record" },
+    classes: {
+      note: "Any class, free, before Lv 20 (this also locks it).",
+      options: [cls("refactorer", "Refactorer"), cls("hotfixer", "Hotfixer"), cls("shellmancer", "Shellmancer"), cls("forkbinder", "Forkbinder"), cls("rubberducker", "Rubberducker")],
+    },
+    map: { ...c.map, zones: c.map.zones.slice(0, 2).map((z) => ({ ...z, maps: z.maps.map((m) => ({ ...m, args: { heroId: PIP, mapId: m.args.mapId }, on: m.label === "2-3" })) })),
+      current: "Stay here: 2-3 Pyramid Steps (Lv 20–22)", auto: action("map:auto", "Auto", "pinMap", { heroId: PIP, mapId: null }, { tooltip: "Let autopilot pick the deepest map Pip outfights" }) },
+    boss: {
+      name: "The Pyramid of Doom", zone: "Callback Caverns · Lv 23", status: "Fighting: 81% left", estimate: null,
+      challenge: action("retreat:boss:1", "Retreat", "retreat", {}, { tone: "danger", confirm: "Retreat? (a Postmortem)", tooltip: "End the fight as a Postmortem: Wounds and Lessons are kept" }),
+    },
+    identity: { name: "Pip the Unmerged", hint: "Renaming is free. Badges unlock extra epithets." },
+    retire: action("retire", "Retire", "retire", { heroId: PIP }, { enabled: false, tooltip: "Retiring opens at Lv 30" }),
+    rebind: null,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
 
 const kipVm = (tab, f = {}) => {
   const vm = base(KIP, tab, kipHeader, { badges: { skills: "1" } });
@@ -666,6 +711,10 @@ export const scenarios = {
   principal: { ...base(ADA, "gear", adaHeader), gear: adaGear({ focus: 2101 }) },
   /** Lv 100 Principal skills: everything unlocked, auto-learn off, calm mode. */
   principalSkills: { ...base(ADA, "skills", adaHeader, { calm: true }), skills: adaSkills() },
+  /** A provisional class (the header tag links to Career, the class chip locks it) during a zone boss fight (Retreat). */
+  provisional: { ...base(PIP, "career", pipHeader), career: pipCareer() },
+  /** The same hero on the Gear tab: the "provisional" tag is a link to Career. */
+  provisionalGear: { ...base(PIP, "gear", pipHeader), gear: kipGear() },
   /** An off-duty (benched) hero: Career with Rebind, no Focus button. */
   benched: { ...base(JUNO, "career", junoHeader, { note: { text: "Off duty since Nov 21 · Fresh Eyes keeps building · pending chests wait", color: C.idle } }), career: junoCareer() },
 };
@@ -696,7 +745,7 @@ export function viewFor(name, args = {}) {
   if (tab === "gear") out.gear = vm.heroId === ADA ? adaGear(f) : vm.heroId === NIB ? nibGear(f) : kipGear(f);
   else if (tab === "skills") out.skills = vm.heroId === ADA ? adaSkills() : kipSkills();
   else if (tab === "stats") out.stats = kipStats();
-  else if (tab === "career") out.career = vm.heroId === JUNO ? junoCareer() : rueCareer();
+  else if (tab === "career") out.career = vm.heroId === JUNO ? junoCareer() : vm.heroId === PIP ? pipCareer() : rueCareer();
   else if (tab === "journal") out.journal = kipJournal();
   return out;
 }

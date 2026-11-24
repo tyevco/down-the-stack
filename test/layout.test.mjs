@@ -1,4 +1,4 @@
-// The layout (layouts/mapledr.json), the mod manifest (mods/mapledr/mod.json) and the suggested
+// The layout (layouts/Down-the-Stack.json), the mod manifest (mods/mapledr/mod.json) and the suggested
 // keys (keys.example.json), checked against herdr 0.1.17's own rules:
 //   - layout schema: src/layout.rs (Node, Content, PaneFrame, Header, Background, Size, Look);
 //     colors: settings.rs (`#rrggbb[aa]` or a theme name; unknown names paint magenta);
@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const HERDR = process.env.HERDR_SRC ?? path.resolve(REPO, "..", "herdrdev", "herdr-app");
-const LAYOUT_FILE = path.join(REPO, "layouts", "mapledr.json");
+const LAYOUT_FILE = path.join(REPO, "layouts", "Down-the-Stack.json");
 const MOD_DIR = path.join(REPO, "mods", "mapledr");
 
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
@@ -289,10 +289,25 @@ const parentOf = (id, node = layout) => {
 const within = (ancestorId, id) => Boolean(byId(id, byId(ancestorId) ?? {}));
 const mainFrame = () => byId("main").content.pane;
 
-describe("layouts/mapledr.json", () => {
+describe("layouts/Down-the-Stack.json", () => {
   test("parses, and the layout name is one layout.switch accepts", () => {
     assert.ok(isObj(layout));
     assert.match(path.basename(LAYOUT_FILE, ".json"), /^[A-Za-z0-9_-]+$/);
+  });
+
+  test("herdr shows the file name as the layout's title: it names the game, never the codename", () => {
+    // herdr has no display title for a layout: the palette builds `Layout: ${Cap(name)}`
+    // (defaults/frame/palette/main.js:154-157), Settings and the macOS View > Layout menu show the
+    // raw name (settings/main.js:316 `LOOKS[name] ?? name`, src/macos.rs:66-69).
+    const files = fs.readdirSync(path.join(REPO, "layouts")).filter((f) => f.endsWith(".json"));
+    assert.deepEqual(files, ["Down-the-Stack.json"]);
+    for (const f of files) {
+      const name = f.slice(0, -".json".length);
+      const title = `Layout: ${name.charAt(0).toUpperCase()}${name.slice(1)}`;
+      assert.doesNotMatch(name, /maple/i, `${f}: Settings would show "${name}"`);
+      assert.doesNotMatch(title, /maple/i);
+      assert.match(title, /Down-the-Stack/);
+    }
   });
 
   test("matches herdr's layout schema (types, content, sizes, colors, root-only keys)", () => {
@@ -338,6 +353,11 @@ describe("layouts/mapledr.json", () => {
       assert.match(v, HEX);
     }
     assert.equal(layout.theme, undefined, "no theme: the person's light/dark theme keeps driving herdr's chrome");
+    // herdr's status colours stay herdr's (ux-glance-1): a layout colour beats the person's own
+    // override (settings.rs:585-586 `colors.extend(look.colors)`) and is one value for light and
+    // dark themes alike (the game's #F2A93B / #FFD447 are under 3:1 on the paper chrome), so
+    // tabs, spaces and the status bar keep the person's working/blocked/done colours.
+    for (const k of ["working", "blocked", "done", "idle", "unknown", "accent", "foreground", "background"]) assert.ok(!(k in colors), `${k} is the person's`);
     // D§11.1 / D§14.8 reserved meaning colours, exactly.
     const reserved = { mdr_working: "#4CC38A", mdr_blocked: "#F2A93B", mdr_done: "#FFD447", mdr_idle: "#8A8F98",
       mdr_xp: "#7FE9F5", mdr_fresh_eyes: "#A9B8FF", mdr_hp: "#FF5A5F", mdr_bubble: "#FFFFFF", mdr_bubble_ink: "#1B1B1F" };
@@ -503,13 +523,18 @@ describe("mods/mapledr/mod.json", () => {
     }
   });
 
-  test("offers the sheet, the Herd panel, calm mode and the layout", () => {
+  test("offers the sheet, the Herd panel and calm mode", () => {
     const entries = Object.fromEntries(manifest.palette.map((p) => [p.title, [p.command, p.args ?? {}]]));
     assert.deepEqual(entries["Down the Stack: character sheet"], ["mapledr.sheet", {}]);
     assert.deepEqual(entries["Down the Stack: Herd panel"], ["mapledr.herd", {}]);
     assert.deepEqual(entries["Down the Stack: calm mode"], ["mapledr.calm", {}]);
-    assert.deepEqual(entries["Down the Stack: switch to layout"], ["layout.switch", { name: "mapledr" }]);
-    assert.ok(fs.existsSync(path.join(REPO, "layouts", "mapledr.json")));
+  });
+
+  test("no entry duplicates one herdr's palette builds itself (herdr drops those silently)", () => {
+    // palette/main.js:154-157 adds `layout.switch {name}` for every installed layout, and :173-180
+    // skips a mod entry whose (command, args) is already there: a mod entry switching to this
+    // layout would never show.
+    for (const p of manifest.palette) assert.notEqual(p.command, "layout.switch", `${p.title}: herdr already lists every layout`);
   });
 });
 

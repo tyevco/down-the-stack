@@ -28,12 +28,14 @@
 //     right of the hero; behind a fighting hero), lane mobs 0.52/0.70/0.88w (0.58/0.84w if
 //     w < 180).
 //
-// Memory (per world, in a WeakMap; nothing here changes the engine): the last VM per
-// (rt.version, rt.tick, size, settings); the overflow fold set (hysteresis); recently seen mob
-// positions (a mob killed this tick is gone from its lane, but its poof, coin and fade-out need
-// the spot where it stood); the last chest spot per hero (a chest that just opened shows its lid
-// for a tick); boss fights seen running (a won or lost fight leaves rt.fights at once, but its
-// FIXED stamp or Postmortem card stays on stage for 3 ticks).
+// Memory (per world, in a WeakMap; nothing here changes the engine): the last VM per (rt.version,
+// rt.tick, size, settings). Per strip width (up to 3 widths, so two stage copies of different
+// widths keep their own): the overflow fold set (hysteresis); recently seen mob positions (a mob
+// killed this tick is gone from its lane, but its poof, coin, fade-out and a Holo Rubber Duck's
+// Duck Chest need the spot where it stood); the last chest spot per hero (a chest that just opened
+// shows its lid for a tick). Per world: boss fights and reviews seen running (a won or lost fight
+// leaves rt.fights at once, but its FIXED stamp, Postmortem card or Promotion banner stays on
+// stage for 3 ticks) and boss win estimates.
 //
 // Pure: no herdr/gpui imports, no Date.now, no Math.random. QuickJS-safe (ES2020).
 
@@ -46,7 +48,7 @@ import { careerOf } from "../heroes.js";
 import { chestInfo } from "../agents.js";
 import { freshEyesCapMin, doorOpen, sprintTarget, mapUnlocked } from "../herd.js";
 import { heroMapId, findHero } from "../combat.js";
-import { estimate as bossEstimate } from "../boss.js";
+import { estimate as bossEstimate, canChallenge } from "../boss.js";
 // One Termling look and one D§2.9 "why" line for every role: the chrome views own these helpers
 // (the sidebar, nameplate and sheet draw the same hero with the same title bar and tooltip).
 import { termlingColors as colorsFor, programIconOf as iconOf, whyLine } from "./chrome.js";
@@ -172,14 +174,33 @@ export function whyText(why) {
 // ---------------------------------------------------------------------------------------------
 
 const MEMO = new WeakMap();
+const WIDTH_MEMOS = 3; // strip widths remembered per world (the least recently built one goes)
 
 function memoOf(world) {
   let m = MEMO.get(world);
   if (!m) {
-    m = { key: null, vm: null, fold: null, mobs: new Map(), chests: new Map(), fights: new Map(), est: new Map() };
+    m = { key: null, vm: null, byW: new Map(), fights: new Map(), reviews: new Map(), est: new Map() };
     MEMO.set(world, m);
   }
   return m;
+}
+
+/**
+ * The memory of one strip width: its fold set (hysteresis), mob and chest spots. Spots
+ * are positions on a strip of that width, so each width keeps its own: two stage copies of
+ * different widths (a stage opened as a pane or tab beside the layout's) would otherwise wipe each
+ * other's every tick. A new width (a resize) starts empty; old widths age out.
+ */
+function widthMemo(memo, W) {
+  let w = memo.byW.get(W);
+  if (w) {
+    memo.byW.delete(W); // most recently used last
+  } else {
+    w = { fold: null, mobs: new Map(), chests: new Map() };
+  }
+  memo.byW.set(W, w);
+  while (memo.byW.size > WIDTH_MEMOS) memo.byW.delete(memo.byW.keys().next().value);
+  return w;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -203,7 +224,8 @@ export function stageView(world, args = {}) {
   const memo = memoOf(world);
   const key = `${rt.version}|${rt.tick}|${W}|${H}|${cfg.calm ? 1 : 0}|${cfg.nums || "all"}`;
   if (memo.key === key && memo.vm) return memo.vm;
-  const vm = build(world, memo, W, H);
+  // (host.view memoises per args, so two copies of different widths still build once a version)
+  const vm = build(world, memo, widthMemo(memo, W), W, H);
   memo.key = key;
   memo.vm = vm;
   return vm;
@@ -236,15 +258,8 @@ function noAgents(state) {
 // Build
 // ---------------------------------------------------------------------------------------------
 
-function build(world, memo, W, H) {
+function build(world, memo, wm, W, H) {
   const { state, rt } = world;
-  // remembered mob and chest spots are positions on a strip of this width: a resize drops them
-  // (a dying mob or an opened chest would otherwise be drawn where it stood on the old strip)
-  if (memo.w !== W) {
-    memo.mobs.clear();
-    memo.chests.clear();
-    memo.w = W;
-  }
   const herd = state.herd;
   const cfg = herd.cfg || {};
   const tick = rt.tick;
@@ -272,15 +287,27 @@ function build(world, memo, W, H) {
   }
   const byId = new Map(ents.map((e) => [e.id, e]));
 
-  // fights: the running boss fight (or one that just ended), reviews per hero
+  // fights: the running boss fight (or one that just ended), reviews per hero (running, or one
+  // that just ended: its Promotion banner or Postmortem card stays in the slot for 3 ticks)
   const fight = pickFight(world, memo, tick);
   const reviews = new Map();
   for (const f of rt.fights) if (f.kind === "review" && f.heroIds.length) reviews.set(f.heroIds[0], f);
+  const reviewEnds = pickReviewEnds(memo, rt, tick);
+  // nameplate labels: first names, with an epithet initial where two live heroes share one
+  const plates = plateLabels(ents);
+  // fighters: participants still in the fight (D§9.5: blocked ones hold, crashed ones rejoin; done
+  // and idle ones have walked out and go home, as the party row and nameplate say); all of them
+  // while the arena closes
   const fighters = new Set();
-  if (fight) for (const id of fight.f.heroIds) if (byId.has(id)) fighters.add(id);
+  if (fight) {
+    for (const id of fight.f.heroIds) {
+      const e = byId.get(id);
+      if (e && (fight.ended || FIGHT_STATES[e.state])) fighters.add(id);
+    }
+  }
 
   // slots, arena, overflow
-  const L = layoutStrip(memo, W, ents, fight, fighters, tick);
+  const L = layoutStrip(wm, W, ents, fight, fighters, tick);
 
   // per-tick fx lookups (crit faces, hit mobs, dying mobs)
   const fxs = [];
@@ -298,7 +325,7 @@ function build(world, memo, W, H) {
     if (f.kind === "poof" && f.mobUid != null) poofNow.add(f.mobUid);
   }
 
-  const ctx = { world, state, rt, herd, tick, calm, nums, W, H, memo, critNow, hitNow, poofNow, byId, fight, reviews };
+  const ctx = { world, state, rt, herd, tick, calm, nums, W, H, memo, wm, critNow, hitNow, poofNow, byId, fight, reviews, reviewEnds, plates };
   const heroes = [];
   const mobs = [];
   const chests = [];
@@ -339,17 +366,19 @@ function build(world, memo, W, H) {
   // dying mobs (killed this tick: gone from their lane, faded out where they stood)
   for (const uid of poofNow) {
     if (mobPos.has(uid)) continue;
-    const old = memo.mobs.get(`mob:${uid}`);
+    const old = wm.mobs.get(`mob:${uid}`);
     if (!old || !old.vm || tick - old.tick > 1) continue;
     const m = Object.assign({}, old.vm, { dying: true, engaged: false, pacing: false, hit: false, showHp: false, pending: false, waiting: false });
     mobs.push(m);
     mobPos.set(uid, old.pos);
   }
-  rememberMobs(memo, mobs, mobPos, tick);
+  rememberMobs(wm, mobs, mobPos, tick);
 
   // chests that opened this tick show their lid for a tick
   openedChests(ctx, chests, chestPos, heroPos, fxs);
-  rememberChests(memo, chests, tick);
+  rememberChests(wm, chests, tick);
+  // a Holo Rubber Duck's kill: its Duck Chest pops where it stood (D§9.7, D§11.8)
+  duckChests(ctx, chests, heroPos, fxs);
 
   const rooms = buildRooms(ctx, L, fight);
   const fx = buildFx(ctx, fxs, heroPos, mobPos, chestPos, boss);
@@ -385,6 +414,29 @@ function pickFight(world, memo, tick) {
   if (running) return { f: running, ended: false };
   if (ended) return { f: ended, ended: true };
   return null;
+}
+
+/**
+ * Reviews that ended ≤ 3 ticks ago, by hero id (memo: a won or lost review leaves rt.fights at
+ * once). Reviews called off (a restart, nobody Questing) end without a result and show nothing.
+ */
+function pickReviewEnds(memo, rt, tick) {
+  const running = new Set();
+  for (const f of rt.fights) {
+    if (f.kind !== "review" || !f.heroIds.length) continue;
+    running.add(f);
+    memo.reviews.set(f.key, f);
+  }
+  const out = new Map();
+  for (const [key, f] of memo.reviews) {
+    if (running.has(f)) continue;
+    const done = (f.result === "won" || f.result === "lost") && Number.isFinite(f.endTick) && tick - f.endTick <= ENDED_TICKS && tick >= f.endTick;
+    if (!done) { memo.reviews.delete(key); continue; }
+    const id = f.heroIds[0];
+    const prev = out.get(id);
+    if (!prev || f.endTick > prev.endTick) out.set(id, f);
+  }
+  return out;
 }
 
 /** Pixel needs of an arena: fighters ≥ 56 px apart, room for adds, the boss and its parts. */
@@ -439,7 +491,7 @@ function widths(W, n, shape, chipW) {
 /** The camp chip is 150 px (D§11.3.4); on a narrow strip it shrinks so a slot still fits. */
 const chipWidth = (W) => (W >= 600 ? CHIP_W : 96);
 
-function layoutStrip(memo, W, ents, fight, fighters, tick) {
+function layoutStrip(wm, W, ents, fight, fighters, tick) {
   const shape = fight ? arenaShape(fight.f) : null;
   const homeless = new Set(); // participants whose home slot is dropped (narrow strips)
   let folded = new Set();
@@ -456,7 +508,7 @@ function layoutStrip(memo, W, ents, fight, fighters, tick) {
     // 2. fold into the camp chip (hysteresis: foldSet)
     const cands = ents.filter((e) => !homeless.has(e.id));
     const cw = chipWidth(W);
-    folded = foldSet(memo, W, cands, fighters, shape, tick, cw);
+    folded = foldSet(wm, W, cands, fighters, shape, tick, cw);
     if (folded.size) {
       chipW = cw;
       n = cands.length - folded.size;
@@ -492,9 +544,9 @@ const foldKey = (e, fighters) => (protectedHero(e, fighters) ? 10 + PROTECT_RANK
  * The overflow fold set with D§11.3.4 hysteresis: recomputed on membership or size changes, every
  * 30 ticks, or at once when a folded hero became protected (newly blocked, focused, a chest...).
  */
-function foldSet(memo, W, cands, fighters, shape, tick, chipW) {
+function foldSet(wm, W, cands, fighters, shape, tick, chipW) {
   const sig = `${W}|${shape ? shape.need : 0}|${cands.map((e) => e.id).join(",")}`;
-  const prev = memo.fold;
+  const prev = wm.fold;
   if (prev && prev.sig === sig && tick - prev.tick < FOLD_TICKS && tick >= prev.tick) {
     let ok = true;
     for (const e of cands) if (prev.set.has(e.id) && foldKey(e, fighters) > prev.keys.get(e.id)) { ok = false; break; }
@@ -518,7 +570,7 @@ function foldSet(memo, W, cands, fighters, shape, tick, chipW) {
   const set = new Set(order.slice(0, nFold).map((e) => e.id));
   const keys = new Map();
   for (const e of cands) if (set.has(e.id)) keys.set(e.id, foldKey(e, fighters));
-  memo.fold = { sig, tick, set, keys };
+  wm.fold = { sig, tick, set, keys };
   return set;
 }
 
@@ -647,12 +699,12 @@ function heroVM(ctx, e, o) {
   const { tick, state } = ctx;
   const clsId = (CLASSES[hero.cls] || CLASSES[0]).id;
   const career = careerOf(hero);
-  const first = String(hero.name || "").split(" ")[0] || "Hero";
+  const label = ctx.plates.get(e.id) || firstName(hero.name);
   const plateMax = Math.round(o.plateMax);
   const plateW = (t) => Math.round(t.length * 5.7 + 14);
-  let plateText = `${first} ${hero.L}`;
+  let plateText = `${label} ${hero.L}`;
   // a crowded arena (narrow strip, fighters < 56 px apart): names only, plates no wider than the gap
-  if (o.inArena && plateW(plateText) > plateMax) plateText = first;
+  if (o.inArena && plateW(plateText) > plateMax) plateText = label;
   const pw = clamp(plateW(plateText), Math.min(44, plateMax), plateMax);
   const crit = st === "questing" && ctx.critNow.has(e.id);
   const hpFrac = frac(live.hp, live.maxHp);
@@ -706,8 +758,61 @@ function heroVM(ctx, e, o) {
     nameplate: { x: r1(o.x), y: PLATE_Y, w: pw, text: plateText, hpFrac: r2(hpFrac) },
     slot: o.slot,
     rebootFrac,
+    reviewEnd: o.inArena ? null : reviewEndVM(ctx, e, career),
   };
   return vm;
+}
+
+const firstName = (name) => String(name || "").split(" ")[0] || "Hero";
+const NAME_GLUE = /^(the|of|a|an|and|de|von|van)$/i;
+
+/**
+ * Nameplate labels per hero id (D§3.3 names hash 64 first names per seat, so two live heroes often
+ * share one): the first name, or for a shared one the first name and the initial of its epithet
+ * ("Ivo S." for "Ivo of Small Commits", "Ivo O." for "Ivo Off-By-One"); initials of every epithet
+ * word when those still collide, then the hero id.
+ */
+function plateLabels(ents) {
+  const out = new Map();
+  const groups = new Map();
+  for (const e of ents) {
+    const first = firstName(e.hero.name);
+    out.set(e.id, first);
+    if (!groups.has(first)) groups.set(first, []);
+    groups.get(first).push(e);
+  }
+  for (const [first, list] of groups) {
+    if (list.length < 2) continue;
+    const words = (e) => String(e.hero.name || "").split(/\s+/).slice(1).filter((w) => w && !NAME_GLUE.test(w));
+    const initial = (w) => (w.match(/[A-Za-z0-9]/) || [""])[0].toUpperCase();
+    const ways = [
+      (e) => { const ws = words(e); return ws.length ? `${initial(ws[0])}.` : ""; },
+      (e) => { const ws = words(e).flatMap((w) => w.split("-")).filter(Boolean); return ws.length ? `${ws.map(initial).join("")}.` : ""; },
+      (e) => `#${e.id}`,
+    ];
+    for (const way of ways) {
+      const tags = list.map(way);
+      if (tags.every(Boolean) && new Set(tags).size === tags.length) {
+        list.forEach((e, i) => out.set(e.id, `${first} ${tags[i]}`));
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * A review that ended ≤ 3 ticks ago, in the hero's own slot (D§11.8): won, the Promotion banner
+ * ("PROMOTED" over the new career title, with confetti); lost, the Postmortem card. age 0 = about
+ * to show, 1-2 shown, 3 = going (as BossVM.banner).
+ */
+function reviewEndVM(ctx, e, career) {
+  const f = ctx.reviewEnds.get(e.id);
+  if (!f) return null;
+  const age = Math.max(0, ctx.tick - f.endTick);
+  if (f.result === "won") return { key: `${f.key}:end`, kind: "promoted", text: "PROMOTED", sub: career.title, age };
+  const pm = postmortemText(ctx.state, f);
+  return { key: `${f.key}:end`, kind: "postmortem", text: pm.title, sub: pm.sub, age };
 }
 
 function heroTooltip(ctx, e, career, inArena) {
@@ -787,18 +892,18 @@ function mobPosOf(mv) {
   return { x: mv.x, top: GROUND - size, showHp: mv.showHp, size, mid: GROUND - size / 2 };
 }
 
-function rememberMobs(memo, mobs, mobPos, tick) {
+function rememberMobs(wm, mobs, mobPos, tick) {
   for (const m of mobs) {
     const uid = m.key.slice(4);
     const pos = mobPos.get(Number(uid)) || mobPos.get(uid);
     if (!pos) continue;
-    const prev = memo.mobs.get(m.key);
+    const prev = wm.mobs.get(m.key);
     if (m.dying && prev) continue;
-    memo.mobs.set(m.key, { vm: m, pos, tick });
+    wm.mobs.set(m.key, { vm: m, pos, tick });
   }
   // lookups by raw uid go through the key
-  for (const [k, v] of memo.mobs) if (tick - v.tick > MEMO_TICKS || v.tick > tick) memo.mobs.delete(k);
-  if (memo.mobs.size > 400) memo.mobs.clear();
+  for (const [k, v] of wm.mobs) if (tick - v.tick > MEMO_TICKS || v.tick > tick) wm.mobs.delete(k);
+  if (wm.mobs.size > 400) wm.mobs.clear();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -823,11 +928,11 @@ function chestVM(e, x, pend) {
 
 /** A chest that opened this tick (its gold coin fx, no mob) keeps its spot for a tick, lid open. */
 function openedChests(ctx, chests, chestPos, heroPos, fxs) {
-  const { memo, tick } = ctx;
+  const { wm, tick } = ctx;
   const has = new Set(chests.map((c) => c.heroId));
   for (const { f, age } of fxs) {
     if (f.kind !== "coin" || f.mobUid != null || f.roomId === "arena" || f.heroId == null || has.has(f.heroId)) continue;
-    const old = memo.chests.get(f.heroId);
+    const old = wm.chests.get(f.heroId);
     if (!old || !heroPos.has(f.heroId) || tick - old.tick > 1 + age) continue;
     has.add(f.heroId);
     chests.push(Object.assign({}, old.vm, { open: true, count: 1, tooltip: "Opened" }));
@@ -835,9 +940,37 @@ function openedChests(ctx, chests, chestPos, heroPos, fxs) {
   }
 }
 
-function rememberChests(memo, chests, tick) {
-  for (const c of chests) if (!c.open) memo.chests.set(c.heroId, { vm: c, tick });
-  for (const [k, v] of memo.chests) if (tick - v.tick > MEMO_TICKS || v.tick > tick) memo.chests.delete(k);
+function rememberChests(wm, chests, tick) {
+  for (const c of chests) if (!c.open && c.tier !== "duck") wm.chests.set(c.heroId, { vm: c, tick });
+  for (const [k, v] of wm.chests) if (tick - v.tick > MEMO_TICKS || v.tick > tick) wm.chests.delete(k);
+}
+
+/**
+ * D§9.7 / D§11.8 "Duck Chest pops on a kill": the loot of a Holo Rubber Duck comes out of a Duck
+ * Chest where the duck stood: closed on the kill tick (age 0), lid open on the next (age 1). The
+ * engine offers the item at once (no claim), so the chest is only a picture: tier "duck" never
+ * claims. A duck kill is the loot fx of a mob remembered as holo (or a loot fx the engine marks:
+ * holo / src "duck" / text "duck"); a duck never seen (a VM restart that tick) stands at the
+ * front of the finder's lane.
+ */
+function duckChests(ctx, chests, heroPos, fxs) {
+  const { wm, byId } = ctx;
+  for (const { f, age } of fxs) {
+    if (f.kind !== "loot" || f.mobUid == null || f.roomId === "arena") continue;
+    const old = wm.mobs.get(`mob:${f.mobUid}`);
+    const holo = !!(old && old.vm && old.vm.holo) || f.holo === true || f.src === "duck" || f.text === "duck";
+    if (!holo) continue;
+    const hp = f.heroId != null ? heroPos.get(f.heroId) : null;
+    if (!hp || hp.closing) continue; // the finder is folded into the camp chip or off stage
+    const x = old && old.pos ? old.pos.x : hp.front.x;
+    const e = byId.get(f.heroId);
+    const rar = RARITIES[f.rar] || null;
+    chests.push({
+      key: `chest:duck:${f.key}`, heroId: f.heroId, address: (e && e.live.address) || null, x: r1(x), y: GROUND,
+      tier: "duck", count: 1, open: age > 0,
+      tooltip: `Duck Chest from a ${HOLO_DUCK.name}${rar ? ` · ${rar.name} item` : ""} · 10× gold · Snippets`,
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -945,12 +1078,15 @@ function arenaContents(ctx, fight, L, fighters, out) {
     enraged: !!f.enraged, invuln: !!f.invuln && !fight.ended, parts,
     partSprite: bodyParts.length || BOSS_PART_COUNT[f.id] ? `boss/${f.id}-part.svg` : null,
     banner, stamp, arena: { x: r1(ax), w: r1(aw) }, age: fight.ended ? 9 : age,
-    tooltip: bossTooltip(ctx, f, def),
+    tooltip: bossTooltip(ctx, f, def) + (fight.ended ? "" : "\nClick twice to retreat (a Postmortem: Wounds and Lessons are kept)"),
+    // D§11.16 Retreat from the boss: the first click arms, the second (within a few ticks) runs it
+    retreat: fight.ended ? null : { confirm: "Retreat? Click again", args: {} },
   };
 }
 
 function postmortemText(state, f) {
-  const key = f.kind === "backlog" ? `bl${f.floor}` : String(f.bossIdx);
+  // boss.js woundKey: "bl<floor>", "rv<review>.<heroId>" or the boss index
+  const key = f.kind === "backlog" ? `bl${f.floor}` : f.kind === "review" ? `rv${f.reviewIdx}.${f.heroIds[0]}` : String(f.bossIdx);
   const w = (state.herd.wounds || {})[key];
   const wounds = Array.isArray(w) ? Math.round((w[0] || 0) * 100) : 0;
   const lessons = Math.round(Math.min(T.boss.lessonsCap, T.boss.lessonsPerFail * ((state.herd.lessons || {})[key] || 0)) * 100);
@@ -1075,7 +1211,19 @@ function roomVM(ctx, g, slotW, prevZone) {
       : `Quota ${quota.have}/${quota.need} kills${map && map.idx < zone.maps.length - 1 ? ` to open ${zone.maps[map.idx + 1].id}` : " for the boss door"}`);
   }
   if (sprint) tip.push(`Sprint ${sprint.have}/${sprint.need} Seals toward the boss door`);
-  if (door && BOSSES[zIdx]) tip.push(`Boss door open: ${BOSSES[zIdx].name}`);
+  // The door icon is clickable only when the challenge would start (the engine refuses one while a
+  // boss fight is on, during a Postmortem's retry wait, or with nobody working in the zone, and the
+  // stage shows no command result): otherwise it stays a sign and the header says why.
+  // (the same boss API world.command("challenge") asks: rt.bossApi when one is set, else boss.js)
+  const api = ctx.rt.bossApi && typeof ctx.rt.bossApi.canChallenge === "function" ? ctx.rt.bossApi : null;
+  const can = door && BOSSES[zIdx] ? (api ? api.canChallenge(ctx.world, "boss", zIdx) : canChallenge(ctx.world, "boss", zIdx)) : null;
+  if (door && BOSSES[zIdx]) tip.push(`Boss door open: ${BOSSES[zIdx].name}${can && !can.ok && can.error ? ` (${can.error})` : ""}`);
+  // D§11.16: a header click pins the room's heroes to this map (unpins them when all already are);
+  // the door icon challenges the zone's boss
+  const pin = pinVM(g);
+  if (pin) tip.push(pin.mapId == null ? "Click: back to auto map choice" : `Click: keep ${pin.heroIds.length === 1 ? "this hero" : "these heroes"} on ${g.mapId === "backlog" ? BACKLOG.name : g.mapId}`);
+  const challenge = can && can.ok
+    ? { kind: "boss", idx: zIdx, tooltip: `${BOSSES[zIdx].name}: the boss door is open\nClick to challenge` } : null;
   const stats = [quota ? `${quota.have}/${quota.need}` : null, sprint ? `Sprint ${sprint.have}/${sprint.need}` : null].filter(Boolean).join(" · ");
   const vm = {
     key, x: r1(g.x), w: r1(g.w), zone: zone.id, mapId: g.mapId, title, shortTitle,
@@ -1083,9 +1231,23 @@ function roomVM(ctx, g, slotW, prevZone) {
     dividerLeft: prevZone !== null && prevZone !== zone.id,
     props: props(key, zone, g.x, g.w, slotW, 3),
     tooltip: tip.join("\n"),
+    pin, challenge,
   };
   if (stats) vm.stats = stats;
   return vm;
+}
+
+/**
+ * The room header's click (D§11.16): {heroIds, mapId} runs pinMap for each hero; mapId null
+ * unpins (every hero here is already pinned to this map). Contractors (not on the roster) and
+ * rooms without a real map have none.
+ */
+function pinVM(g) {
+  if (g.mapId !== "backlog" && !MAP_BY_ID[g.mapId]) return null;
+  const list = g.es.filter((e) => !e.hero.contractor && e.id > 0);
+  if (!list.length) return null;
+  const all = list.every((e) => e.hero.pinMap === g.mapId);
+  return { heroIds: list.map((e) => e.id), mapId: all ? null : g.mapId };
 }
 
 function arenaRoom(ctx, fight, L) {
@@ -1101,6 +1263,7 @@ function arenaRoom(ctx, fight, L) {
     palette: pal, skyBands: bands, quota: null, sprint: null, door: false, working: !fight.ended, dusk: false,
     review: false, dividerLeft: true, props: props(key, zone, a.x, a.w, a.w, 1),
     tooltip: `${zone.name} · boss arena\n${f.name} · Lv ${f.level}`,
+    pin: null, challenge: null,
   };
 }
 
@@ -1237,10 +1400,15 @@ function buildFx(ctx, fxs, heroPos, mobPos, chestPos, boss) {
       const minY = 28 + Math.max(0, 200 - ctx.H);
       y = dodge(boxes, kind, text, x, Math.max(y, minY), age, f.roomId === "arena" ? 1 : -1, minY);
     }
-    out.push({
+    const vm = {
       key: f.key, kind, x: r1(x), y: r1(y), text, color, age,
       dx: r1(Number.isFinite(dx) ? dx : 0), dy: r1(Number.isFinite(dy) ? dy : 0), size: null,
-    });
+    };
+    // D§11.16: a loot pillar opens the finder's sheet on that item's compare card
+    if (kind === "pillar" && f.heroId != null && f.heroId > 0 && Number.isFinite(f.value) && findHero(ctx.world, f.heroId)) {
+      vm.sheet = { heroId: f.heroId, itemUid: f.value };
+    }
+    out.push(vm);
   }
   return out;
 }
@@ -1279,7 +1447,7 @@ function dodge(boxes, kind, text, x, y, age, dir, minY) {
 const FAN = [[0, 0], [-30, 17], [30, 17], [0, 34], [-30, 51], [30, 51], [0, 68]];
 
 function memoPos(ctx, uid) {
-  const m = ctx.memo.mobs.get(`mob:${uid}`);
+  const m = ctx.wm.mobs.get(`mob:${uid}`);
   return m && ctx.tick - m.tick <= 2 ? m.pos : null;
 }
 

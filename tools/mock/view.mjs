@@ -120,7 +120,8 @@ export function makeCx(copy, flavor, { task = null } = {}) {
       const h = ++S.ids.handle;
       return Object.freeze({
         __handle: h,
-        focus() { S.focusedHandle = h; },
+        // herdr: refuse_mutation_in_render("FocusHandle.focus()") (entity_api.rs)
+        focus() { notInRender("FocusHandle.focus()"); S.focusedHandle = h; },
         is_focused() { return S.focusedHandle === h; },
         release() { if (S.focusedHandle === h) S.focusedHandle = null; },
       });

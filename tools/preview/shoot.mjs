@@ -45,6 +45,7 @@ export async function shoot(shots, { outDir = M.OUT_DIR } = {}) {
       const html = s.html ?? treeToHtml(s.tree, { width, height, zoom: s.zoom ?? 1, theme: s.theme, title: s.name });
       await page.setContent(html, { waitUntil: "load" });
       await page.evaluate(() => document.fonts?.ready);
+      await page.evaluate(() => window.__previewReady ?? null); // SVG images rasterised as herdr does
       const file = path.join(outDir, `${s.name}.png`);
       await page.screenshot({ path: file, clip: { x: 0, y: 0, width, height } });
       if (s.saveHtml) fs.writeFileSync(file.replace(/\.png$/, ".html"), html);
@@ -93,7 +94,10 @@ export async function renderRoles(main, roles, { ticks = 2, sizeFor } = {}) {
 
 /** Per-role shots + the composed window. Returns the written files. */
 export async function previewAll({ main, roles, outDir = M.OUT_DIR, only, prefix = "role-", windowName = "window" } = {}) {
-  const rendered = await renderRoles(main, roles, {
+  // `only`: one name or a comma-separated list of role names (and/or the window's name)
+  const wanted = only ? new Set(String(only).split(",").map((x) => x.trim()).filter(Boolean)) : null;
+  const pickRoles = wanted && !wanted.has(windowName) ? roles.filter((r) => wanted.has(r.name)) : roles;
+  const rendered = await renderRoles(main, pickRoles, {
     sizeFor: (role) => {
       const kind = role.props?.role;
       if (role.preview) return [role.preview.width, role.preview.height];
@@ -106,11 +110,11 @@ export async function previewAll({ main, roles, outDir = M.OUT_DIR, only, prefix
     },
   });
   const shots = rendered
-    .filter((r) => !only || r.role.name === only)
+    .filter((r) => !wanted || wanted.has(r.role.name))
     .map((r) => ({ name: `${prefix}${r.role.name}`, tree: r.tree, width: r.width, height: r.height, saveHtml: true }));
   const pick = (kind) => rendered.find((r) => r.role.props?.role === kind && r.tree)?.tree ?? null;
   const nameplates = rendered.filter((r) => r.role.props?.role === "nameplate" && r.role.props?.terminal && r.tree).slice(0, 3).map((r) => r.tree);
-  if (!only || only === windowName) {
+  if (!wanted || wanted.has(windowName)) {
     const win = composeWindow({ party: pick("party"), stage: pick("stage"), hud: pick("hud"), nameplates: nameplates.length ? nameplates : [pick("nameplate")].filter(Boolean) });
     shots.push({ name: windowName, html: win.html, width: win.sizes.width, height: win.sizes.height, userFacing: true, saveHtml: true });
   }

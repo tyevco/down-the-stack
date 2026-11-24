@@ -6,6 +6,11 @@
 //  - any host call while a mod's module top level is evaluating (ARCHITECTURE §2.1)
 //  - writeTextFile while checking(), or under mods/ (hot-reloads the mod)
 //  - run() with an unknown command or a missing required argument (herdr fails later, silently)
+//  - run("<mod>.<command>") with no shown copy of that mod (herdr shows a "<cmd> failed" toast)
+//
+// Fixture hooks for IO trouble (tests): fixture().readError?.(absPath) → an Error (or message) makes
+// that readTextFile reject; fixture().hangAfterWrite?.(absPath) → true makes that writeTextFile
+// land on disk but never settle (herdr: the calling copy went away while the write ran).
 
 import path from "node:path";
 import { S, als, report, fixture, deliver } from "./state.mjs";
@@ -62,6 +67,8 @@ export function readTextFile(p, options) {
   S.calls.readTextFile.push({ path: abs, copy: c?.label });
   // In `herdr-app check` host async results never come back (the process exits first).
   if (S.checking) return never();
+  const fail = typeof fixture().readError === "function" ? fixture().readError(abs) : null;
+  if (fail) return Promise.reject(fail instanceof Error ? fail : new Error(String(fail)));
   const text = memfs.readText(abs);
   if (text !== undefined && Buffer.byteLength(text) > MAX_TEXT) return Promise.reject(new Error(`readTextFile: ${abs} is larger than 1 MiB`));
   return Promise.resolve(text === undefined ? null : text);
@@ -83,6 +90,7 @@ export function writeTextFile(p, text, expected) {
     return Promise.reject(new Error("The file changed outside Herdr. Reload before saving; your draft is still here."));
   }
   memfs.write(abs, text, { mkdirs: true });
+  if (typeof fixture().hangAfterWrite === "function" && fixture().hangAfterWrite(abs)) return never();
   return Promise.resolve(null);
 }
 
@@ -117,10 +125,15 @@ export function run(name, args) {
     report("error", "bad-command", `run("${name}"): unknown command (not in herdr's command table, and not "<mod>.<command>")`, { copy: c });
     return null;
   }
-  // "<mod>.<command>": delivered to every shown copy's nextCommand() (never during check).
+  // "<mod>.<command>": delivered to every shown copy's nextCommand() (never during check). herdr
+  // skips hidden copies (src/mods.rs send_command: SHOWN_COPIES) and, when none listens, answers
+  // `unknown command` and shows an error toast (window.rs run → command_error).
   if (S.checking) return null;
-  const targets = S.copies.filter((k) => k.alive && k.modName === ns);
-  if (!targets.length) report("warning", "no-mod-copy", `run("${name}"): no copy of mod "${ns}" is shown; the command goes nowhere`, { copy: c });
+  const targets = S.copies.filter((k) => k.alive && k.modName === ns && !k.hidden);
+  if (!targets.length) {
+    S.calls.toasts.push({ title: `${name} failed`, copy: c?.label });
+    report("error", "no-mod-copy", `run("${name}"): no copy of mod "${ns}" is shown; herdr would show an error toast "${name} failed"`, { copy: c });
+  }
   for (const k of targets) deliver(k, sub);
   return null;
 }

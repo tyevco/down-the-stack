@@ -301,15 +301,20 @@ describe("class from behaviour (D§4.2)", () => {
     assert.equal(D.CLASSES[h.cls].id, "hotfixer"); // locked
   });
 
-  test("a weapon of the old class does nothing after a class switch; a usable one is an upgrade", () => {
+  test("a weapon of the old class swings like a Training Stick of its item level after a class switch; a usable one is an upgrade", () => {
     const { state, h } = mk("shellmancer", 25);
     h.eq[0] = item("weapon", 24, 2, { type: "pipe" });
-    assert.equal(H.stats(h, { herd: state.herd }).hasWeapon, true);
+    const before = H.stats(h, { herd: state.herd });
+    assert.equal(before.hasWeapon, true);
+    assert.equal(before.offClassWeapon, false);
     state.herd.snip = 10000; // a Career Change from Lv 20 costs 25 x L Snippets
     assert.equal(H.setClass(state, h, "refactorer").ok, true);
     const st = H.stats(h, { herd: state.herd });
-    assert.equal(st.hasWeapon, false);
-    assert.ok(near(st.weaponDmg, F.bareHandDmg(25)));
+    // no rarity, polish, affixes or class bonus: 6 g(24), not bare hands (3 g(25))
+    assert.equal(st.hasWeapon, true);
+    assert.equal(st.offClassWeapon, true, "the sheet's Weapon damage tooltip says so");
+    assert.ok(near(st.weaponDmg, F.weaponDmg(24, 1, 0)));
+    assert.ok(st.weaponDmg > F.bareHandDmg(25) && st.weaponDmg < before.weaponDmg);
     assert.equal(I.isUpgrade(h, item("weapon", 24, 0, { type: "blade", uid: 7 }), { herd: state.herd }), true);
   });
 

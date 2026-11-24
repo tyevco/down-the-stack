@@ -21,7 +21,7 @@ import {
   crowding as crowdingMult, partyXp, iRef, itemTier, polishMax,
 } from "./formulas.js";
 import { newHero, stats, grantXP, recordTask, autoRanks, careerOf } from "./heroes.js";
-import { rollChest, baseIdFor, stashAdd } from "./items.js";
+import { rollChest, baseIdFor, stashAdd, repairItem } from "./items.js";
 import { seedOf } from "./rng.js";
 import {
   addGold, addSeals, herdXpBonus, freshEyesCapMin, onboardingBonus, awardBadge, logDrop, journal as herdJournal,
@@ -173,7 +173,7 @@ function newLive(world, hero, a, tick) {
     status: normStatus(a.status), seq: a.seq, statusSince: tick, prevStatus: null, state: "resting",
     focused: false, pinned: false, program: null, app: null, title: "", space: "", spaceName: "", tab: "",
     tabName: "", pane: "", paneName: null,
-    task: null, blockedSince: null, blockedTicks: 0, bubbleShown: false,
+    task: null, blockedSince: null, blockedAtMs: null, blockedTicks: 0, bubbleShown: false,
     forklings: [], forkCount: st.forklingCount || T.forkling.counted, spawnPending: false,
     flap: [], flapUntil: 0,
     hp: Math.max(1, Math.round(st.maxHp * (hero.hpFrac > 0 ? hero.hpFrac : 1))), maxHp: st.maxHp,
@@ -431,6 +431,7 @@ function firstSight(world, hero, live, a, snap, ev) {
     }
   } else if (s === "blocked") {
     live.blockedSince = tick;
+    live.blockedAtMs = world.rt.nowMs;
   } else if (s === "idle" && live.fast && hero.pend && hero.pend.length && !world.rt.readOnly) {
     openChests(world, hero, { reason: "seen" }, ev);
   }
@@ -458,7 +459,12 @@ function goOffDuty(world, address, heroId, ev) {
   rt.live.delete(heroId);
   rt.roomsDirty = true;
   if (!hero) return;
-  if (live && live.task && !rt.readOnly) closeTask(world, hero, live, "ended", ev);
+  // an agent that went working -> idle was watched finishing (herdr reports idle after a working
+  // spell only while the person looks, D§2.3): its task closes "watched" even when the pane closes
+  // inside the 8-tick debounce; anything else (done, blocked, still working) stays a pending chest
+  if (live && live.task && !rt.readOnly) {
+    closeTask(world, hero, live, live.status === "idle" && !flapPaused(live, rt.tick) ? "watched" : "ended", ev);
+  }
   if (live && live.maxHp > 0 && live.hp != null) hero.hpFrac = Math.max(0.05, Math.min(1, live.hp / live.maxHp));
   hero.seenAt = rt.nowMs;
   if (hero.contractor) {
@@ -494,6 +500,50 @@ export function flapPaused(live, tick) {
 }
 
 /**
+ * Seconds the live hero has been Waiting (D§2.6 "≥ 10 s blocked", the D§11.10 "! 2m" clock): the
+ * larger of the herd ticks since it blocked and the wall-clock time since (an offline gap or a
+ * dropped catch-up advances no ticks, but the person was still not answering). 0 when its blocked
+ * spell is over (transition clears blockedSince when it leaves blocked).
+ */
+export function blockedSec(world, live) {
+  if (!live) return 0;
+  const tick = world.rt.tick;
+  const byTick = live.blockedSince != null ? tick - live.blockedSince : live.blockedTicks || 0;
+  const byClock = live.blockedAtMs != null && world.rt.nowMs >= live.blockedAtMs
+    ? Math.floor((world.rt.nowMs - live.blockedAtMs) / 1000) : 0;
+  return Math.max(0, byTick, byClock);
+}
+
+/**
+ * Keeps the tick-based blocked clock on wall-clock time (world.tick, after its steps): an offline
+ * gap or a catch-up that dropped seconds moves blockedSince back (and blockedTicks up), so
+ * `tick - blockedSince` (the views' "! 15m" tag and bubble) counts real seconds.
+ */
+export function syncClocks(world) {
+  const rt = world.rt;
+  if (!rt || !rt.live || !rt.live.size) return;
+  for (const live of rt.live.values()) {
+    if (live.status !== "blocked" || live.blockedSince == null || live.blockedAtMs == null) continue;
+    const real = blockedSec(world, live);
+    if (rt.tick - live.blockedSince < real) live.blockedSince = rt.tick - real;
+    if ((live.blockedTicks || 0) < real) {
+      live.blockedTicks = real;
+      live.bubbleShown = real >= T.bubbleDelayTicks;
+    }
+  }
+}
+
+/**
+ * herdr's done <-> idle flip that keeps the agent's seq: herdr bumps seq only when the core's status
+ * word changes (model.rs set_word), while "done" vs "idle" is the seen flag (mark_seen when the person
+ * looks, set_turn when another client marks it seen or unread). So a finished agent the person then
+ * looks at reports idle with the same seq.
+ */
+export function isSeenFlip(from, to) {
+  return (from === "done" && to === "idle") || (from === "idle" && to === "done");
+}
+
+/**
  * Applies one seq-gated status change from -> to (D§2.3). Gaps in seq need nothing special: only
  * the previous and current statuses are known, and working -> idle already means "watched".
  */
@@ -510,12 +560,13 @@ export function transition(world, hero, live, to, ev) {
 
   if (to === "working") {
     if (from === "blocked") {
-      const blocked = live.blockedSince != null ? tick - live.blockedSince : live.blockedTicks || 0;
+      const blocked = blockedSec(world, live);
       if (task && blocked >= T.unblocked.minBlockedSec && task.workSec >= T.unblocked.minTaskSec && !world.rt.readOnly) grantUnblocked(world, hero, live, ev);
     }
     if (task) task.closeCountdown = null; // continue the same task (resume, or back inside the 8 ticks)
     else task = openTask(live, tick);
     live.blockedSince = null;
+    live.blockedAtMs = null;
     live.blockedTicks = 0;
     live.bubbleShown = false;
   } else if (to === "blocked") {
@@ -524,12 +575,14 @@ export function transition(world, hero, live, to, ev) {
       task.closeCountdown = null; // blocked never closes a task
     }
     live.blockedSince = tick;
+    live.blockedAtMs = world.rt.nowMs;
     live.blockedTicks = 0;
     live.bubbleShown = false;
   } else {
     // done or idle: the task closes once this has held for 8 ticks
     if (task && task.closeCountdown == null) task.closeCountdown = CLOSE_TICKS;
     live.blockedSince = null;
+    live.blockedAtMs = null;
     live.blockedTicks = 0;
     live.bubbleShown = false;
     if (from === "done" && to === "idle" && !world.rt.readOnly) openChests(world, hero, { reason: "seen" }, ev);
@@ -731,7 +784,8 @@ function processTops(world, tops, snap, ev, order0 = 0) {
     if (first) {
       live.seq = a.seq;
       firstSight(world, hero, live, a, snap, ev);
-    } else if (a.seq !== live.seq) {
+    } else if (a.seq !== live.seq || isSeenFlip(live.status, normStatus(a.status))) {
+      // seq-gated (D§2.3), except herdr's seen flip, which keeps the seq (isSeenFlip)
       live.seq = a.seq;
       transition(world, hero, live, a.status, ev);
     }
@@ -834,10 +888,15 @@ export function closeTask(world, hero, live, reason, ev) {
   if (!task) return null;
   const workMin = task.workSec / 60;
   const rec = recordTask(hero, { minutes: workMin, blocks: task.blocks, spawned: task.spawned });
-  if (rec.switched && ev) {
-    const c = CLASSES[hero.cls];
-    ev.note?.(`${hero.name}: provisional ${c.name}`);
-    emitJournal(world, ev, "class", hero.id, c.name, hero.cls);
+  if (rec.switched) {
+    // the free switch (D§4.2) can leave a weapon of the old class's type in hand: the targeted
+    // autopilot sweep looks for a class weapon this very tick (as the manual setClass does)
+    if (world.rt && world.rt.apGear) world.rt.apGear.add(hero.id);
+    if (ev) {
+      const c = CLASSES[hero.cls];
+      ev.note?.(`${hero.name}: provisional ${c.name}`);
+      emitJournal(world, ev, "class", hero.id, c.name, hero.cls);
+    }
   }
   let min = workMin + task.creditSec / 60 + task.forkMin;
   let fmin = task.forkMin;
@@ -991,9 +1050,14 @@ export function drainInbox(world, ev, max = INBOX_PER_TICK) {
   if (!Array.isArray(q) || !q.length) return 0;
   let n = 0;
   while (q.length && n < max) {
-    const [id, item] = q.shift();
+    const entry = q.shift();
     n++;
+    if (!Array.isArray(entry)) continue;
+    const [id, item] = entry;
     if (!item || typeof item !== "object") continue;
+    // ids a save may carry from another content generation (a mod downgrade): the stash codec's
+    // fallbacks, so the item is safe to name, score and stash
+    repairItem(item);
     const finder = id > 0 ? world.state.heroes.find((h) => h.id === id) || null : null;
     offerDrop(world, finder, item, ev);
   }

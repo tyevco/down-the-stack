@@ -37,25 +37,39 @@ export function zoom() {
   return Number.isFinite(z) && z > 0 ? z : 1;
 }
 
+const HEX = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+
+/**
+ * A colour value elements accept ("#rgb", "#rrggbb", "#rrggbbaa"), or `d`. herdr's settings take
+ * "ff8800" or "#ff8800 " in a theme override (it trims and strips "#") and theme() hands that on
+ * verbatim, but .bg()/.text_color() throw on it: trim, add the "#", else use the fallback.
+ */
+export function hex(v, d) {
+  if (typeof v !== "string") return d;
+  let s = v.trim();
+  if (s && s[0] !== "#") s = "#" + s;
+  return HEX.test(s) ? s : d;
+}
+
 // Theme colours with safe fallbacks (theme() is graphite during `herdr-app check`).
 export function T() {
   const t = theme() ?? {};
   return {
-    bg: t.background ?? "#1b1d22",
-    chrome: t.chrome ?? "#15171b",
-    surface: t.surface ?? "#202329",
-    raised: t.raised ?? "#2a2e36",
-    hover: t.hover ?? "#ffffff14",
-    selected: t.selected ?? "#ffffff1f",
-    border: t.border ?? "#ffffff1a",
-    fg: t.foreground ?? "#e6e6e6",
-    muted: t.muted ?? "#a0a4ab",
-    dim: t.dim ?? "#6b7079",
-    accent: t.accent ?? "#7fa7ff",
-    working: t.working ?? C.working,
-    blocked: t.blocked ?? C.blocked,
-    done: t.done ?? C.done,
-    idle: t.idle ?? C.idle,
+    bg: hex(t.background, "#1b1d22"),
+    chrome: hex(t.chrome, "#15171b"),
+    surface: hex(t.surface, "#202329"),
+    raised: hex(t.raised, "#2a2e36"),
+    hover: hex(t.hover, "#ffffff14"),
+    selected: hex(t.selected, "#ffffff1f"),
+    border: hex(t.border, "#ffffff1a"),
+    fg: hex(t.foreground, "#e6e6e6"),
+    muted: hex(t.muted, "#a0a4ab"),
+    dim: hex(t.dim, "#6b7079"),
+    accent: hex(t.accent, "#7fa7ff"),
+    working: hex(t.working, C.working),
+    blocked: hex(t.blocked, C.blocked),
+    done: hex(t.done, C.done),
+    idle: hex(t.idle, C.idle),
   };
 }
 

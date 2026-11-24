@@ -13,7 +13,10 @@ const SNAP_KEYS = ["nowMs", "tzOffsetMin", "weekday", "windowActive", "focusedTe
 const AGENT_KEYS = ["address", "status", "seq", "app", "program", "title", "space", "space_name", "tab", "tab_index", "tab_name", "pane", "pane_name", "pinned", "focused"];
 
 const built = new Map();
+let warm = false;
 function demo(kind) {
+  // the first build in a process pays V8's warm-up (parsing, the JIT): time warm builds only
+  if (!warm) { warm = true; Dm.demoWorld("first-day", NOW - 86400000); }
   if (!built.has(kind)) {
     const t = performance.now();
     const r = Dm.demoWorld(kind, NOW);
@@ -166,16 +169,17 @@ describe("demoSnapshot", () => {
 });
 
 describe("scripted agents", () => {
-  test("plans loop, seq increments on every status change, titles advance per task", () => {
+  test("plans loop, seq increments on every status change but herdr's seen flip, titles advance per task", () => {
     const a = Dm.makeAgent({ address: "x", plan: Dm.taskPlan(1, { doneSec: 10, idleSec: 5 }) });
     assert.equal(a.status, "working");
     const t0 = Dm.agentInfo(a).title;
     Dm.advanceAgent(a, 60);
     assert.deepEqual([a.status, a.seq], ["done", 2]);
     Dm.advanceAgent(a, 10);
-    assert.deepEqual([a.status, a.seq], ["idle", 3]);
+    // done -> idle is herdr's seen flag (model.rs mark_seen), not a new status word: same seq
+    assert.deepEqual([a.status, a.seq], ["idle", 2]);
     Dm.advanceAgent(a, 5);
-    assert.deepEqual([a.status, a.seq], ["working", 4]);
+    assert.deepEqual([a.status, a.seq], ["working", 3]);
     assert.notEqual(Dm.agentInfo(a).title, t0);
     assert.equal(Dm.agentUntilChange(a), 60);
   });

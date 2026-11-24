@@ -435,6 +435,25 @@ describe("traits (D§9.4)", () => {
     assert.ok(hero.st.dodges >= 0);
   });
 
+  test("a dodged thorns reflection is no dodged attack: no 404 Not Found count, no Zero Downtime heal", () => {
+    // Zero Downtime (the Hotfixer capstone) heals 1% max HP per dodge; a certain dodge (dodge 1)
+    const mk = () => ({
+      live: { hp: 500, maxHp: 1000, crashedUntil: 0 }, st: { dodge: 1, armor: 0, drFlat: 0, dmgTaken: 0, dr: () => 0 },
+      hero: { rng: 12345, st: { dodges: 0 } }, untargetable: false, sv: { 6: { usable: true, onDodgeHealPct: 0.01 } },
+      armorMul: 1, buffDmgTaken: 0,
+    });
+    const swing = mk();
+    assert.equal(C.hitHero(swing, 100, 10), 0);
+    assert.equal(swing.hero.st.dodges, 1, "a dodged swing counts");
+    assert.equal(swing.live.hp, 510, "and heals");
+    const reflect = mk();
+    assert.equal(C.hitHero(reflect, 100, 10, D.TRAITS.thorns.capPerTick, true), 0);
+    assert.equal(reflect.dodged, true, "still a 404 on screen");
+    assert.equal(reflect.hero.st.dodges, 0, "not counted");
+    assert.equal(reflect.live.hp, 500, "no heal");
+    assert.equal(reflect.hero.rng === swing.hero.rng, true, "the same roll either way");
+  });
+
   test("summons and Forklings never trigger thorns", () => {
     const { w, live, lane } = lab("refactorer", [{ id: "version_pin_porcupine", hp: 1e12, atk: 0 }, { hp: 1e12, atk: 0 }, { hp: 1e12, atk: 0 }], { L: 54 });
     live.state = "supervising";
@@ -507,6 +526,7 @@ describe("traits (D§9.4)", () => {
     assert.equal(b.hero.st.ducks, 1);
     assert.ok(b.w.state.herd.badges.includes("lucky_duck"));
     assert.equal(b.ev.fxOf("loot").length, 1);
+    assert.equal(b.ev.fxOf("loot")[0].holo, true, "the loot fx is marked: the stage draws a Duck Chest (D§11.8)");
     assert.ok(b.w.state.herd.snip >= snip + 5 * F.itemTier(40));
   });
 });

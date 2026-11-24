@@ -8,6 +8,27 @@ import { TUNING as T, CHEST_TIERS, RARITIES, ELITE, BUG_TRACKER, TIER_COUNT } fr
 const LN_G = Math.log(T.g);
 
 // ---------------------------------------------------------------------------------------------
+// Journal length (D§13.3; balance, docs/BALANCE.md §10). Here, not in herd.js, because both
+// herd.js and items.js write journal lines (and herd.js imports items.js).
+// ---------------------------------------------------------------------------------------------
+
+// D§13.3 caps the journal at 60 lines; balance: up to 120, so a hero's Journal tab keeps about
+// D§11.13's 30 lines in a typical herd (60 lines were 55-180 minutes of a four-agent herd, 12-17
+// lines a hero). A line is ~38 B in a typical save and up to ~60 B, so the extra lines taper off
+// past 20 heroes (logMax): D§13.3's worst case (30 heroes in full gear, 140 stash items) keeps its
+// 60 lines and stays inside 30 KB.
+export const LOG_MAX = 120;
+const LOG_MIN = 60; //         D§13.3
+const LOG_TAPER_FROM = 20; //  heroes; 6 lines fewer for each hero past it
+const LOG_TAPER_STEP = 6;
+
+/** The journal length for this roster (D§13.3, balance): 120 lines up to 20 heroes, 60 from 30. */
+export function logMax(state) {
+  const n = state && Array.isArray(state.heroes) ? state.heroes.length : 0;
+  return Math.max(LOG_MIN, Math.min(LOG_MAX, LOG_MAX - LOG_TAPER_STEP * (n - LOG_TAPER_FROM)));
+}
+
+// ---------------------------------------------------------------------------------------------
 // Core curve and reference kit (D§5.1, D§5.2)
 // ---------------------------------------------------------------------------------------------
 

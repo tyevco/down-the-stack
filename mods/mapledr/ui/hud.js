@@ -17,7 +17,7 @@
 import { div, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { C, T, MONO, art, zoom, kids } from "./kit.js";
-import { tone, track, thinBar, openHerd, chromeCommand } from "./party.js";
+import { tone, track, thinBar, lift, openHerd, chromeCommand } from "./party.js";
 
 /** Width tiers (logical px): the words go first, then the sprint label, then the sprint. */
 export const HUD_TIERS = { words: 720, sprintLabel: 560, sprint: 420 };
@@ -97,8 +97,10 @@ export function renderHud(vm, env) {
     count("hud-working", vm.working, "working", C.working, t, words),
     count("hud-blocked", vm.blocked, "blocked", C.blocked, t, words),
     count("hud-shipped", vm.shipped, "shipped", C.done, t, words),
+    // A background hover, so the icon and its label change together: herdr fixes an svg's colour
+    // when it builds the element, and a hover text colour would brighten only the label.
     h_flex().id("hud-herd").relative().flex_none().h(20).px(7).gap(5).items_center().rounded(5).bg(t.raised).text_color(t.muted)
-      .hover((s) => s.text_color(t.fg))
+      .hover((s) => s.bg(lift(t)))
       .child(svg(art("ui/herd.svg")).w(12).h(12).flex_none())
       .child(div().text_size(11).font_medium().child("Herd"))
       .when(dot, (el) => el.child(div().absolute().top(2).right(2).size(5).rounded_full().bg(t.accent))),

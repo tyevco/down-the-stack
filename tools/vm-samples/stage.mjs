@@ -81,7 +81,9 @@ function slotLayout(width, n, { arena = false } = {}) {
  *          boss: BossSpec|null, frontier: {mapId, quota, sprint, door} }
  * HeroSpec = { id, name, level, cls, career, state, map, space, program, tier, hat, focused,
  *              pinned, attacking, hp, xp, fe, mobs:[MobSpec], chest:{tier,count,open}, forks:n,
- *              blockedFor:"2m", quest, crit, fight:boolean, fresh:"42m" }
+ *              blockedFor:"2m", quest, crit, fight:boolean, fresh:"42m", pinMap:boolean,
+ *              duck:{lane, rar, age} (a Holo Rubber Duck killed in the lane: its Duck Chest),
+ *              reviewEnd:{kind:"promoted"|"postmortem", age} (a review that just ended) }
  */
 function build(spec, { width, height, tick = 0 } = {}) {
   width = width ?? spec.width ?? 1200;
@@ -167,7 +169,23 @@ function build(spec, { width, height, tick = 0 } = {}) {
       nameplate: { x: round(hx), y: 164, w: Math.round(pw), text: plateText, hpFrac: h.hp ?? 1 },
       slot: { x: round(sx), w: round(w) },
       rebootFrac: h.state === "crashed" ? (h.reboot ?? 0.4) : null,
+      // a review that ended ≤ 3 ticks ago: the Promotion banner or the Postmortem card (D§11.8)
+      reviewEnd: h.reviewEnd && !inArena && (h.reviewEnd.age ?? 0) + tick <= 3 ? {
+        key: `fight:${TICK0 - 300}:review:${h.id}:end`, kind: h.reviewEnd.kind, age: (h.reviewEnd.age ?? 0) + tick,
+        text: h.reviewEnd.kind === "promoted" ? "PROMOTED" : "Postmortem · retry in 10 working min",
+        sub: h.reviewEnd.kind === "promoted" ? h.career : "38% wounds kept · Lessons Learned +10%",
+      } : null,
     });
+    // A Holo Rubber Duck killed in this lane: its Duck Chest pops where it stood (closed at age 0,
+    // lid open at age 1), a picture only (the item is already given).
+    if (h.duck && (h.duck.age ?? 0) + tick <= 1) {
+      const lp = lanePos[Math.min(h.duck.lane ?? 0, lanePos.length - 1)];
+      chests.push({
+        key: `chest:duck:fx:${TICK0 - (h.duck.age ?? 0)}:d${h.id}`, heroId: h.id, address: `t${h.id}`, x: round(sx + lp * w), y: 160,
+        tier: "duck", count: 1, open: (h.duck.age ?? 0) + tick > 0,
+        tooltip: `Duck Chest from a Holo Rubber Duck · ${RARITIES[h.duck.rar ?? 3].name} item · 10× gold · Snippets`,
+      });
+    }
     // Lane mobs (questing / supervising / waiting heroes keep their lane; resting/shipped don't).
     if (!inArena && (h.mobs ?? []).length) {
       h.mobs.slice(0, lanePos.length).forEach((m, j) => {
@@ -238,6 +256,10 @@ function build(spec, { width, height, tick = 0 } = {}) {
       review: false, dividerLeft: prevZone !== null && prevZone !== zone.id, props,
       tooltip: `${zone.name} · ${r.mapId === "backlog" ? map.name : `${r.mapId} ${map.name}`} (Lv ${zone.levels ? `${map.levels?.[0] ?? zone.levels[0]}–${map.levels?.[1] ?? zone.levels[1]}` : "100+"})` +
         (quota ? `\nQuota ${quota.have}/${quota.need} kills to open the next map` : "") + (sprint ? `\nSprint ${sprint.have}/${sprint.need} toward the boss door` : ""),
+      // D§11.16 header click: pin the room's heroes here (unpin when all already are); the door
+      // icon challenges the zone's boss, only while no boss fight is on (the engine refuses one)
+      pin: r._arena ? null : { heroIds: r._heroes.map((h) => h.id), mapId: r._heroes.every((h) => h.pinMap) ? null : r.mapId },
+      challenge: !r._arena && frontier && fr.door && !spec.boss ? { kind: "boss", idx: zone.n ?? 0, tooltip: `${zone.name} boss: the boss door is open\nClick to challenge` } : null,
     };
     if (stats) vm.stats = stats; // optional: absent (not undefined) when there is nothing to count
     prevZone = zone.id;
@@ -255,10 +277,13 @@ function build(spec, { width, height, tick = 0 } = {}) {
     const ownerMob = mobs.find((m) => m.key.startsWith(`mob:${f.hero}`));
     const mobTop = ownerMob ? 160 - Math.round(ownerMob.px * (ownerMob.elite ? 1.25 : 1) * ownerMob.growScale) : 0;
     const base = f.at === "mob" && ownerMob ? { x: ownerMob.x, y: mobTop - (ownerMob.showHp ? 16 : 9) } : { x: owner.x, y: 160 - 58 };
-    fx.push({
+    const vm = {
       key: `fx:${TICK0 + (f.born ?? 0)}:${n}`, kind: f.kind, x: round(base.x + (f.ox ?? 0)), y: round(base.y + (f.oy ?? 0)),
       text: f.text ?? "", color: f.color ?? null, age, dx: f.dx ?? 0, dy: f.dy ?? -28, size: f.size ?? null,
-    });
+    };
+    // a loot pillar opens the finder's sheet on that item (D§11.16)
+    if (f.kind === "pillar") vm.sheet = { heroId: f.hero, itemUid: 9000 + n };
+    fx.push(vm);
   });
 
   let boss = null;
@@ -287,7 +312,10 @@ function build(spec, { width, height, tick = 0 } = {}) {
       banner: b.banner && age <= 3 ? { key: `banner:${b.id}:${TICK0 - (b.age ?? 0)}`, text: def.name, sub: def.flavor, age, kind: "entrance" } : null,
       stamp: b.stamp ? { key: `stamp:${b.id}`, text: "FIXED", age: (b.stampAge ?? 0) + tick, sprite: "fx/stamp-fixed.svg" } : null,
       arena: { x: round(a.x), w: round(a.w) }, age,
-      tooltip: `${def.name} · Lv ${def.level}\n${b.tip ?? "Shield of 8 branches: break 5 to expose the body"}\nWin estimate: ${b.estimate ?? "Even (1.08)"}`,
+      tooltip: `${def.name} · Lv ${def.level}\n${b.tip ?? "Shield of 8 branches: break 5 to expose the body"}\nWin estimate: ${b.estimate ?? "Even (1.08)"}` +
+        (b.stamp ? "" : "\nClick twice to retreat (a Postmortem: Wounds and Lessons are kept)"),
+      // D§11.16 Retreat: the first click arms, the second runs it (null once the fight is over)
+      retreat: b.stamp ? null : { confirm: "Retreat? Click again", args: {} },
     };
   }
 
@@ -332,7 +360,7 @@ const SPECS = {
       { id: 1, name: "Kip the Idempotent", level: 3, cls: "intern", career: "Intern", program: "claude", space: "s1", map: "1-1", state: "questing", attacking: true, focused: true, hp: 0.86, xp: 0.62, tier: 1, quest: "add a README badge",
         mobs: [{ id: "typo_sprout", hp: 0.45, hit: true }, { id: "typo_sprout" }, { id: "typo_sprout" }] },
       { id: 2, name: "Nib Two-Spaces", level: 1, cls: "intern", career: "Intern", program: "codex", space: "s1", map: "1-1", state: "questing", attacking: true, hp: 1, xp: 0.05, tier: 1, quest: "rename the config loader",
-        mobs: [{ id: "typo_sprout", hp: 0.8 }, { id: "typo_sprout" }] },
+        mobs: [{ id: "typo_sprout", hp: 0.8 }, { id: "typo_sprout" }], duck: { lane: 2, rar: 2, age: 0 } },
     ],
     fx: [
       { hero: 1, kind: "num", at: "mob", text: "7", born: 0, dx: 4 },
@@ -485,7 +513,7 @@ SPECS["all-idle"] = {
   frontier: { mapId: "2-3", quota: [31, 40], sprint: [4, 10], door: true },
   heroes: SPECS.midgame.heroes.map((h) => ({
     ...h, state: h.id === 3 || h.id === 2 ? "shipped" : "resting", attacking: false, forks: 0, mobs: [], zzz: h.id % 2 === 0, fresh: h.id === 2 ? "1h 10m" : h.fresh,
-    hp: 1, chest: h.id === 3 ? { tier: "gold", seals: "6.1" } : h.id === 2 ? { tier: "duck", seals: "1.0" } : null,
+    hp: 1, chest: h.id === 3 ? { tier: "gold", seals: "6.1" } : h.id === 2 ? { tier: "iron", seals: "1.0" } : null,
   })),
   fx: [],
 };
@@ -499,6 +527,23 @@ SPECS.narrow = {
   ],
   fx: [{ hero: 1, kind: "num", at: "mob", text: "88", born: 0, dx: 4 }],
 };
+// A review just ended in two slots (D§11.8): a Promotion banner with confetti and a Postmortem
+// card; the third hero's room is pinned (its header click unpins).
+const marsh = (map) => Object.keys(mapOf(map).spawn);
+SPECS.promoted = {
+  width: 1200,
+  note: ["PROMOTED: Senior Shellmancer", COL.xp],
+  frontier: { mapId: "4-2", quota: [22, 40] },
+  heroes: [
+    { id: 71, name: "Sol the Benchmarked", level: 30, cls: "shellmancer", career: "Senior Shellmancer", program: "claude", space: "s1", map: "4-1", state: "questing", attacking: true, hp: 1, xp: 0.02, tier: 3, hat: 2,
+      reviewEnd: { kind: "promoted", age: 1 }, mobs: [{ id: marsh("4-1")[0], hp: 0.7 }, { id: marsh("4-1")[1] ?? marsh("4-1")[0] }] },
+    { id: 72, name: "Ines of Gentle Reviews", level: 31, cls: "hotfixer", career: "Junior Hotfixer", program: "codex", space: "s1", map: "4-1", state: "questing", attacking: true, hp: 0.45, xp: 0.3, tier: 3,
+      reviewEnd: { kind: "postmortem", age: 1 }, mobs: [{ id: marsh("4-1")[0], hp: 0.9 }] },
+    { id: 73, name: "Ivo of Small Commits", level: 33, cls: "refactorer", career: "Senior Refactorer", program: "pi", space: "s2", map: "4-2", state: "questing", attacking: true, hp: 0.8, xp: 0.5, tier: 3, hat: 3, pinMap: true,
+      mobs: [{ id: marsh("4-2")[0], hp: 0.5, hit: true }, { id: marsh("4-2")[1] ?? marsh("4-2")[0] }] },
+  ],
+  fx: [{ hero: 73, kind: "num", at: "mob", text: "612", born: 0, dx: 4 }],
+};
 SPECS.compact = { ...SPECS.midgame, height: 64 };
 SPECS.tall = { ...SPECS.midgame, height: 320 };
 
@@ -508,7 +553,7 @@ const EMPTY = {
 };
 
 /** Every scenario name, in preview order. */
-export const SCENARIOS = ["empty", "loading", "first-day", "midgame", "boss", "boss-enraged", "boss-won", "late", "late-wide", "crowd", "calm", "all-idle", "narrow", "compact", "tall"];
+export const SCENARIOS = ["empty", "loading", "first-day", "midgame", "boss", "boss-enraged", "boss-won", "late", "late-wide", "crowd", "calm", "all-idle", "narrow", "promoted", "compact", "tall"];
 
 /** Build one scenario's StageVM. opts: { width, height, tick } (tick 1 = the next tick). */
 export function makeScenario(name, opts = {}) {

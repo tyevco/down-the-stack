@@ -1,3 +1,7 @@
+// Portions ported from gpui-kit's QuickJS prelude (herdr-app 0.1.17,
+// vendor/gpui-kit/crates/shell/src/engine/quickjs/mod.rs), Copyright 2024 - 2026 Longbridge,
+// Apache License 2.0 (see tools/mock/NOTICE and tools/mock/LICENSE-APACHE-2.0); modified for Node.
+//
 // The element builder: a strict stand-in for gpui-shell's prelude elements.
 //
 // Every element shares one prototype holding every allowlisted method (tools/api-allowlist.json);
@@ -94,6 +98,12 @@ function self(el, method) {
   if (!node) throw mockError("bad-receiver", `${method}() was called on something that is not an element`);
   if (S.render.active && node.gen !== S.render.gen && !node.detached) {
     throw mockError("expired-element", "this element belongs to a previous render pass; elements are single-use values and must be rebuilt each time render runs");
+  }
+  // herdr's SpecArena refuses every call on an element that already has a parent (spec.rs
+  // check_live → AlreadyParented, thrown to script as a TypeError): build an element completely,
+  // then attach it. A slot's element (claimed) still takes styles, as in herdr.
+  if (node.parent && !node.claimed && !node.detached) {
+    throw mockError("reused-element", `${method}(): element \`${node.type}\` was already added to a parent; elements are single-use values (finish building it before .child())`);
   }
   return node;
 }

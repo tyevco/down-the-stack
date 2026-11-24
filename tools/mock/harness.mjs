@@ -11,15 +11,20 @@
 import path from "node:path";
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
-import { S, als, report, setFixture, fixture, setChecking, setClock, flush, realDelay, deliver } from "./state.mjs";
+import { S, als, report, setFixture, fixture, setChecking, setClock, flush, realDelay, deliver, clock, enterVm, leaveVm } from "./state.mjs";
 import { assetRoots, setAssetRoot, resolveAsset } from "./config.mjs";
 import { NODE, isElement, textNode, serialize, Node } from "./elements.mjs";
 import { View, construct, makeCx, withPhase, advanceTimers } from "./view.mjs";
 import { mockError } from "./validate.mjs";
 import "./globals.mjs";
 
-/** herdr's budgets (ms), plus the mock's warning thresholds (renderWarn, elements). */
-export const BUDGET = { render: 50, renderWarn: 10, event: 500, init: 500, module: 5000, close: 250, elements: 400 };
+/**
+ * herdr's budgets (ms), plus the mock's warning thresholds (renderWarn, moduleWarn, elements).
+ * Module evaluation runs inside the Task scope herdr opens around every load (plugin.rs
+ * load_view_with_policy → ScopePhase::Task; scope.rs enter_application keeps that phase), and the
+ * interrupt handler gives Task the event budget, 500 ms (sandbox.rs), not the 5 s "detached" one.
+ */
+export const BUDGET = { render: 50, renderWarn: 10, event: 500, init: 500, module: 500, moduleWarn: 150, close: 250, elements: 400 };
 const LIST_CAP = 200;
 let graphSeq = 0;
 
@@ -85,6 +90,8 @@ export class Mounted {
     copy.handle = this;
     this.opts = opts;
     this.graph = null;
+    /** VM identity: copies on one VM share module scope and globals; it survives reload(). */
+    this.vm = null;
     this.mainPath = null;
     this.module = null;
     /** last good live Node tree / serialised tree */
@@ -348,7 +355,7 @@ export class Mounted {
     const fired = await advanceTimers(ms, { flush, budgetMs: BUDGET.event });
     await flush();
     let rendered = false;
-    if (render && this.copy.alive && this.copy.dirty) {
+    if (render && this.copy.alive && this.copy.dirty && !this.copy.hidden) {
       this.render();
       rendered = true;
     }
@@ -387,22 +394,28 @@ export class Mounted {
   }
 
   _release() {
-    // Timers and tasks die with the copy (advanceTimers skips cancelled tasks and dead copies).
+    // Timers and tasks die with the copy, and the clock lets go of their callbacks.
     for (const t of this.copy.tasks) { t.cancelled = true; t.done = true; }
+    clock.timers = clock.timers.filter((t) => t.copy !== this.copy);
     this.copy.alive = false;
     S.copies = S.copies.filter((c) => c !== this.copy);
     if (S.lastCopy === this.copy) S.lastCopy = S.copies[S.copies.length - 1] ?? null;
   }
 
-  /** Hot reload: re-evaluate the module graph, init a new instance, then cancel the old tasks (no close()). */
+  /**
+   * Hot reload of this copy alone: re-evaluate the module graph, init a new instance, then cancel
+   * the old tasks (no close()). herdr reloads every copy of a mod together into one new module
+   * scope: use reloadAll(handles) for that.
+   */
   async reload() {
-    if (!this.mainPath) throw new Error("reload(): this copy was mounted from a class, not a file");
-    const old = new Set(this.copy.tasks);
-    this.copy.tasks = new Set();
-    this.graph = `g${++graphSeq}`;
-    await loadInto(this, this.mainPath, this.graph);
-    for (const t of old) { t.cancelled = true; t.done = true; }
-    await flush();
+    await reloadAll([this]);
+    return this;
+  }
+
+  /** Hide or show this copy: hidden copies keep their timers but neither render nor get `<mod>.<command>`. */
+  hide(on = true) {
+    this.copy.hidden = !!on;
+    if (!on) this.copy.dirty = true; // herdr draws a copy that shows again
     return this;
   }
 }
@@ -416,6 +429,41 @@ export function walkLive(node, fn) {
   fn(node);
   for (const c of node.children) walkLive(c, fn);
   for (const c of Object.values(node.slots)) walkLive(c, fn);
+}
+
+/**
+ * Hot reload, as herdr does it when a mod's file is saved: the new code is evaluated once (one new
+ * module scope, shared by every copy, as herdr caches it per source revision), each copy gets a
+ * new instance, then each copy's old tasks and timers are cancelled without close(). `handles`
+ * should be every copy of one VM (pass the ones the test cares about).
+ */
+export async function reloadAll(handles) {
+  const list = handles.filter((h) => h && h.copy.alive);
+  for (const h of list) if (!h.mainPath) throw new Error("reload(): this copy was mounted from a class, not a file");
+  if (!list.length) return;
+  const graph = `g${++graphSeq}`;
+  const vm = list[0].vm ?? list[0].graph;
+  const modName = list[0].copy.modName;
+  enterVm(vm, modName);
+  const old = list.map((h) => {
+    const tasks = new Set(h.copy.tasks);
+    h.copy.tasks = new Set();
+    return tasks;
+  });
+  try {
+    for (const h of list) {
+      h.graph = graph;
+      h.vm = vm;
+      await loadInto(h, h.mainPath, graph);
+    }
+  } finally {
+    leaveVm(vm, modName);
+  }
+  list.forEach((h, i) => {
+    for (const t of old[i]) { t.cancelled = true; t.done = true; }
+    clock.timers = clock.timers.filter((t) => !old[i].has(t.task));
+  });
+  await flush();
 }
 
 async function loadInto(handle, abs, graph) {
@@ -434,7 +482,9 @@ async function loadInto(handle, abs, graph) {
     S.evaluating = false;
   }
   handle.stats.evalMs = performance.now() - t0;
-  if (handle.stats.evalMs > BUDGET.module) report("error", "budget", `module evaluation took ${handle.stats.evalMs.toFixed(0)} ms (budget ${BUDGET.module} ms)`, { copy });
+  // (Node caches a graph's modules: only the copy that evaluated it measures real work.)
+  if (handle.stats.evalMs > BUDGET.module) report("error", "budget", `module evaluation took ${handle.stats.evalMs.toFixed(0)} ms (herdr's budget is ${BUDGET.module} ms: it runs inside the load's Task scope)`, { copy });
+  else if (handle.stats.evalMs > BUDGET.moduleWarn) report("warning", "slow-module", `module evaluation took ${handle.stats.evalMs.toFixed(0)} ms under V8; QuickJS interprets several times slower and herdr's budget is ${BUDGET.module} ms`, { copy });
   handle.module = mod;
   const Class = mod.default;
   if (typeof Class !== "function" || !(Class.prototype instanceof View)) {
@@ -497,7 +547,14 @@ export async function mountMod(mainPath, opts = {}) {
   const handle = new Mounted(copy, opts);
   handle.mainPath = abs;
   handle.graph = opts.graph ?? `g${++graphSeq}`;
-  await loadInto(handle, abs, handle.graph);
+  // a graph seen before is that VM (its copies' reloads may have moved its graph key along)
+  handle.vm = mounted().find((h) => h !== handle && (h.graph === handle.graph || h.vm === handle.graph))?.vm ?? handle.graph;
+  enterVm(handle.vm, modName);
+  try {
+    await loadInto(handle, abs, handle.graph);
+  } finally {
+    leaveVm(handle.vm, modName);
+  }
   return handle;
 }
 
@@ -525,7 +582,7 @@ export function mounted() {
 export async function tickAll(ms = 1000) {
   const fired = await advanceTimers(ms, { flush, budgetMs: BUDGET.event });
   await flush();
-  for (const h of mounted()) if (h.copy.dirty) h.render();
+  for (const h of mounted()) if (h.copy.dirty && !h.copy.hidden) h.render();
   return fired;
 }
 

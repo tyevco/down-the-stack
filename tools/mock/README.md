@@ -75,7 +75,16 @@ mod.errors; mod.warnings; mod.stats;  // [{level, code, message, phase, copy}], 
 - `mountView(Class, opts)` mounts a View class without a file (handy for renderer unit tests).
 - Copies share module scope only when mounted with the same `graph` key (herdr has one VM; the
   default gives each mount a fresh module graph, like a VM restart). `mod.import("./host.js")`
-  loads another file from the same graph. `mod.reload()` = hot reload (no `close()`), `mod.close()`.
+  loads another file from the same graph. `M.reloadAll([a, b, ...])` = hot reload as herdr does it
+  (one new module scope for every copy of the VM, new instances, old tasks and timers cancelled,
+  no `close()`); `mod.reload()` reloads one copy alone; `mod.close()`. `globalThis[Symbol.for(
+  "<mod>.…")]` is per VM: it survives a reload, not a fresh graph (another window or a restart).
+- `mod.hide()` / `mod.hide(false)`: a hidden copy (a hidden block) keeps its timers but does not
+  render and gets no `<mod>.<command>`; with no shown copy, `run("<mod>.x")` is an error
+  (`no-mod-copy`: herdr shows a "<mod>.x failed" toast) and lands in `M.calls().toasts`.
+- IO trouble: fixture `readError(absPath)` → an Error (or text) rejects that read;
+  `hangAfterWrite(absPath)` → true lands that write but never settles its promise (the calling
+  copy went away mid-write).
 - `setFixture()` replaces live data, `updateFixture()` merges (marks copies that read those keys
   dirty), `setChecking(true)` = `herdr-app check` behaviour, `setClock(ms)` freezes `Date.now()`.
   `Date.now()` follows the mock clock (`tick` advances it); `new Date()` stays real time.
@@ -92,10 +101,13 @@ Thrown, as herdr does (error `code` in parentheses): unknown element method (`un
 border_color` and in state styles; bad length (`bad-length`: `auto` refused by `p* gap*`, `%`/`auto`
 by `border* rounded* text_size`); non-string `.id()` / `.tooltip()`; objects as arguments;
 `.child(null|undefined)` (`null-child`); one element under two parents (`reused-element`); an element
-from a previous render (`expired-element`); motion policy (`bad-motion`: property in opacity|width|
+from a previous render (`expired-element`); any call on an element that already has a parent
+(`reused-element`: herdr's `AlreadyParented`; build an element fully, then attach it); motion policy (`bad-motion`: property in opacity|width|
 height|left|top, loop period ≥ 100, frames ≥ 16 ms, spin ≥ 100, easing names); `when()` returning
-nothing; `cx.notify()` / `focus_handle()` / `cx.new()` during render (`notify-in-render`,
-`not-in-render`); a kept call-scoped cx (`stale-cx`); `run()` with unknown or mistyped arguments;
+nothing; `cx.notify()` / `focus_handle()` / `cx.new()` / `FocusHandle.focus()` and creating state
+(`InputState`/`TextareaState`/`EditorState`/`SliderState`/`OtpState`/`CalendarState`.new,
+`ScrollHandle.new`, `VirtualListScrollHandle.new`) during render or a list's item renderer
+(`notify-in-render`, `not-in-render`); a kept call-scoped cx (`stale-cx`); `run()` with unknown or mistyped arguments;
 `setTimeout`/`setInterval`/`structuredClone` called from mod code (`forbidden-global`); `fs/promises`
 outside granted roots (`fs-denied`, narrowed during check); imports herdr lacks (`node:*`, JSON).
 
@@ -105,14 +117,23 @@ Recorded as errors (herdr would not throw, but it is a bug): `.child(true|false)
 unknown command name or missing required argument in `run()` (`bad-command`), any host call at
 module top level (`top-level-herdr`), handlers on `image()`/`svg()` (`handler-on-image`: herdr drops them), `writeTextFile` while checking (`write-in-check`) or under
 `mods/` (`write-under-mods`), `setShared` in render, throwing handlers/timers/tasks, budgets (render
-50 ms, init/event/timer 500 ms, module 5 s, close 250 ms).
+50 ms, init/event/timer 500 ms, module 500 ms: herdr evaluates a mod inside the load's Task scope,
+which gets the event budget, close 250 ms).
 
 Warnings: duplicate `.id()` in one render, transition without `.id()`, `frames()` with children,
 non-style calls in `hover()`, args to nullary styles, a second loop on one property, `playSound`,
-SVG files using `<text>`, render > 10 ms under V8 (QuickJS is slower), > 400 elements per render.
+SVG files using `<text>`, render > 10 ms or module evaluation > 150 ms under V8 (QuickJS is
+slower), > 400 elements per render.
+
+Scroll handles have herdr's surface only: `offset()`, `content_size()`, `viewport_size()`,
+`scroll_to_item()`, `release()`, plus `scroll_to_bottom()` on a `VirtualListScrollHandle`.
 
 Not modelled: layout/paint, real QuickJS speed, frozen built-in prototypes (check.mjs lints for
-writes to them), private `#fields`/static blocks (linted).
+literal writes to them; `npm run qjs` runs the mod in QuickJS-ng with herdr's sandbox prelude,
+frozen prototypes included), private `#fields`/static blocks (linted).
+
+`herdr.d.ts` and `herdr-commands.md` are verbatim copies from herdr-app 0.1.17 and parts of
+`elements.mjs` are ported from gpui-kit, all Apache-2.0: see `NOTICE` and `LICENSE-APACHE-2.0`.
 
 ## Files
 

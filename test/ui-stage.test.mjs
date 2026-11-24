@@ -17,21 +17,32 @@ const WIDTHS = [360, 960, 1600, 2400];
 const ZOOMS = [1, 2];
 
 /** A fake GameHost per the UI role contract; `ref.vm` is what host.view() returns. */
-function fakeHost(ref) {
+function fakeHost(ref, extra = {}) {
   const log = { views: [], commands: [] };
   return {
     log, world: null, version: 1, claim: () => true,
     view: (kind, args) => { log.views.push({ kind, args }); return ref.vm; },
     command: (name, args) => { log.commands.push({ name, args }); return { ok: true }; },
+    ...extra,
   };
 }
 
-/** Mount the Stage role in a View (as main.js will), report its size, render. */
-async function mountStage(vm, { width = vm?.width ?? 960, height = vm?.height ?? 200, zoom = 1, theme = "graphite" } = {}) {
+/** panes() rows for the given terminals (a hero's agent has a pane; a sub-agent usually not). */
+const panesFor = (terminals) => terminals.map((t, i) => ({
+  pane: `p${i + 1}`, terminal: t, tab: "tab1", title: t, name: null, cwd: null, branch: null, status: "working",
+  app: "claude-code", program: M.PROGRAMS?.claude ?? null, focused: false, zoomed: false, movable: true, scroll: null,
+}));
+
+/**
+ * Mount the Stage role in a View (as main.js will), report its size, render. By default every
+ * hero's terminal has a pane (as herdr agents do) and Forklings have none; `panes` overrides.
+ */
+async function mountStage(vm, { width = vm?.width ?? 960, height = vm?.height ?? 200, zoom = 1, theme = "graphite", panes, host: hostExtra } = {}) {
   M.resetState();
-  M.setFixture({ theme, settings: { zoom }, layout: M.readLayout() });
+  const terms = panes ?? (vm?.heroes ?? []).map((h) => h.address).filter(Boolean);
+  M.setFixture({ theme, settings: { zoom }, layout: M.readLayout(), panes: panesFor(terms) });
   const ref = { vm };
-  const host = fakeHost(ref);
+  const host = fakeHost(ref, hostExtra);
   class Wrap extends View {
     init(_p, cx) { this.stage = new Stage(); this.stage.init({ role: "stage" }, cx, host); }
     render(cx) { return this.stage.render(cx); }
@@ -94,14 +105,16 @@ test("the root reports its logical size to host.view (window px ÷ zoom)", async
   assert.equal(mod.stats.renders, renders);
 });
 
-test("clicks: hero focuses + marks seen, double-click and nameplate open the sheet", async () => {
+const lastRun = () => { const c = M.calls().run.at(-1); return c ? { name: c.name, args: c.args } : null; };
+
+test("clicks: hero shows its pane (pane.focus) + marks seen, double-click and nameplate open the sheet", async () => {
   const { mod, host } = await mountStage(scenarios.midgame);
   const kip = scenarios.midgame.heroes.find((h) => h.heroId === 1);
   let r = mod.fire(kip.key);
   assert.ok(r.stopped);
   assert.deepEqual(host.log.commands.at(-1), { name: "markSeen", args: { heroId: 1 } });
-  assert.deepEqual(M.calls().run.at(-1).name, "agent.focus");
-  assert.deepEqual(M.calls().run.at(-1).args, { terminal: kip.address });
+  // herdr's agent.focus shows nothing without an agent block (the layout has none): pane.focus
+  assert.deepEqual(lastRun(), { name: "pane.focus", args: { terminal: kip.address } });
 
   r = mod.fire(kip.key, { click_count: 2 });
   const sheet = M.calls().openOverlay.at(-1).spec;
@@ -114,26 +127,69 @@ test("clicks: hero focuses + marks seen, double-click and nameplate open the she
   assert.deepEqual(problems(mod), []);
 });
 
-test("clicks: the blocked bubble and a forkling focus their terminals; a chest is claimed", async () => {
+test("clicks: the blocked bubble shows its pane, a paneless forkling is peeked, a chest is claimed", async () => {
   const vm = scenarios.midgame;
   const { mod, host } = await mountStage(vm);
   const rue = vm.heroes.find((h) => h.bubble);
   const n = host.log.commands.length;
   const r = mod.fire(`${rue.key}/bubble`);
   assert.ok(r.stopped, "the bubble must not fall through to the hero");
-  assert.deepEqual(M.calls().run.at(-1), { name: "agent.focus", args: { terminal: rue.address }, copy: M.calls().run.at(-1).copy });
-  assert.equal(host.log.commands.length, n, "the bubble only focuses");
+  assert.deepEqual(lastRun(), { name: "pane.focus", args: { terminal: rue.address } });
+  assert.equal(host.log.commands.length, n, "the bubble only shows the terminal");
 
+  // a sub-agent has no pane: herdr's peek shows it, as the agents list does (agent.focus would
+  // only record a shown agent that no block of this layout draws)
   const pax = vm.heroes.find((h) => h.forklings.length);
+  for (const fk of pax.forklings) {
+    assert.ok(mod.fire(fk.key).stopped);
+    assert.deepEqual(lastRun(), { name: "terminal.peek", args: { terminal: fk.address } });
+  }
   const fk = pax.forklings[0];
-  mod.fire(fk.key);
-  assert.deepEqual(M.calls().run.at(-1).args, { terminal: fk.address });
   assert.equal(mod.node(fk.key).methods.find((m) => m[0] === "tooltip")?.[1][0], fk.tooltip);
 
   const chest = vm.chests[0];
   mod.fire(chest.key);
   assert.deepEqual(host.log.commands.at(-1), { name: "claimChest", args: { heroId: chest.heroId } });
-  assert.deepEqual(M.calls().run.at(-1).args, { terminal: chest.address });
+  assert.deepEqual(lastRun(), { name: "pane.focus", args: { terminal: chest.address } });
+  assert.equal(M.calls().run.filter((c) => c.name === "agent.focus").length, 0, "agent.focus never runs");
+  assert.deepEqual(problems(mod), []);
+});
+
+test("clicks: a hero without a pane (an orphan sub-agent's pseudo-hero) is peeked, body, bubble and chest", async () => {
+  const vm = scenarios.midgame;
+  const { mod, host } = await mountStage(vm, { panes: [] });
+  const kip = vm.heroes.find((h) => h.heroId === 1);
+  mod.fire(kip.key);
+  assert.deepEqual(lastRun(), { name: "terminal.peek", args: { terminal: kip.address } });
+  assert.deepEqual(host.log.commands.at(-1), { name: "markSeen", args: { heroId: 1 } });
+  const rue = vm.heroes.find((h) => h.bubble);
+  mod.fire(`${rue.key}/bubble`);
+  assert.deepEqual(lastRun(), { name: "terminal.peek", args: { terminal: rue.address } });
+  const chest = vm.chests[0];
+  mod.fire(chest.key);
+  assert.deepEqual(lastRun(), { name: "terminal.peek", args: { terminal: chest.address } });
+  assert.deepEqual(host.log.commands.at(-1), { name: "claimChest", args: { heroId: chest.heroId } });
+});
+
+test("a Duck Chest pops where the duck stood: no SHIPPED ribbon, no claim; it opens next tick", async () => {
+  const vm = scenarios["first-day"];
+  const duck = vm.chests.find((c) => c.tier === "duck");
+  assert.ok(duck && !duck.open);
+  const { mod, host, ref } = await mountStage(vm);
+  const art = (re) => mod.findAll((n) => typeof n.src === "string" && re.test(n.src));
+  assert.ok(mod.node(duck.key));
+  assert.equal(art(/fx\/chest-duck\.svg$/).length, 1, "closed duck chest art");
+  assert.equal(art(/fx\/ribbon\.svg$/).length, 0, "no SHIPPED ribbon on a Duck Chest (first-day has no Commit Chest)");
+  const n = host.log.commands.length;
+  const r = mod.fire(duck.key);
+  assert.equal(r.called, 0, "a Duck Chest has no click (its item is already given)");
+  assert.equal(host.log.commands.length, n);
+  ref.vm = makeScenario("first-day", { tick: 1 });
+  mod.render();
+  assert.equal(art(/fx\/chest-duck-open\.svg$/).length, 1, "lid open at age 1");
+  ref.vm = makeScenario("first-day", { tick: 2 });
+  mod.render();
+  assert.equal(mod.node(duck.key), null, "gone after two ticks");
   assert.deepEqual(problems(mod), []);
 });
 
@@ -208,9 +264,173 @@ test("calm mode: no loops, no frames, no damage numbers, 60% stage", async () =>
   assert.equal(mod.findAll((n) => methodsOf(n, "frames").length > 0).length, 0);
   for (const f of vm.fx) if (["num", "crit", "incoming", "miss", "inv", "pillar", "levelup", "skill"].includes(f.kind)) assert.equal(mod.node(f.key), null, f.key);
   assert.equal(methodsOf(mod.node("stage-scene"), "opacity").at(-1)[0], 0.6);
-  // bubbles and chests stay
-  assert.ok(mod.node(`${vm.heroes.find((h) => h.bubble).key}/bubble`));
-  assert.ok(mod.node(vm.chests[0].key));
+  // bubbles and chests stay (D§11.15): drawn over the dimmed scene, not inside it, so the reserved
+  // blocked cue keeps its white
+  const opacityChain = (n) => { let o = 1; for (let p = n; p; p = p.parent) { const op = methodsOf(p, "opacity").at(-1); if (op) o *= op[0]; } return o; };
+  const bub = mod.node(`${vm.heroes.find((h) => h.bubble).key}/bubble`);
+  assert.ok(bub);
+  assert.equal(opacityChain(bub), 1, "the '!' bubble is not dimmed");
+  const chest = mod.node(vm.chests[0].key);
+  assert.ok(chest);
+  assert.equal(opacityChain(chest), 1, "the chest is not dimmed");
+  const fkBubbles = mod.findAll((n) => n.src === "mods/mapledr/art/fx/bubble.svg" && methodsOf(n, "w").at(-1)?.[0] === 9);
+  assert.ok(fkBubbles.length >= 1, "the blocked forkling's small bubble");
+  for (const n of fkBubbles) assert.equal(opacityChain(n), 1, "the forkling's bubble is not dimmed");
+  // a hero is (60 %)
+  assert.equal(opacityChain(mod.node(vm.heroes[0].key)) <= 0.6 + 1e-9, true);
+  // outside calm the bubble stays in the scene, under the plates and effects
+  const { mod: m2 } = await mountStage(scenarios.midgame);
+  let p = m2.node(`${vm.heroes.find((h) => h.bubble).key}/bubble`).parent;
+  assert.equal(p.id, "stage-scene");
+  p = mod.node(`${vm.heroes.find((h) => h.bubble).key}/bubble`).parent;
+  assert.equal(p.id, "stage");
+  assert.deepEqual(problems(mod), []);
+});
+
+test("clicks: a room header pins the room's heroes (unpins when all are), the boss door challenges", async () => {
+  const vm = scenarios.midgame;
+  const { mod, host } = await mountStage(vm);
+  const room = vm.rooms.find((r) => r.pin && r.pin.heroIds.length > 1);
+  assert.ok(room, "a merged room with several heroes");
+  const n = host.log.commands.length;
+  assert.ok(mod.fire(`${room.key}/hdr`).stopped);
+  assert.deepEqual(host.log.commands.slice(n), room.pin.heroIds.map((heroId) => ({ name: "pinMap", args: { heroId, mapId: room.mapId } })));
+  const door = vm.rooms.find((r) => r.door && r.challenge);
+  assert.ok(door);
+  const m = host.log.commands.length;
+  assert.ok(mod.fire(`${door.key}/door`).stopped, "the door's click does not also pin");
+  assert.deepEqual(host.log.commands.slice(m), [{ name: "challenge", args: { kind: "boss", idx: door.challenge.idx } }]);
+  assert.equal(mod.node(`${door.key}/door`).methods.find((x) => x[0] === "tooltip")?.[1][0], door.challenge.tooltip);
+  // a room whose heroes are all pinned here unpins them
+  const pinned = scenarios.promoted.rooms.find((r) => r.pin && r.pin.mapId === null);
+  assert.ok(pinned);
+  const { mod: m2, host: h2 } = await mountStage(scenarios.promoted);
+  m2.fire(`${pinned.key}/hdr`);
+  assert.deepEqual(h2.log.commands.at(-1), { name: "pinMap", args: { heroId: pinned.pin.heroIds.at(-1), mapId: null } });
+  // the arena's header is not a pin target
+  const { mod: m3, host: h3 } = await mountStage(scenarios.boss);
+  const arena = scenarios.boss.rooms.find((r) => r.key.startsWith("room:arena:"));
+  assert.equal(m3.fire(`${arena.key}/hdr`).called, 0);
+  assert.equal(h3.log.commands.length, 0);
+});
+
+test("clicks: the boss retreats only on a second click within 4 ticks (the sheet's confirm pattern)", async () => {
+  const vm = scenarios.boss;
+  const b = vm.boss;
+  assert.ok(b.retreat);
+  const { mod, host, ref } = await mountStage(vm);
+  assert.ok(mod.fire(b.key).stopped);
+  assert.equal(host.log.commands.length, 0, "the first click only arms");
+  assert.equal(mod.copy.dirty, true, "the click asks for a render (cx.notify)");
+  mod.render();
+  const pill = mod.node(`${b.key}/armed`);
+  assert.ok(pill, "the armed question shows over the boss");
+  assert.equal(mod.text().includes(b.retreat.confirm), true);
+  mod.fire(b.key);
+  assert.deepEqual(host.log.commands.at(-1), { name: "retreat", args: {} });
+  mod.render();
+  assert.equal(mod.node(`${b.key}/armed`), null, "disarmed after retreating");
+  // an armed click lapses after 4 ticks: the next click arms again
+  mod.fire(b.key);
+  ref.vm = makeScenario("boss", { tick: 5 });
+  mod.render();
+  assert.equal(mod.node(`${b.key}/armed`), null);
+  const n = host.log.commands.length;
+  mod.fire(b.key);
+  assert.equal(host.log.commands.length, n, "a stale arm does not retreat");
+  // a double-click (GPUI: on_click with click_count 1, then 2) only arms; a later single click retreats
+  {
+    const { mod: md, host: hd } = await mountStage(vm);
+    assert.ok(md.fire(b.key, { click_count: 1 }).stopped);
+    md.render();
+    assert.ok(md.fire(b.key, { click_count: 2 }).stopped, "the second click of a double-click falls through to nothing");
+    assert.equal(hd.log.commands.length, 0, "a double-click on the boss never retreats");
+    md.render();
+    assert.ok(md.node(`${b.key}/armed`), "still armed: the question shows");
+    md.fire(b.key, { click_count: 1 });
+    assert.deepEqual(hd.log.commands, [{ name: "retreat", args: {} }]);
+  }
+  // a won fight (stamp) has no Retreat
+  const { mod: m2, host: h2 } = await mountStage(scenarios["boss-won"]);
+  assert.equal(scenarios["boss-won"].boss.retreat, null);
+  assert.equal(m2.fire(scenarios["boss-won"].boss.key).called, 0);
+  assert.equal(h2.log.commands.length, 0);
+  assert.deepEqual(problems(mod), []);
+});
+
+test("clicks: a loot pillar opens the finder's sheet on that item (through the host's registry)", async () => {
+  const vm = scenarios["boss-won"];
+  const pillar = vm.fx.find((f) => f.kind === "pillar" && f.sheet);
+  assert.ok(pillar);
+  let { mod } = await mountStage(vm);
+  assert.ok(mod.fire(pillar.key).stopped);
+  assert.deepEqual(M.calls().openOverlay.at(-1).spec.props, { role: "sheet", heroId: pillar.sheet.heroId, focus: pillar.sheet.itemUid });
+  const opened = [];
+  ({ mod } = await mountStage(vm, { host: { openSheet: (heroId, opts) => { opened.push([heroId, opts]); return "ov1"; } } }));
+  const before = M.calls().openOverlay.length;
+  mod.fire(pillar.key);
+  assert.deepEqual(opened, [[pillar.sheet.heroId, { focus: pillar.sheet.itemUid }]]);
+  assert.equal(M.calls().openOverlay.length, before, "the host opens it (one sheet at a time)");
+});
+
+test("review end: the Promotion banner (12 confetti) and the Postmortem card in their slots; calm keeps the card", async () => {
+  const vm = scenarios.promoted;
+  const promo = vm.heroes.find((h) => h.reviewEnd?.kind === "promoted");
+  const pm = vm.heroes.find((h) => h.reviewEnd?.kind === "postmortem");
+  assert.ok(promo && pm);
+  const { mod, ref } = await mountStage(vm);
+  assert.deepEqual(problems(mod), []);
+  const banner = mod.node(promo.reviewEnd.key);
+  assert.ok(banner);
+  assert.ok(mod.text().includes("PROMOTED") && mod.text().includes(promo.careerTitle));
+  const left = methodsOf(banner, "left").at(-1)[0];
+  const w = methodsOf(banner, "w").at(-1)[0];
+  assert.ok(left >= promo.slot.x - 0.5 && left + w <= promo.slot.x + promo.slot.w + 0.5, "inside the hero's slot");
+  assert.equal(methodsOf(banner, "opacity").at(-1)[0], 1);
+  const confetti = mod.findAll((n) => typeof n.id === "string" && n.id.startsWith(`${promo.reviewEnd.key}/c`));
+  assert.equal(confetti.length, 12);
+  assert.ok(mod.node(pm.reviewEnd.key));
+  assert.ok(mod.text().includes(pm.reviewEnd.text));
+  // age 3: fading out (same ids, opacity 0); then gone
+  ref.vm = makeScenario("promoted", { tick: 2 });
+  mod.render();
+  assert.equal(methodsOf(mod.node(promo.reviewEnd.key), "opacity").at(-1)[0], 0);
+  ref.vm = makeScenario("promoted", { tick: 3 });
+  mod.render();
+  assert.equal(mod.node(promo.reviewEnd.key), null);
+  // calm: no banners (D§11.15), the Postmortem card stays
+  const calm = { ...vm, calm: true };
+  const { mod: m2 } = await mountStage(calm);
+  assert.equal(m2.node(promo.reviewEnd.key), null);
+  assert.ok(m2.node(pm.reviewEnd.key));
+});
+
+test("header notes stay inside the header band (D§11.15): truncated into a header, or not shown", async () => {
+  const note = { key: "note:1", text: "Localhost: Docs Library 8", color: "#FFF4D6" };
+  for (const name of ["late", "midgame", "boss", "crowd", "narrow"]) {
+    for (const height of [120, 200]) {
+      for (const width of [360, 960, 1600]) {
+        const vm = { ...makeScenario(name, { width, height }), headerNote: note };
+        const { mod } = await mountStage(vm, { width, height });
+        const n = mod.node(note.key);
+        if (!n) continue;
+        const where = `${name} ${width}×${height}`;
+        assert.equal(methodsOf(n, "top").at(-1)[0], 1, `${where}: in the band`);
+        const l = methodsOf(n, "left").at(-1)[0];
+        const w = methodsOf(n, "w").at(-1)[0];
+        assert.ok(w >= 60 || w >= String(note.text).length * 6, `${where}: ${w} px`);
+        // never over a room title: right of the header's contents, inside one room
+        const room = vm.rooms.find((r) => l >= r.x - 0.5 && l + w <= r.x + r.w + 0.5);
+        assert.ok(room, `${where}: inside one room's header`);
+        if (vm.boss && height < 160) assert.ok(!room.key.startsWith("room:arena:"), `${where}: not over the slim boss HUD`);
+      }
+    }
+  }
+  // the regression: 120 px late at 1200 never draws the pill down at y 21 over the heads
+  const vm = { ...makeScenario("late", { height: 120 }), headerNote: note };
+  const { mod } = await mountStage(vm, { height: 120 });
+  const n = mod.node(note.key);
+  assert.ok(!n || methodsOf(n, "top").at(-1)[0] === 1);
 });
 
 test("stillness: only campfire glows and blocked bubbles move", async () => {

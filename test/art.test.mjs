@@ -1,5 +1,6 @@
 // Art contract tests (ARCHITECTURE §8): every asset exists for every content id, is well-formed
-// SVG without <text>, has viewBox = display size, masks are single-colour, tiles are seamless,
+// SVG without <text>, has viewBox = display size, carries enough intrinsic pixels (width/height =
+// k × viewBox) for the largest image() draw, masks are single-colour, tiles are seamless,
 // sprites stand on their bottom edge, and the files on disk are exactly what tools/gen-art.mjs
 // produces (art is generated, never hand-edited).
 
@@ -8,8 +9,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ZONES, MOBS, ADDS, BOSSES, CLASSES, CHEST_TIERS, BACKLOG } from "../mods/mapledr/game/data.js";
-import { generateAll, isMaskPath } from "../tools/gen-art.mjs";
+import { ZONES, MOBS, ADDS, BOSSES, CLASSES, CHEST_TIERS, BACKLOG, ELITE, TRAITS } from "../mods/mapledr/game/data.js";
+import { generateAll, isMaskPath, intrinsicScale } from "../tools/gen-art.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const MOD = path.join(ROOT, "mods/mapledr");
@@ -115,6 +116,11 @@ const sizeOf = (src) => {
   const vb = /viewBox="0 0 (\d+) (\d+)"/.exec(src);
   return vb ? [Number(vb[1]), Number(vb[2])] : null;
 };
+/** The root's width/height attributes: the size GPUI's image() rasterises at (×2). */
+const intrinsicOf = (src) => {
+  const m = /^<svg[^>]* width="(\d+)" height="(\d+)"/.exec(src);
+  return m ? [Number(m[1]), Number(m[2])] : null;
+};
 
 // ---------------------------------------------------------------------------------------------
 
@@ -127,7 +133,7 @@ test("every asset in the art contract exists for every content id", () => {
   assert.deepEqual(CHEST_TIERS.map((t) => t.id), ["wooden", "iron", "silver", "gold"]);
 });
 
-test("each SVG is well-formed, text-free, self-contained, and sized by its viewBox", () => {
+test("each SVG is well-formed, text-free, self-contained, and sized by its viewBox (width/height = k × viewBox)", () => {
   for (const [rel, want] of EXP) {
     const src = read(rel);
     assert.equal(checkXml(src), null, `${rel}: not well-formed`);
@@ -138,11 +144,117 @@ test("each SVG is well-formed, text-free, self-contained, and sized by its viewB
     const vb = sizeOf(src);
     assert.ok(vb, `${rel}: viewBox must be "0 0 W H"`);
     const [w, h] = vb;
-    assert.match(src, new RegExp(`<svg[^>]* width="${w}" height="${h}"`), `${rel}: width/height must equal the viewBox`);
+    const k = intrinsicScale(rel);
+    assert.ok(Number.isInteger(k) && k >= 1, `${rel}: intrinsic scale ${k}`);
+    assert.deepEqual(intrinsicOf(src), [k * w, k * h], `${rel}: width/height must be ${k} × the viewBox`);
     if (Array.isArray(want)) assert.deepEqual(vb, want, `${rel}: size`);
     else assert.ok(w <= want.max[0] && h <= want.max[1], `${rel}: ${w}x${h} exceeds ${want.max.join("x")}`);
     assert.ok(src.length < 64 * 1024, `${rel}: ${src.length} bytes is too big`);
   }
+});
+
+// herdr's image() rasterises an SVG once at 2 × its width/height and samples that bitmap into the
+// element (gpui-pre img.rs:773-775, svg_renderer.rs:200-207; linear filter, one mip). On a 2×
+// display at zoom 1 a draw stays sharp while drawn / viewBox ≤ k. svg() masks are rasterised at
+// the painted size, so they need no headroom.
+test("the intrinsic scale k gives each image() family headroom for its largest draw", () => {
+  const all = [...generateAll().keys()];
+  for (const rel of all) {
+    const k = intrinsicScale(rel);
+    if (isMaskPath(rel)) assert.equal(k, 1, `${rel}: masks are rasterised at the painted size`);
+    else if (rel.startsWith("art/mob/")) assert.equal(k, 2, rel);
+    else if (rel.startsWith("art/gear/acc-")) assert.equal(k, 2, rel);
+    else if (rel === "art/fx/campfire.svg") assert.equal(k, 2, rel);
+    else if (rel === "art/fx/mug.svg") assert.equal(k, 3, rel);
+    // the FIXED stamp slams in from 2× its size (ui/stage.js: 160×56 at age 0, then a 300 ms
+    // width/height transition to 80×28 while it fades in); the role matrix never shows that frame
+    else if (rel === "art/fx/stamp-fixed.svg") assert.equal(k, 2, rel);
+    // bosses, backgrounds, the other fx and the layout preview are drawn at or below their viewBox
+    else assert.equal(k, 1, `${rel}: drawn at or below its viewBox`);
+  }
+  // the biggest mob draw: an elite (ELITE.scale) grower at its cap (ui/stage.js sizes mobs at
+  // px × elite × growScale)
+  assert.ok(ELITE.scale * (1 + TRAITS.grower.cap) <= intrinsicScale("art/mob/memory_leak_slime.svg") + 1e-9,
+    "an elite, fully grown mob outgrows its intrinsic raster");
+});
+
+/**
+ * Record the largest drawn / viewBox ratio of every mods/mapledr/art file drawn with image() in any
+ * mock render while `body` runs. Every render counts, so both ends of a width/height transition do.
+ */
+async function imageDraws(body) {
+  await import("../tools/mock/register.mjs");
+  const { Mounted, walkLive } = await import("../tools/mock/index.mjs");
+  const PREFIX = "mods/mapledr/";
+  const worst = new Map(); // rel → { scale, at }
+  const vbCache = new Map();
+  const num = (args) => (Array.isArray(args) && typeof args[0] === "number" ? args[0] : null);
+  const render = Mounted.prototype.render;
+  Mounted.prototype.render = function (...args) {
+    const out = render.apply(this, args);
+    if (this.live) walkLive(this.live, (n) => {
+      if (n.type !== "image" || typeof n.src !== "string" || !n.src.startsWith(`${PREFIX}art/`)) return;
+      const rel = n.src.slice(PREFIX.length);
+      const w = num(n.last("w")) ?? num(n.last("size")), h = num(n.last("h")) ?? num(n.last("size"));
+      if (w === null || h === null) return;
+      if (!vbCache.has(rel)) vbCache.set(rel, sizeOf(read(rel)));
+      const [vw, vh] = vbCache.get(rel);
+      const scale = Math.min(w / vw, h / vh); // fit is always "contain"
+      if (!(worst.get(rel)?.scale >= scale)) worst.set(rel, { scale, at: `${w}x${h} of ${vw}x${vh}` });
+    });
+    return out;
+  };
+  try {
+    await body();
+  } finally {
+    Mounted.prototype.render = render;
+  }
+  return worst;
+}
+
+const softDraws = (worst) => [...worst].filter(([rel, d]) => d.scale > intrinsicScale(rel) + 1e-6)
+  .map(([rel, d]) => `${rel} drawn ${d.at} (×${d.scale.toFixed(2)}) but k = ${intrinsicScale(rel)}`);
+
+test("every image() draw in the check role matrix fits within its art's intrinsic scale", async () => {
+  const { runCheck } = await import("../tools/check.mjs");
+  const worst = await imageDraws(() => runCheck({ log: () => {} }));
+  assert.ok(worst.size >= 40, `the role matrix drew only ${worst.size} art files with image()`);
+  assert.deepEqual(softDraws(worst), [], "raise the art's intrinsic scale in tools/gen-art.mjs (INTRINSIC_SCALE)");
+});
+
+test("every image() draw of the stage scenarios, the FIXED stamp's slam included, fits within k", async () => {
+  const worst = await imageDraws(async () => {
+    const M = await import("../tools/mock/index.mjs");
+    const { View } = await import("gpui-kit");
+    const { SCENARIOS, makeScenario } = await import("../tools/vm-samples/stage.mjs");
+    const Stage = (await import("../mods/mapledr/ui/stage.js")).default;
+    const mount = async (vm, zoom) => {
+      M.resetState();
+      M.setFixture({ settings: { zoom }, layout: M.readLayout(), panes: [] });
+      const host = { world: null, version: 1, claim: () => true, view: () => vm, command: () => ({ ok: true }) };
+      class Wrap extends View {
+        init(_p, cx) { this.stage = new Stage(); this.stage.init({ role: "stage" }, cx, host); }
+        render(cx) { return this.stage.render(cx); }
+      }
+      const mod = await M.mountView(Wrap, { props: { role: "stage" } });
+      mod.size((vm?.width ?? 960) * zoom, (vm?.height ?? 200) * zoom);
+      mod.render();
+    };
+    let stamps = 0;
+    for (const name of SCENARIOS) {
+      const vm = makeScenario(name, { width: 1600 });
+      for (const zoom of [1, 2]) await mount(vm, zoom);
+      // a won fight's stamp at age 0: the first frame of its slam (drawn big, then shrinking)
+      if (vm?.boss?.stamp) {
+        stamps++;
+        await mount({ ...vm, boss: { ...vm.boss, stamp: { ...vm.boss.stamp, age: 0 } } }, 1);
+      }
+    }
+    assert.ok(stamps >= 1, "no stage scenario has a FIXED stamp");
+  });
+  assert.ok(worst.has("art/fx/stamp-fixed.svg"), "the stamp was not drawn with image()");
+  assert.ok(worst.get("art/fx/stamp-fixed.svg").scale > 1, "the stamp no longer slams in from above its size: lower its k");
+  assert.deepEqual(softDraws(worst), [], "raise the art's intrinsic scale in tools/gen-art.mjs (INTRINSIC_SCALE)");
 });
 
 test("masks are a single fill colour on a transparent background", () => {
@@ -216,4 +328,36 @@ test("the files on disk are exactly the generator's output (deterministic, nothi
   const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else onDisk.push(path.relative(MOD, p).split(path.sep).join("/")); } };
   walk(path.join(MOD, "art"));
   assert.deepEqual(onDisk.filter((r) => !a.has(r)), [], "files under art/ that the generator does not produce");
+});
+
+// ---------------------------------------------------------------------------------------------
+// The sharing files herdr's own convention expects next to the layout (defaults/AGENTS.md
+// "Layouts and mods other people made"): RECIPE.md in its fixed section order with preview.png,
+// and a README that says where the two installed pieces go.
+// ---------------------------------------------------------------------------------------------
+
+test("RECIPE.md follows herdr's recipe order and README.md gives the install targets", () => {
+  const recipe = fs.readFileSync(path.join(ROOT, "RECIPE.md"), "utf8");
+  const heads = [...recipe.matchAll(/^(#{1,2}) (.+)$/gm)].map((m) => `${m[1]} ${m[2].trim()}`);
+  assert.deepEqual(heads, ["# Down the Stack", "## What you see", "## How it behaves", "## Built from", "## Watch out", "## Done when"]);
+  assert.match(recipe, /!\[Down the Stack\]\(preview\.png\)/);
+  assert.ok(fs.existsSync(path.join(ROOT, "preview.png")), "preview.png is missing");
+  // the install targets are the files that really ship: every layout file, the mod folder, and
+  // every keys section of keys.example.json (named after the layout, so a rename shows up here)
+  const layouts = fs.readdirSync(path.join(ROOT, "layouts")).filter((f) => f.endsWith(".json"));
+  assert.ok(layouts.length >= 1, "no layout file");
+  const sections = Object.keys(JSON.parse(fs.readFileSync(path.join(ROOT, "keys.example.json"), "utf8")));
+  const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
+  for (const s of [...layouts.map((f) => `layouts/${f}`), "mods/mapledr", "HERDR_APP_HOME", "XDG_CONFIG_HOME",
+    "~/.config/herdr-app", "herdr-app check", "layout.switch", "keys.example.json", ...sections])
+    assert.ok(readme.includes(s), `README.md does not mention ${s}`);
+  for (const f of layouts) {
+    const name = f.slice(0, -".json".length);
+    assert.ok(readme.includes(`layout.switch {"name": "${name}"}`), `README.md does not say how to switch to ${name}`);
+    assert.ok(recipe.includes(`layouts/${f}`), `RECIPE.md does not name layouts/${f}`);
+  }
+  // every repo path the two files name in backticks must exist
+  const named = new Set([...(readme + recipe).matchAll(/`((?:layouts|mods|tools|docs|test)\/[^`\s*<>]+?)`/g)].map((m) => m[1]));
+  const missing = [...named].filter((rel) => !fs.existsSync(path.join(ROOT, rel.replace(/\/$/, ""))));
+  assert.deepEqual(missing, [], "README.md / RECIPE.md name paths that do not exist");
 });

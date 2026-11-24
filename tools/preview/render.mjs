@@ -5,8 +5,11 @@
 //    nothing is flex until .flex(); box-sizing border-box; borders draw only with border_color;
 //    numbers are px × zoom; nullary ramps are rem (13 px × zoom); border_N is raw px;
 //    loop() px values are NOT zoom-scaled (as in herdr).
-//  - image() → <img> (object-fit contain, inlined as a data URI); svg() → a div masked by the SVG
-//    and filled with the text color; loop → CSS keyframes (alternate, period/2); transition → CSS
+//  - image() → <img> (object-fit contain, inlined as a data URI). An SVG image is rasterised once
+//    at 2× its intrinsic size, as herdr does (gpui img.rs → svg_renderer render_single_frame(1.0)
+//    × SMOOTH_SVG_SCALE_FACTOR 2): drawn bigger than that it blurs, here too. svg() → a div masked
+//    by the SVG and filled with the text color fixed when the tree was built (herdr fixes it then:
+//    a parent's :hover colour does not reach the icon); loop → CSS keyframes (alternate, period/2); transition → CSS
 //    transition; frames → a small script cycling the text on a shared clock; tooltip → title;
 //    hover/active → :hover/:active rules; spin → CSS rotation.
 // Methods the preview cannot map are listed in an HTML comment (and in ctx.unmapped).
@@ -20,7 +23,7 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 
 /** Shared state for one HTML document (several trees may share it). */
 export function newContext({ zoom = 1, theme = resolveTheme("graphite"), remPx = 13 } = {}) {
-  return { zoom, theme, rem: remPx * zoom, css: [], unmapped: new Set(), seq: 0, missing: new Set(), usesFrames: false };
+  return { zoom, theme, rem: remPx * zoom, css: [], unmapped: new Set(), seq: 0, missing: new Set(), usesFrames: false, usesRaster: false, color: null };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -41,6 +44,27 @@ function dataUri(src) {
   }
   assetCache.set(src, uri);
   return uri;
+}
+
+/** An SVG file's intrinsic size (its width/height attributes, else its viewBox), or null. */
+const intrinsicCache = new Map();
+function svgIntrinsic(src) {
+  if (intrinsicCache.has(src)) return intrinsicCache.get(src);
+  let out = null;
+  const r = resolveAsset(src);
+  if (r.real && r.real.toLowerCase().endsWith(".svg")) {
+    try {
+      const head = /<svg\b[^>]*>/i.exec(fs.readFileSync(r.real, "utf8"))?.[0] ?? "";
+      const attr = (n) => { const m = new RegExp(`\\s${n}\\s*=\\s*["']\\s*([0-9.]+)(px)?\\s*["']`, "i").exec(head); return m ? Number(m[1]) : null; };
+      let w = attr("width");
+      let h = attr("height");
+      const vb = /\sviewBox\s*=\s*["']\s*[-0-9.]+[\s,]+[-0-9.]+[\s,]+([0-9.]+)[\s,]+([0-9.]+)/i.exec(head);
+      if ((w == null || h == null) && vb) { w = w ?? Number(vb[1]); h = h ?? Number(vb[2]); }
+      if (w > 0 && h > 0) out = { w, h };
+    } catch { out = null; }
+  }
+  intrinsicCache.set(src, out);
+  return out;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -281,12 +305,14 @@ export function treeFragment(tree, ctx) {
     const uri = tree.src ? dataUri(tree.src) : null;
     if (!uri) { ctx.missing.add(tree.src); return `<div ${attrs()}></div>`; }
     st["object-fit"] = "contain";
-    return `<img ${attrs()} src="${uri}" alt="">`;
+    const size = svgIntrinsic(tree.src);
+    if (size) ctx.usesRaster = true;
+    return `<img ${attrs(size ? ` data-raster="${Math.round(size.w * 2)}x${Math.round(size.h * 2)}"` : "")} src="${uri}" alt="">`;
   }
   if (tree.type === "svg") {
     const uri = tree.src ? dataUri(tree.src) : null;
     if (!uri) { ctx.missing.add(tree.src); return `<div ${attrs()}></div>`; }
-    st["background-color"] = "currentColor";
+    st["background-color"] = st.color ?? ctx.color ?? ctx.theme?.foreground ?? "currentColor";
     const mask = `url("${uri}") center / contain no-repeat`;
     st["-webkit-mask"] = mask;
     st.mask = mask;
@@ -295,6 +321,8 @@ export function treeFragment(tree, ctx) {
   if (tree.type === "path" && tree.path) return `<div ${attrs()}>${pathSvg(tree.path, ctx)}</div>`;
 
   let inner;
+  const inherited = ctx.color;
+  if (st.color) ctx.color = st.color;
   if (frames) {
     ctx.usesFrames = true;
     inner = `<span class="t" data-frames="${esc(JSON.stringify(frames.list))}" data-ms="${frames.ms}">${esc(frames.list[0])}</span>`;
@@ -304,6 +332,7 @@ export function treeFragment(tree, ctx) {
     for (const [slot, sub] of Object.entries(tree.slots ?? {})) if (slot !== "content") kids.unshift(treeFragment(sub, ctx));
     inner = kids.join("");
   }
+  ctx.color = inherited;
   return `<div ${attrs()}>${inner}</div>`;
 }
 
@@ -355,6 +384,10 @@ export function baseCss(ctx) {
   ].join("\n");
 }
 
+// SVG images as herdr draws them: one bitmap at 2× the file's intrinsic size, scaled to the box.
+// window.__previewReady settles once every one is swapped in (shoot() waits for it).
+const RASTER_JS = `<script>window.__previewReady=Promise.all([...document.querySelectorAll("img[data-raster]")].map((el)=>new Promise((done)=>{const [w,h]=el.dataset.raster.split("x").map(Number);const im=new Image();im.onload=()=>{try{const c=document.createElement("canvas");c.width=w;c.height=h;c.getContext("2d").drawImage(im,0,0,w,h);el.onload=()=>done();el.onerror=()=>done();el.src=c.toDataURL("image/png");}catch(e){done();}};im.onerror=()=>done();im.src=el.src;})));</script>`;
+
 const FRAMES_JS = `<script>(()=>{const els=[...document.querySelectorAll("[data-frames]")];if(!els.length)return;const t0=Date.now();const step=()=>{const now=Date.now()-t0;for(const el of els){const l=JSON.parse(el.dataset.frames);el.textContent=l[Math.floor(now/Number(el.dataset.ms))%l.length];}};step();setInterval(step,16);})();</script>`;
 
 /** Wrap body HTML in a standalone document. */
@@ -373,6 +406,7 @@ ${ctx.css.join("\n")}
 <body>
 ${body}
 ${ctx.usesFrames ? FRAMES_JS : ""}
+${ctx.usesRaster ? RASTER_JS : ""}
 <!-- preview: unmapped methods: ${unmapped.length ? esc(unmapped.join(", ")) : "none"} -->
 <!-- preview: missing assets: ${missing.length ? esc(missing.join(", ")) : "none"} -->
 </body></html>

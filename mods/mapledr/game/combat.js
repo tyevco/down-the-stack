@@ -877,13 +877,16 @@ function damageTaken(C, taken) {
  * A swing at the hero (internal API for boss.js; D§5.4 incoming): dodge ("404"), Stealth Commit,
  * DR against the attacker's level (Feature-Flagged armor phase included), room aura and
  * Idempotence. `raw` already holds atk x atkMult x U(0.9, 1.1). Returns the damage taken.
+ * `reflect`: a thorns reflection (D§9.4) rolls dodge like a swing, but a dodged reflection is no
+ * dodged attack: it neither counts towards 404 Not Found nor heals through Zero Downtime.
  */
-export function hitHero(C, raw, level, capFrac) {
+export function hitHero(C, raw, level, capFrac, reflect = false) {
   const { live, st, hero } = C;
   if (isDown(live) || !(raw > 0)) return 0;
   if (C.untargetable) { C.dodged = true; return 0; }
   if (st.dodge > 0 && rngNext(hero) < st.dodge) {
     C.dodged = true;
+    if (reflect) return 0;
     hero.st.dodges = (hero.st.dodges || 0) + 1;
     const zd = C.sv[S_CAP];
     if (zd && zd.usable && zd.onDodgeHealPct) live.hp = Math.min(live.maxHp, live.hp + zd.onDodgeHealPct * live.maxHp);
@@ -1162,7 +1165,9 @@ export function offerDrop(world, hero, item, ev) {
 function offer(C, item, mob) {
   const { world, hero } = C;
   offerDrop(world, hero, item, C.ev);
-  fx(C, FX.loot, { heroId: hero.id, mobUid: mob ? mob.uid : null, roomId: C.roomId, rar: item.rar, value: item.uid, text: "" });
+  const d = { heroId: hero.id, mobUid: mob ? mob.uid : null, roomId: C.roomId, rar: item.rar, value: item.uid, text: "" };
+  if (mob && mob.holo) d.holo = true; // the stage shows a Duck Chest for it (D§11.8), even for a duck it never drew
+  fx(C, FX.loot, d);
   if (typeof Herd.logDrop === "function") Herd.logDrop(world, hero, item, C.ev);
 }
 
@@ -1399,7 +1404,7 @@ function laneTick(C, room, map, acts) {
   }
   // thorns reflect a share of what the hero's own melee hits dealt to spiked mobs this tick, as one
   // hit through dodge, Stealth Commit, DR and damage-taken modifiers, capped per tick (D§9.4)
-  if (C.reflect > 0) hitHero(C, C.reflect, C.reflectLvl, TRAITS.thorns.capPerTick);
+  if (C.reflect > 0) hitHero(C, C.reflect, C.reflectLvl, TRAITS.thorns.capPerTick, true);
   tickPending(arena);
   deaths(C, room, map);
   upkeep(C, T.regen.engaged, T.crash.downTicks);

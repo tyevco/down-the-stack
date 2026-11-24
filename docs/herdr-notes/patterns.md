@@ -5,6 +5,9 @@ All paths below are relative to `/home/user/herdrdev/herdr-app/defaults/`
 unless they start with `src/` (herdr-app Rust) or `vendor/` (herdr-app/vendor).
 Runtime JS lives in `vendor/gpui-kit/crates/shell/src/engine/quickjs/mod.rs` (cited as `quickjs/mod.rs`); `materialize.rs` = `vendor/gpui-kit/crates/shell/src/materialize.rs`; `scheduler.rs` = `vendor/gpui-kit/crates/shell/src/engine/quickjs/scheduler.rs`.
 "SNIPPET (ours)" = code written for our game from the shipped patterns, not shipped code.
+Quoted lines that are not marked SNIPPET are short excerpts of herdr-app 0.1.17's own files,
+quoted for reference with their paths; herdr-app is licensed under the Apache License 2.0 (a copy
+is in `tools/mock/LICENSE-APACHE-2.0`). They are research notes: nothing here is installed.
 UNCONFIRMED = could not prove from source.
 
 Companion file: `used-methods.txt` (every element-builder method used in shipped JS, one per line).
@@ -23,7 +26,7 @@ Companion file: `used-methods.txt` (every element-builder method used in shipped
 | Blink/pulse | `.loop("opacity", { from: 0, to: 1, period: 900 })` | `mods/win98/taskbar.js:420` |
 | Bob up/down | `.relative().loop("top", { from: 0, to: u(-5), period: 800 })` | `mods/win98/clippy.js:72-75` |
 | Program icon | `p.tint ? svg(p.icon).size(n).text_color(c) : image(p.icon).w(n).h(n)` | `mods/agents/main.js:79-82` |
-| Go to agent | `run("agent.focus", { terminal: a.address })` or `run("pane.focus", { pane: a.pane })` | `mods/win98/taskbar.js:411`, `mods/agents/main.js:364` |
+| Go to agent | `run("agent.focus", { terminal: a.address })` or `run("pane.focus", { pane: a.pane })`. A terminal with no pane (most sub-agents) needs `run("terminal.peek", { terminal })` unless the layout has an `agent` block (see §1.5) | `mods/win98/taskbar.js:411`, `mods/agents/main.js:364`, `mods/agents/main.js:169-171` |
 | Nav order | `setAgentOrder(list.map(a => a.address))` in render | `mods/agents/main.js:249` |
 | Pane header finds itself | `panes().find(p => p.pane === props()?.pane)` | `mods/pane/main.js:41-43` |
 | Floating mod side | `placement()?.edge` | `mods/win98/clippy.js:41` |
@@ -117,6 +120,7 @@ Fallback names: `a.program?.name ?? a.app ?? "Agent"` (`mods/win98/taskbar.js:41
 
 ### 1.5 Focusing an agent
 - `run("agent.focus", { terminal: a.address })` — "(sub-agents too)" (`herdr.d.ts:86`); used by win98 tray (`mods/win98/taskbar.js:411`), Clippy (`mods/win98/clippy.js:52`), task manager (`mods/win98/dialog.js:515`).
+  - What it does: it makes the terminal the **shown agent** of `agent` blocks, and if the terminal has a pane it also focuses that pane and selects its tab (`src/window.rs:1489-1495`, `src/model.rs:508-513`; `defaults/AGENTS.md:236-238`). A sub-agent without a pane is therefore only visible through an `{ "agent": "focused" }` block. Our layout (`Down-the-Stack`) has none, so for such a terminal use the agents list's rule (next bullets): `pane.focus {terminal}` when it has a pane, else `terminal.peek {terminal}`.
 - `run("pane.focus", { pane: a.pane })` — agents list rows (`mods/agents/main.js:320,364`).
 - Sub-agent row: `this.listed.has(k.address) ? run("pane.focus", { terminal: k.address }) : run("terminal.peek", { terminal: k.address })` (`mods/agents/main.js:169-171,202`).
 - Peek bar's keep/go: `run(home ? "pane.focus" : "terminal.keep", { terminal })` (`mods/peek/main.js:95`).
@@ -741,4 +745,6 @@ this.inv = openOverlay({ mod: "<game>", kind: "window", frame: "none", key: "<ga
 ### 10.7 Click into an agent from the game
 ```js
 own(div().id(`hero-${a.address}`).cursor_pointer().on_click(() => run("agent.focus", { terminal: a.address })))
+// agent.focus shows nothing for a paneless terminal unless the layout has an `agent` block (§1.5):
+// mapledr uses pane.focus {terminal} when it has a pane, else terminal.peek (ui/party.js showTerminal)
 ```

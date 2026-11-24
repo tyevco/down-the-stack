@@ -282,7 +282,9 @@ test("render: the nameplate role draws every live hero's pane header at 220–14
           const where = `plate/${kind}/${t} w${width} z${zoom}`;
           assertClean(m, where);
           assert.deepEqual(host.views.at(-1), ["nameplate", { terminal: t, pane: pane.pane }]);
-          assert.ok(m.text().includes(`Lv ${world.state.heroes.find((h) => h.id === live.heroId)?.L ?? ""}`), where);
+          // narrow headers keep the terminal title (which task the pane is) before the level
+          if (width >= 360) assert.ok(m.text().includes(`Lv ${world.state.heroes.find((h) => h.id === live.heroId)?.L ?? ""}`), where);
+          else assert.ok(m.text().includes(pane.title), `${where}: the terminal title stays`);
           m.hover(`pane-head-${pane.pane}`);
           m.render();
           assertClean(m, `${where} hovered`);
@@ -477,7 +479,93 @@ test("party / nameplate: a promotion review shows REVIEW with the review named i
   assert.equal(c.text, "REVIEW");
   assert.match(c.tooltip, /^Senior Review against You, Six Months Ago: \d+% left$/);
   assert.match(row.tooltip.split("\n")[1], /^Senior Review against/);
-  assert.deepEqual(V.nameplateView(world, { terminal: "t1" }).chip, { text: "REVIEW", color: "#FF5A5F" });
+  assert.deepEqual(V.nameplateView(world, { terminal: "t1" }).chip, { text: "REVIEW", short: "REVIEW", color: "#FF5A5F" });
+});
+
+/** Scripts a demo agent's status from now on (its plan holds that status) and ticks `sec` seconds. */
+function setStatus(world, address, status, sec = 3) {
+  const ag = world.rt.demo.cast.agents.find((a) => a.address === address);
+  ag.plan = [[status, 1e9]];
+  ag.phase = 0;
+  ag.left = 1e9;
+  if (ag.status !== status) ag.seq++; // herdr bumps seq on every status change
+  ag.status = status;
+  let now = 0;
+  for (let k = 0; k < sec; k++) now = advance(world, 1);
+  return now;
+}
+const heroOf = (world, address) => world.rt.bind.get(address);
+const rowOf = (vm, address) => vm.groups.flatMap((g) => g.rows).find((r) => r.address === address);
+
+test("boss fights: a blocked participant's header says '! waiting' (it holds); walked-out done / idle ones show their own state", () => {
+  // D§9.5: blocked participants hold in the arena; idle or done ones walk out (and may rejoin)
+  const world = D.demoWorld("boss", NOW).world;
+  const now = setStatus(world, "t2", "blocked");
+  const fight = world.rt.fights.find((f) => f.kind === "boss");
+  assert.ok(fight && fight.heroIds.includes(heroOf(world, "t2")), "t2 is still a participant");
+  const plate = V.nameplateView(world, { terminal: "t2" });
+  assert.match(plate.chip.text, /^! waiting/);
+  assert.equal(plate.chip.color, "#F2A93B");
+  assert.equal(plate.face, "o_o");
+  const lines = plate.tooltip.split("\n");
+  assert.match(lines[2], /^Waiting for you for \d+s on “Bump deps and fix types”$/, "no row click hint on the pane header");
+  assert.match(lines[3], /^Fighting The Octopus Merge: \d+% left · holding until you answer$/);
+  const row = rowOf(V.partyView(world, { width: 268, nowMs: now }), "t2");
+  assert.deepEqual(row.chips.slice(0, 2).map((c) => c.kind), ["blocked", "boss"], "the row keeps the fight it holds in");
+  assert.match(row.tooltip.split("\n")[1], /^Waiting for you for \d+s on “Bump deps and fix types” · click to jump there$/);
+  assert.match(row.tooltip, /holding until you answer/);
+  // the participants still fighting keep their BOSS chip
+  assert.match(V.nameplateView(world, { terminal: "t1" }).chip.text, /^BOSS \d+%$/);
+
+  // late demo: t12 (done, a chest waiting) and t13 (idle) are still listed in the fight
+  const late = demo("late");
+  const lf = late.rt.fights.find((f) => f.kind === "boss");
+  for (const a of ["t12", "t13"]) assert.ok(lf.heroIds.includes(heroOf(late, a)), `${a} listed in the fight`);
+  assert.equal(V.nameplateView(late, { terminal: "t12" }).chip.text, "shipped · chest ready");
+  assert.equal(V.nameplateView(late, { terminal: "t13" }).chip.text, "resting");
+  assert.match(V.nameplateView(late, { terminal: "t14" }).chip.text, /^BOSS \d+%$/, "a questing participant fights on");
+  const lv = V.partyView(late, { width: 268, nowMs: NOW });
+  for (const a of ["t12", "t13"]) {
+    const r = rowOf(lv, a);
+    assert.ok(!r.chips.some((c) => c.kind === "boss"), `${a}: walked out, no BOSS chip`);
+    assert.ok(!/Fighting /.test(r.tooltip), a);
+  }
+  assert.ok(rowOf(lv, "t14").chips.some((c) => c.kind === "boss"));
+});
+
+test("tooltips name the task of a waiting agent (party row, its '!' chip and the pane header), status glyphs stripped", () => {
+  const world = D.demoWorld("mid", NOW).world;
+  // a real agent's terminal title carries its status glyph ("⏳ ...", "✳ ..."); herdr's agents list strips it
+  world.rt.demo.cast.agents.find((a) => a.address === "t2").titles = ["⏳ Waiting for approval: run migrations?"];
+  const now = setStatus(world, "t2", "blocked", 1);
+  const row = rowOf(V.partyView(world, { width: 268, nowMs: now }), "t2");
+  assert.match(row.tooltip.split("\n")[1], /^Waiting for you for .+ on “.+” · click to jump there$/);
+  const title = row.tooltip.split("\n")[1].match(/on “(.+)”/)[1];
+  assert.ok(!/^[⏳✳]/.test(title), title);
+  assert.match(row.chips.find((c) => c.kind === "blocked").tooltip, /^Waiting for you for .+ on “.+”$/);
+  assert.match(V.nameplateView(world, { terminal: "t2" }).tooltip.split("\n")[2], /^Waiting for you for .+ on “.+”$/);
+  // the demo's own blocked hero (mid t2) names its task too
+  const mid = rowOf(V.partyView(demo("mid"), { width: 268, nowMs: NOW }), "t2");
+  assert.match(mid.tooltip.split("\n")[1], /^Waiting for you for .+ on “Bump deps and fix types” · click to jump there$/);
+});
+
+test("program keys named like Object.prototype members get a title-bar tint (the party and the Herd roster keep rendering)", async () => {
+  for (const key of ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf"]) {
+    assert.ok(isHex(Chrome.titleBarOf(key)), key);
+    assert.ok(isHex(Chrome.termlingColors({ id: 3 }, key, "questing").titleBar), key);
+  }
+  assert.equal(Chrome.titleBarOf("claude"), "#3B2A24");
+  assert.equal(Chrome.statusWord("constructor"), "idle");
+  assert.equal(Chrome.statusWord("blocked"), "blocked");
+  // through the real engine and role: herdr's program key comes from the person's programs.json
+  const world = D.demoWorld("mid", NOW).world;
+  for (const ag of world.rt.demo.cast.agents.slice(0, 3)) ag.program = { ...ag.program, key: ["constructor", "__proto__", "toString"][ag.address === "t1" ? 0 : ag.address === "t2" ? 1 : 2] };
+  advance(world, 5);
+  const vm = V.partyView(world, { width: 268, nowMs: NOW });
+  assertShape(vm, PARTY_SAMPLE, "party/proto-keys");
+  const { m } = await mount("party", world);
+  assertClean(m, "party with prototype-named program keys");
+  assert.ok(m.text().includes(world.state.heroes[0].name));
 });
 
 test("party: tooltips carry the D§2.9 why line, quest and HP; footer strings are formatted", () => {

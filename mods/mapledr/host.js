@@ -9,12 +9,20 @@
 // Rules this file keeps (ARCHITECTURE §2):
 //  - no herdr call at module top level: the host is created lazily by the first copy's init;
 //  - while checking() (herdr-app check) there is no IO at all: an in-memory world, no timers;
-//  - module state dies on hot reload / VM restart, so the save file is the only memory that
-//    matters: a fresh host always resumes from it;
+//  - module state dies on hot reload / VM restart, so the save file is the memory that matters:
+//    a fresh host resumes from it. On a hot reload (same VM) the previous build's host is still
+//    reachable through globalThis[Symbol.for("<mod>.live.v1")]; when its world is the
+//    continuation of the file just read, the new host takes that world over (decoded by the new
+//    code) instead of rolling back to the last save;
 //  - one writer: writeTextFile(path, text, lastText) where lastText is the exact text last read or
 //    written; save.bak gets the previous text first (same discipline); a conflict (someone else
-//    wrote the file) reloads their save instead of clobbering it;
-//  - a world that loaded read-only (a save from a newer version, rt.readOnly) is never written.
+//    wrote the file) reloads their save instead of clobbering it, but a text this host wrote
+//    itself (a write that landed while its promise never came back) is recognised as its own;
+//  - nothing the player had is thrown away: a save that does not load is kept aside (save.broken,
+//    then save.broken-<ms>), a save whose only fault is its checksum is loaded anyway, an unreadable
+//    save.json is read again a few times and then on the 30 s beat;
+//  - a world that loaded read-only (a save from a newer version, rt.readOnly) is never written;
+//  - save trouble is shown to the player (saveStatus(): the views get it as args.save).
 //
 // Public surface (roles and main.js use only these):
 //   getHost()                         the singleton
@@ -31,17 +39,26 @@
 //   host.closeDialog(kind)            one dialog of each kind at a time
 //   host.attach(info) / host.detach(token)   copy bookkeeping (dialogs register their overlay)
 //   host.maybeSave(force) / host.flush()     the save policy
+//   host.saveStatus()                 null, or {readOnly?, notSaving?, restoredFrom?, message, ...}
+//   host.viewError(kind)              the message of a view builder that threw (else null)
+//   host.mayBeShown()                 can a copy be shown now (layout(), open tab, dialogs)?
 //   host.debugText() / host.takeUnreported() error counts for the debug tooltip / main.js
 
 import { createWorld, loadWorld, serialize, tick as worldTick, command as worldCommand } from "./game/world.js";
+import { crc32, saveSize } from "./game/save.js";
 import * as V from "./game/view.js";
 import {
-  agents, terminals, spaces, focused, window as herdrWindow, appHome, checking,
+  agents, terminals, spaces, focused, layout, window as herdrWindow, appHome, checking,
   readTextFile, writeTextFile, run, openOverlay, closeOverlay,
 } from "herdr";
 
-/** The mod's folder name: overlays and `<mod>.<command>` use it. */
-export const MOD = "mapledr";
+/**
+ * The mod's folder name: overlays, `<mod>.<command>` and the save folder use it. Spelled as a
+ * `mod: "<name>"` key because that is a form `mod.clone` rewrites (src/mods.rs clone_mod_at), so
+ * a clone talks to its own copies, opens its own dialogs and keeps its own save.
+ */
+const SELF = { mod: "mapledr" };
+export const MOD = SELF.mod;
 
 const PUMP_MS = 900;          // pump gate (every copy's 1 s timer calls pump)
 const CLAIM_MS = 300;         // key commands reach every shown copy: one claim per window
@@ -49,6 +66,9 @@ const SAVE_EVERY_MS = 30000;  // while dirty (D§13.1)
 const SAVE_MAJOR_MS = 2000;   // after a major event (D§13.1), and after a successful UI command
 const LOAD_RETRY_MS = 10000;  // a load whose task died (its copy closed) is retried after this
 const SAVE_STUCK_MS = 15000;  // a write whose task died (its copy closed) is given up after this
+const READ_RETRY_MS = [1000, 3000, 6000]; // save.json that fails to read: tries again before deciding
+const OWN_TEXTS = 4;          // texts this host wrote (or tried to) that may land without an answer
+const NOT_SAVING_AFTER = 2;   // consecutive failed writes before the player is told
 const STABLE_GAP_MS = 3000;   // short-lived copies (pane headers, dialogs) pump only as a fallback
 const MEMO_MAX = 48;          // view models kept per world version
 const MEMO_AGE_MS = 1000;     // and never older than this (time-based strings)
@@ -64,6 +84,9 @@ const DIALOG = {
   herd: { width: 760, height: 520 },
 };
 
+// Roles whose view models receive args.save (saveStatus()) when the save is in trouble.
+const SAVE_ARGS = { stage: true, party: true, hud: true, herd: true };
+
 const VIEWS = {
   stage: (w, a) => V.stageView(w, a),
   party: (w, a) => V.partyView(w, a),
@@ -73,7 +96,18 @@ const VIEWS = {
   herd: (w, a) => V.herdView(w, a),
 };
 
+/** The short label of a save status (the stage chip, the Herd panel band). */
+function saveTitle(readOnly, notSaving, restoredFrom) {
+  return readOnly ? "Save is read-only"
+    : notSaving ? "Not saving"
+      : restoredFrom === "fresh" ? "Save didn't load: new herd"
+        : restoredFrom === "unchecked" ? "Save failed its checksum"
+          : "Save restored from backup";
+}
+
 let HOST = null;
+/** Where a host leaves itself for the next build after a hot reload (per VM, never top level). */
+const LIVE_KEY = Symbol.for(`${MOD}.live.v1`);
 
 /** The shared host (created on first use, never at module evaluation). */
 export function getHost() {
@@ -100,6 +134,48 @@ const live = (fn, fallback) => {
 };
 const seedOf = (nowMs) => ((Math.floor(nowMs) ^ Math.floor(Math.random() * 0x7fffffff)) >>> 0) || 1;
 
+/**
+ * The same save text with its checksum recomputed (null when it has no "crc" field). Used only
+ * when the checksum is the one thing wrong with both save.json and save.bak: loading that data
+ * beats starting a new herd over it (the original text is kept aside first).
+ */
+function resign(text) {
+  if (typeof text !== "string") return null;
+  let body = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  body = body.trim();
+  const m = /"crc":"[0-9a-fA-F]*"/.exec(body);
+  if (!m) return null;
+  const blank = body.replace(m[0], '"crc":""');
+  return blank.replace('"crc":""', `"crc":"${crc32(blank)}"`);
+}
+
+const SAVE_TEXTS = {
+  readOnly: "This save was made by a newer version of Down the Stack, so it is open read-only: nothing you do is saved.",
+  ioBlocked: (P) => `The save file can't be read (${P.save}), so nothing is being saved. Fix or move it aside; saving resumes once it reads.`,
+  writes: "Saving keeps failing (a full disk or missing permission?): recent progress is not on disk yet.",
+  // (fallbacks: load() words the restore from what it actually found and kept, restoreNote())
+  bak: "The save file could not be loaded, so the herd was restored from its backup (save.bak).",
+  fresh: "The save file could not be loaded, so a new herd started.",
+  unchecked: "The save failed its checksum (it was edited or damaged) and was loaded anyway.",
+};
+
+/**
+ * What the player is told about a world that did not come straight from save.json: what was
+ * wrong with save.json (`json`: unreadable | missing | damaged | checksum) and save.bak (`bak`:
+ * ok | absent | unreadable | damaged | checksum), and the files the bad texts were kept as.
+ */
+function restoreNote(from, json, bak, kept) {
+  const keptLine = kept.length ? ` ${kept.length > 1 ? "The damaged files were" : "The damaged file was"} kept as ${kept.join(" and ")}.` : "";
+  const jsonSaid = { unreadable: "The save file couldn't be read", missing: "The save file was missing", damaged: "The save file was damaged", checksum: "The save file failed its checksum" }[json] || "The save file could not be loaded";
+  if (from === "bak") return `${jsonSaid}, so the herd was restored from its backup (save.bak).${keptLine}`;
+  if (from === "unchecked") return `${SAVE_TEXTS.unchecked}${keptLine}`;
+  if (from === "fresh") {
+    const bakSaid = { absent: "there was no backup", unreadable: "its backup couldn't be read", damaged: "its backup was damaged", checksum: "its backup failed its checksum" }[bak] || "its backup could not be loaded";
+    return `${jsonSaid} and ${bakSaid}, so a new herd started.${keptLine}`;
+  }
+  return null;
+}
+
 export class GameHost {
   constructor() {
     // No herdr calls here (the host may be created while a module evaluates).
@@ -115,16 +191,26 @@ export class GameHost {
     this.lastText = null;      // exact text of save.json as last read/written (null: absent)
     this.lastGood = false;     // lastText is a valid save (only then does it become save.bak)
     this.bakText = null;       // exact text of save.bak as last read/written (null: absent)
-    this.brokenKept = false;
-    this.ioBlocked = false;    // save.json exists but cannot be read: never write over it
+    this.keptAside = [];       // texts kept aside this session (save.broken*): each kept once
+    this.restoreNote = null;   // saveStatus() wording of how this world was restored (load())
+    this.ioBlocked = false;    // save.json exists but cannot be read: never write over it (retried)
     this.saving = null;        // the in-flight save (single writer)
+    this.saveGen = 0;          // bumped by every save; an older save's continuation stands down
+    this.ownTexts = [];        // texts this host wrote or tried to write (newest last)
+    this.failedWrites = 0;     // consecutive failed writes of save.json
+    this.loadedAt = 0;
+    this.statusKey = "";       // saveStatus() as last seen by pump (a change re-renders)
+    this.saveNoticeSeen = null; // the save notice the player dismissed (main.js, stage)
+    this.sizeLogged = false;
+    this.viewErrors = Object.create(null); // kind -> message of the last throwing build of it
+    this.retired = false;      // a newer build took this world over (hot reload): never write
     this.lastSaveMs = 0;
     this.majorSaved = 0;       // rt.majorAt covered by the last save
     this.saveSoonAt = null;
     this.lastPumpMs = -Infinity;
     this.lastStablePumpMs = -Infinity;
     this.savingSince = 0;
-    this.claims = {};
+    this.claims = Object.create(null);
     this.memo = { world: null, rtv: -1, hv: -1, map: new Map() };
     this.prewarming = false;   // view() calls from prewarm() don't count as a copy reading them
     this.overlays = { sheet: null, herd: null };
@@ -166,7 +252,7 @@ export class GameHost {
     if (!cx || typeof cx.spawn !== "function") return;
     this.loadingSince = Date.now();
     cx.spawn(async (tcx) => {
-      const ok = await this.load();
+      const ok = await this.load(tcx);
       if (!ok) return;
       this.broadcast();
       try { tcx.notify(); } catch (e) { /* the copy closed meanwhile */ }
@@ -196,26 +282,62 @@ export class GameHost {
 
   /**
    * Read save.json (and save.bak), decide which world to run (D§13.1), adopt it. Returns true
-   * when this call finished the load.
+   * when this call finished the load. Order: the previous build's world after a hot reload (when
+   * it continues this very file), save.json, save.bak (also when save.json is missing but the bak
+   * is there), then either file with only a checksum fault, then a new herd. `tcx` (the loading task's cx) lets a save.json that fails to read be
+   * read again a few times before the host settles for the backup.
    */
-  async load() {
+  async load(tcx) {
     const seq = ++this.loadSeq;
     this.loadingSince = Date.now();
     const P = this.paths();
+    const stale = () => seq !== this.loadSeq || this.loaded; // superseded by a newer load
     let text = null;
     let readError = null;
+    for (let attempt = 0; ; attempt++) {
+      readError = null;
+      try { text = await readTextFile(P.save); } catch (e) { readError = e; text = null; }
+      if (stale()) return false;
+      // Another program holding the file, a sync tool's placeholder: often gone a moment later.
+      if (!readError || attempt >= READ_RETRY_MS.length || !tcx || typeof tcx.sleep !== "function") break;
+      this.loadingSince = Date.now();
+      try { await tcx.sleep(READ_RETRY_MS[attempt]); } catch (e) { return false; }
+      if (stale()) return false;
+      this.loadingSince = Date.now();
+    }
     let bak = null;
     let bakError = null;
-    try { text = await readTextFile(P.save); } catch (e) { readError = e; }
     try { bak = await readTextFile(P.bak); } catch (e) { bakError = e; }
-    if (seq !== this.loadSeq || this.loaded) return false; // superseded by a newer load
+    if (stale()) return false;
 
     const now = Date.now();
     let world = null;
     let from = "new";
+    let warning = null;
     let lastGood = true;
-    if (readError) {
-      // It exists but cannot be read (too big, permissions): never write over what we cannot see.
+    let jsonFault = null;
+    let bakFault = null;
+    const kept = []; // file names the bad texts were kept aside as (what the player is told)
+    const keep = async (t) => {
+      const p = await this.keepBroken(t);
+      if (p) kept.push(String(p).split("/").pop());
+    };
+    const prev = readError ? null : this.previousBuild(text);
+    if (prev) {
+      const r = this.decode(prev.text, now);
+      if (r && r.world && !r.world.rt.readOnly) {
+        world = r.world;
+        from = "reload";
+        warning = r.warning || null;
+        lastGood = prev.lastGood;
+        for (const t of prev.ownTexts) this.noteOwn(t);
+      }
+    }
+    if (world) {
+      // handed over by the previous build (hot reload)
+    } else if (readError) {
+      // It exists but cannot be read (too big, permissions, held open): never write over what we
+      // cannot see. maybeSave reads it again on the 30 s beat; saving resumes once it reads.
       this.error("read save.json", readError);
       this.ioBlocked = true;
     } else if (typeof text === "string") {
@@ -223,60 +345,145 @@ export class GameHost {
       if (r && r.world) {
         world = r.world;
         from = "save";
-        if (r.warning) this.stats.warning = r.warning;
+        warning = r.warning || null;
       } else {
-        this.error("load save.json", r ? r.error : "empty");
+        jsonFault = r ? r.error : new Error("empty");
+        this.error("load save.json", jsonFault);
         lastGood = false;
-        await this.keepBroken(text);
+        await keep(text);
       }
     }
-    if (!world && (readError || (typeof text === "string" && !lastGood))) {
+    // save.json missing while save.bak is there (moved or deleted by another program, a partial
+    // copy of data/): the herd in the bak is the player's, and the second save of a new herd
+    // would rotate over it.
+    const missing = !world && !readError && typeof text !== "string";
+    if (!world && (readError || !lastGood || (missing && typeof bak === "string"))) {
       const rb = this.decode(bak, now);
       if (rb && rb.world) {
         world = rb.world;
         from = "bak";
-        if (rb.warning) this.stats.warning = rb.warning;
+        warning = rb.warning || null;
       } else if (rb && rb.error) {
+        bakFault = rb.error;
         this.error("load save.bak", rb.error);
+        // the second save after this one would rotate over it: keep it aside now
+        await keep(bak);
+      }
+    }
+    if (!world) {
+      // Before a new herd: data whose only fault is its checksum (an edit, a stray byte) loads.
+      for (const [t, fault, name] of [[text, jsonFault, "save.json"], [bak, bakFault, "save.bak"]]) {
+        if (!fault || fault.code !== "crc") continue;
+        const r = this.decode(resign(t), now);
+        if (r && r.world) {
+          world = r.world;
+          from = "unchecked";
+          warning = `${name} failed its checksum and was loaded anyway`;
+          break;
+        }
       }
     }
     if (bakError) this.error("read save.bak", bakError);
     if (!world) {
       world = createWorld({ nowMs: now, seed: seedOf(now) });
-      if (from !== "new" || readError || !lastGood) from = "fresh";
+      if (from !== "new" || readError || !lastGood || bakFault || (missing && bakError)) from = "fresh";
     }
-    if (seq !== this.loadSeq || this.loaded) return false;
+    if (stale()) return false;
+    const jsonWas = readError ? "unreadable" : missing ? "missing" : jsonFault ? (jsonFault.code === "crc" ? "checksum" : "damaged") : null;
+    const bakWas = bakError ? "unreadable" : bakFault ? (bakFault.code === "crc" ? "checksum" : "damaged") : typeof bak === "string" ? "ok" : "absent";
+    this.restoreNote = restoreNote(from, jsonWas, bakWas, kept);
 
     this.lastText = readError ? null : text;
     this.lastGood = lastGood && typeof text === "string";
     this.bakText = bakError ? null : bak;
     this.loaded = true;
     this.loadingSince = null;
+    this.loadedAt = now;
     this.lastSaveMs = now;
     this.stats.loadedFrom = from;
+    if (warning) this.stats.warning = warning;
     // A world put in place while loading (tools/check fixtures) stays; it saves over the file.
     if (!this.world || this.world === this.placeholder) this.world = world;
     this.placeholder = null;
     const rt = this.world.rt;
     this.majorSaved = rt.majorAt || 0;
-    if (from === "bak" || from === "fresh") {
-      // replace the unreadable save.json soon (its text is kept as save.broken)
+    if (from === "bak" || from === "fresh" || from === "unchecked" || from === "reload") {
+      // replace the damaged save.json soon (its text was kept aside); after a hot reload, put
+      // the previous build's unsaved progress on disk
       if (!rt.readOnly) rt.dirty = true;
       this.saveSoonAt = now + SAVE_MAJOR_MS;
     }
+    if (prev && from === "reload") {
+      try { if (typeof prev.host.retire === "function") prev.host.retire(); } catch (e) { /* an old build */ }
+    }
+    this.register();
+    this.statusKey = JSON.stringify(this.saveStatus());
     this.version++;
     return true;
   }
 
-  /** Keep a corrupt save aside once (save.broken is created, never overwritten). */
-  async keepBroken(text) {
-    if (this.brokenKept || this.memoryOnly || typeof text !== "string") return;
-    this.brokenKept = true;
+  /** Leave this host where the next build finds it after a hot reload (same VM only). */
+  register() {
+    if (this.memoryOnly) return;
+    try { globalThis[LIVE_KEY] = this; } catch (e) { /* no handover then */ }
+  }
+
+  /** The previous build's handover (see handover()), or null. */
+  previousBuild(fileText) {
+    let prev = null;
+    try { prev = globalThis[LIVE_KEY]; } catch (e) { return null; }
+    if (!prev || prev === this || typeof prev.handover !== "function") return null;
     try {
-      await writeTextFile(this.paths().broken, text, null);
+      const h = prev.handover(fileText);
+      return h && typeof h.text === "string" ? Object.assign({}, h, { host: prev }) : null;
     } catch (e) {
-      // already there from an earlier failure: keep the first one
+      this.error("hot reload", e);
+      return null;
     }
+  }
+
+  /**
+   * Called on this (old) host by the next build after a hot reload: this world as save text, if
+   * it is the continuation of `fileText` (the save.json the new host just read), so the progress
+   * since the last save survives the reload. Null otherwise (the new host loads the file).
+   */
+  handover(fileText) {
+    if (!this.loaded || this.memoryOnly || this.retired || this.ioBlocked || !this.world || this.world.rt.readOnly) return null;
+    const own = fileText != null && this.ownTexts.includes(fileText);
+    if (this.lastText !== fileText && !own) return null;
+    return { text: serialize(this.world), lastGood: this.lastText === fileText ? this.lastGood : true, ownTexts: this.ownTexts.slice() };
+  }
+
+  /** The next build took this world over: never write again. */
+  retire() {
+    this.retired = true;
+  }
+
+  /**
+   * Keep a save that did not load aside without overwriting anything: save.broken the first time
+   * (D§13.1), save.broken-<ms> when an earlier incident's file is there. Each text once.
+   */
+  async keepBroken(text) {
+    return this.keepAside(text, this.paths().broken);
+  }
+
+  async keepAside(text, stem) {
+    if (this.memoryOnly || typeof text !== "string" || !text) return null;
+    if (this.keptAside.includes(text)) return null;
+    this.keptAside.push(text);
+    if (this.keptAside.length > 8) this.keptAside.shift();
+    const stamp = Date.now();
+    for (const p of [stem, `${stem}-${stamp}`, `${stem}-${stamp}-${this.keptAside.length}`]) {
+      try {
+        await writeTextFile(p, text, null);
+        return p;
+      } catch (e) {
+        // there already (create-only): the same text from an earlier session, or another file
+        try { if ((await readTextFile(p)) === text) return p; } catch (e2) { /* try the next name */ }
+      }
+    }
+    this.error("keep a damaged save", `could not keep it aside as ${stem}`);
+    return null;
   }
 
   // -------------------------------------------------------------------------------------------
@@ -290,6 +497,10 @@ export class GameHost {
     const f = live(focused, null);
     const w = live(herdrWindow, null);
     const d = new Date(nowMs);
+    // agents() carries no parent: a sub-agent kept in a pane (terminal.keep, `hc run --keep`) is
+    // listed there too, and must stay its parent's Forkling (D§2.7), so take parent from terminals().
+    const parentOf = new Map();
+    for (const k of all) if (k && k.parent != null && k.state === "live" && k.address != null) parentOf.set(k.address, String(k.parent));
     const listed = new Set();
     const out = [];
     for (const a of list) {
@@ -299,6 +510,7 @@ export class GameHost {
         address: a.address, status: a.status, seq: a.seq, app: a.app, program: a.program, title: a.title,
         space: a.space, space_name: a.space_name, tab: a.tab, tab_index: a.tab_index, tab_name: a.tab_name,
         pane: a.pane, pane_name: a.pane_name, pinned: !!a.pinned, focused: !!a.focused,
+        parent: parentOf.has(a.address) ? parentOf.get(a.address) : null,
       });
     }
     // Sub-agents without a pane are not in agents(): their raw word, error counting as blocked,
@@ -312,7 +524,10 @@ export class GameHost {
         title: k.name || k.template || (k.program && k.program.name) || k.address, program: k.program || null,
       });
     }
-    const tabs = {};
+    // Keyed by herdr tab ids, which a `herdr.tab` label can choose ("constructor", "__proto__"):
+    // no prototype, so such a key neither hits a frozen Object.prototype member nor swaps the
+    // prototype.
+    const tabs = Object.create(null);
     const spaceList = [];
     for (const s of sp) {
       if (!s) continue;
@@ -337,7 +552,7 @@ export class GameHost {
    * when no long-lived copy has for a few seconds.
    */
   pump(nowMs, stable) {
-    if (this.memoryOnly || !this.ready) return false;
+    if (this.memoryOnly || this.retired || !this.ready) return false;
     if (nowMs - this.lastPumpMs < PUMP_MS && nowMs >= this.lastPumpMs) return false;
     if (stable === false && nowMs - this.lastStablePumpMs < STABLE_GAP_MS && nowMs >= this.lastStablePumpMs) return false;
     this.lastPumpMs = nowMs;
@@ -361,7 +576,9 @@ export class GameHost {
     // Not only when the world advanced: a clock that went back holds the world still (up to an
     // hour) while UI commands still change it and must be saved.
     this.maybeSave(false, nowMs);
-    if (rt.version === before || world !== this.world) return false;
+    // save trouble that appeared or cleared (a failed write, a save.json that reads again) redraws
+    const statusChanged = this.noteSaveStatus();
+    if ((rt.version === before && !statusChanged) || world !== this.world) return false;
     // Only what a render actually read since the last pump (a prewarmed entry nobody read again,
     // e.g. an old stage width after a splitter drag or a closed pane's header, is dropped), the
     // costly stage / party / hud before the nameplates.
@@ -399,14 +616,79 @@ export class GameHost {
     }
   }
 
-  /** Every shown copy's nextCommand() loop gets "tick" and re-renders. */
+  /**
+   * Every shown copy's nextCommand() loop gets "tick" and re-renders. herdr hands
+   * `<mod>.<command>` to shown copies only and shows an error toast ("<mod>.tick failed") when
+   * none listens, while hidden copies keep their timers and keep pumping: so no broadcast while
+   * no copy can be shown (mayBeShown). A copy that shows again is drawn by herdr, and main.js's
+   * stale guard catches any copy up within ~2 s.
+   */
   broadcast() {
-    if (this.memoryOnly) return;
+    if (this.memoryOnly) return false;
+    if (!this.mayBeShown()) return false;
     try {
       run(`${MOD}.tick`);
+      return true;
     } catch (e) {
       this.error("broadcast", e);
+      return false;
     }
+  }
+
+  /**
+   * Could a copy of this mod be shown now? layout() is the live layout (layout.toggle sets
+   * `hidden`): a block of this mod outside hidden nodes and inactive stack children, or the pane
+   * header while a tab is open, or an open dialog. A layout that never names this mod (another
+   * layout, or a shape this does not know) answers true.
+   */
+  mayBeShown() {
+    if (this.overlays.sheet || this.overlays.herd) return true;
+    const root = live(layout, null);
+    if (!root || typeof root !== "object") return true;
+    let named = false;
+    let shown = false;
+    let tabOpen = null;
+    const headerOf = (c) => (c && c.pane && typeof c.pane === "object" && c.pane.header && typeof c.pane.header === "object" ? c.pane.header.content : null);
+    const walk = (n, visible, depth) => {
+      if (shown || !n || typeof n !== "object" || depth > 64) return;
+      const vis = visible && n.hidden !== true;
+      const c = n.content && typeof n.content === "object" ? n.content : null;
+      if (c && c.mod === MOD) {
+        named = true;
+        if (vis) shown = true;
+      }
+      const h = headerOf(c);
+      if (h && typeof h === "object" && h.mod === MOD) {
+        named = true;
+        if (vis) {
+          if (tabOpen == null) { const f = live(focused, null); tabOpen = !!(f && f.tab != null); }
+          if (tabOpen) shown = true;
+        }
+      }
+      // a stack's header block and the blocks floating over a node show with it (window.rs visible)
+      const sh = n.type === "stack" && n.header && typeof n.header === "object" ? n.header.content : null;
+      if (sh && typeof sh === "object" && sh.mod === MOD) {
+        named = true;
+        if (vis) shown = true;
+      }
+      for (const f of Array.isArray(n.floating) ? n.floating : []) {
+        const fc = f && typeof f === "object" && f.content && typeof f.content === "object" ? f.content : null;
+        if (fc && fc.mod === MOD) {
+          named = true;
+          if (vis && f.hidden !== true) shown = true;
+        }
+      }
+      const kids = Array.isArray(n.children) ? n.children : [];
+      // herdr's active_child (layout.rs): the active id among the visible children, else the first visible one
+      let active = null;
+      if (n.type === "stack") {
+        const open = kids.filter((k) => k && typeof k === "object" && k.hidden !== true);
+        active = open.find((k) => k.id === n.active) || open[0] || null;
+      }
+      for (const k of kids) walk(k, vis && (n.type !== "stack" || k === active), depth + 1);
+    };
+    walk(root, true, 0);
+    return shown || !named;
   }
 
   /**
@@ -455,7 +737,7 @@ export class GameHost {
    */
   view(kind, args) {
     if (!this.ready) return null;
-    const fn = VIEWS[kind];
+    const fn = typeof kind === "string" && Object.prototype.hasOwnProperty.call(VIEWS, kind) ? VIEWS[kind] : null;
     if (!fn) return null;
     const world = this.world;
     const m = this.memo;
@@ -471,14 +753,35 @@ export class GameHost {
     }
     let vm = null;
     try {
-      vm = fn(world, args || {});
+      vm = fn(world, this.viewArgs(kind, args));
       if (vm === undefined) vm = null;
+      if (this.viewErrors[kind] != null) delete this.viewErrors[kind];
     } catch (e) {
       this.error(`view ${kind}`, e, true);
+      this.viewErrors[kind] = msgOf(e);
       vm = null;
     }
     this.memo.map.set(key, { vm, at: now, kind, args, used: !this.prewarming });
     return vm;
+  }
+
+  /**
+   * The args a view builder gets: the role's own, plus args.save (saveStatus()) for the roles
+   * that can show save trouble (D§13.4), only while there is some. Not part of the memo key: a
+   * change of status moves this.version instead.
+   */
+  viewArgs(kind, args) {
+    const a = args || {};
+    const save = SAVE_ARGS[kind] === true ? this.saveStatus() : null;
+    return save ? Object.assign({}, a, { save }) : a;
+  }
+
+  /**
+   * The message of the view builder of `kind` that threw on its last build, else null. view()
+   * answers null both while loading and after a throw; main.js uses this to tell them apart.
+   */
+  viewError(kind) {
+    return typeof kind === "string" && this.viewErrors[kind] != null ? this.viewErrors[kind] : null;
   }
 
   /** The hero a terminal plays (top-level agent or contractor), or the parent of a Forkling. */
@@ -605,19 +908,22 @@ export class GameHost {
   // Saving
 
   canWrite() {
-    return !this.memoryOnly && this.loaded && !this.ioBlocked && !!this.world && !this.world.rt.readOnly && !live(checking, false);
+    return !this.memoryOnly && !this.retired && this.loaded && !this.ioBlocked && !!this.world && !this.world.rt.readOnly && !live(checking, false);
   }
 
   /**
    * The save policy: every 30 s while dirty, 2 s after a major event or a UI command, always when
-   * forced (close). One write at a time. Returns the in-flight promise, or null.
+   * forced (close). One write at a time. Returns the in-flight promise, or null. While save.json
+   * cannot be read (ioBlocked) it is read again on the 30 s beat instead.
    */
   maybeSave(force, nowMs) {
+    if (this.ioBlocked && !this.memoryOnly && !this.retired && this.loaded) return this.retryRead(nowMs);
     if (!this.canWrite()) return null;
     const now = Number.isFinite(nowMs) ? nowMs : Date.now();
     if (this.saving) {
       if (Math.abs(Date.now() - this.savingSince) < SAVE_STUCK_MS) return this.saving;
-      // the copy whose task ran it closed and its host call was cancelled: never resolves
+      // the copy whose task ran it closed and its host call was cancelled: never resolves (the
+      // write itself may have landed: conflict() recognises our own text)
       this.error("save", "a write never finished; trying again");
       this.saving = null;
     }
@@ -630,34 +936,83 @@ export class GameHost {
       const periodic = now - this.lastSaveMs >= SAVE_EVERY_MS || now < this.lastSaveMs;
       if (!major && !soon && !periodic) return null;
     }
-    const p = this.writeSave(now);
+    return this.track(this.writeSave(now));
+  }
+
+  /** Make `p` the in-flight save. */
+  track(p) {
     this.saving = p;
     this.savingSince = Date.now();
     p.then(() => { if (this.saving === p) this.saving = null; }, () => { if (this.saving === p) this.saving = null; });
     return p;
   }
 
-  /** Save now if anything changed (close / quit); waits for a save already in flight first. */
+  /**
+   * Save now if anything changed (close / quit). Never waits for a save started before: on quit
+   * herdr drives only the host calls made inside close() (one shared 250 ms), so an earlier
+   * write's continuation may never run. Instead it reads save.json (a call made here, so it is
+   * driven) and writes over it if that is still our text, skipping the save.bak step.
+   */
   async flush() {
-    if (this.saving) {
-      try { await this.saving; } catch (e) { /* recorded */ }
+    if (this.ioBlocked || !this.canWrite()) return;
+    if (!this.saving) {
+      const p = this.maybeSave(true);
+      if (p) await p;
+      return;
     }
-    const p = this.maybeSave(true);
-    if (p) await p;
+    this.saving = null;
+    this.saveGen++; // the earlier save stands down if it ever resumes
+    let cur;
+    try {
+      cur = await readTextFile(this.paths().save);
+    } catch (e) {
+      this.error("read save.json", e);
+      return;
+    }
+    if (!this.canWrite()) return;
+    if (cur !== this.lastText) {
+      if (cur == null) {
+        this.lastText = null;
+        this.lastGood = false;
+      } else if (this.ownTexts.includes(cur)) {
+        this.lastText = cur; // the earlier write landed
+        this.lastGood = true;
+      } else {
+        return; // someone else wrote it meanwhile: the next session loads theirs
+      }
+    }
+    this.world.rt.dirty = true;
+    await this.track(this.writeSave(Date.now(), { skipBak: true }));
   }
 
-  async writeSave(nowMs) {
+  /** Remember a text this host is writing: if the write lands unanswered, it is still ours. */
+  noteOwn(text) {
+    if (typeof text !== "string" || this.ownTexts.includes(text)) return;
+    this.ownTexts.push(text);
+    if (this.ownTexts.length > OWN_TEXTS) this.ownTexts.shift();
+  }
+
+  async writeSave(nowMs, opts) {
     const world = this.world;
     const rt = world.rt;
     const P = this.paths();
+    const gen = ++this.saveGen;
     let text;
     try {
       text = serialize(world);
     } catch (e) {
       this.error("serialize", e, true);
+      this.failedWrites++;
       this.backOff(world);
       this.lastSaveMs = nowMs;
       return false;
+    }
+    if (!this.sizeLogged) {
+      const size = saveSize(text);
+      if (!size.ok) {
+        this.sizeLogged = true;
+        try { console.log(`${MOD}: save is ${size.bytes} bytes (budget ${size.budget})`); } catch (e) { /* no console */ }
+      }
     }
     const majorAt = rt.majorAt || 0;
     const prev = this.lastText;
@@ -665,7 +1020,7 @@ export class GameHost {
     rt.dirty = false;
     this.saveSoonAt = null;
     this.lastSaveMs = nowMs;
-    if (prev != null && this.lastGood && prev !== text) {
+    if (!(opts && opts.skipBak) && prev != null && this.lastGood && prev !== text) {
       try {
         await writeTextFile(P.bak, prev, this.bakText);
         this.bakText = prev;
@@ -675,26 +1030,32 @@ export class GameHost {
         try { this.bakText = await readTextFile(P.bak); } catch (e2) { /* next time */ }
       }
     }
-    if (world !== this.world) return false; // reloaded meanwhile
+    // reloaded meanwhile, or a newer save (a flush on close) took over
+    if (world !== this.world || gen !== this.saveGen) return false;
+    this.noteOwn(text);
     try {
       await writeTextFile(P.save, text, prev);
     } catch (e) {
+      if (gen !== this.saveGen) return false;
       rt.dirty = true;
       await this.conflict(e, world);
       return false;
     }
-    if (world === this.world) {
+    if (world === this.world && gen === this.saveGen) {
       this.lastText = text;
       this.lastGood = true;
       this.majorSaved = Math.max(this.majorSaved, majorAt);
     }
+    this.failedWrites = 0;
     this.stats.saves++;
     return true;
   }
 
   /**
    * A write of save.json failed. If the file changed under us (another window or process wrote
-   * it), load that save instead of clobbering it; otherwise it was a plain IO failure.
+   * it), load that save instead of clobbering it; if it holds a text this host wrote (a write
+   * that landed while its promise never came back), carry on from it; otherwise it was a plain
+   * IO failure.
    */
   async conflict(err, world) {
     const P = this.paths();
@@ -703,6 +1064,7 @@ export class GameHost {
       cur = await readTextFile(P.save);
     } catch (e) {
       this.error("write save.json", err);
+      this.failedWrites++;
       this.backOff(world);
       return;
     }
@@ -710,7 +1072,15 @@ export class GameHost {
     if (cur === this.lastText) {
       // a plain IO failure (disk full, permissions): retry on the 30 s beat, not every pump
       this.error("write save.json", err);
+      this.failedWrites++;
       this.backOff(world);
+      return;
+    }
+    if (cur != null && this.ownTexts.includes(cur)) {
+      // our own earlier write landed after all: the next save goes over it
+      this.lastText = cur;
+      this.lastGood = true;
+      this.saveSoonAt = Date.now();
       return;
     }
     if (cur == null) {
@@ -750,6 +1120,102 @@ export class GameHost {
     this.saveSoonAt = null;
   }
 
+  /** save.json could not be read: read it again on the 30 s beat (one read at a time). */
+  retryRead(nowMs) {
+    if (this.saving) {
+      if (Math.abs(Date.now() - this.savingSince) < SAVE_STUCK_MS) return this.saving;
+      this.saving = null; // its copy closed and the read never came back: read again
+    }
+    const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+    if (now - this.lastSaveMs < SAVE_EVERY_MS && now >= this.lastSaveMs) return null;
+    this.lastSaveMs = now;
+    return this.track(this.recoverRead());
+  }
+
+  /**
+   * save.json reads again. Our world goes on (the file becomes save.bak on the next save), unless
+   * this session never had the herd (a new one started because nothing loaded): then the herd in
+   * the file comes back, and this session's world is kept aside as save.unsaved.
+   */
+  async recoverRead() {
+    const P = this.paths();
+    let cur;
+    try {
+      cur = await readTextFile(P.save);
+    } catch (e) {
+      this.error("read save.json", e);
+      return false;
+    }
+    if (!this.ioBlocked || this.retired) return false;
+    const world = this.world;
+    this.ioBlocked = false;
+    if (typeof cur !== "string") {
+      this.lastText = null;
+      this.lastGood = false;
+    } else {
+      const r = this.decode(cur, Date.now());
+      if (r && r.world && this.stats.loadedFrom === "fresh" && !r.world.rt.readOnly) {
+        let mine = null;
+        try { mine = serialize(world); } catch (e) { /* nothing to keep */ }
+        if (mine) await this.keepAside(mine, `${P.dir}/save.unsaved`);
+        if (world !== this.world) return false;
+        this.world = r.world;
+        this.lastText = cur;
+        this.lastGood = true;
+        this.majorSaved = r.world.rt.majorAt || 0;
+        this.stats.loadedFrom = "save";
+        this.stats.reloads++;
+        this.version++;
+        this.broadcast();
+        return true;
+      }
+      this.lastText = cur;
+      this.lastGood = !!(r && r.world);
+      if (!this.lastGood) await this.keepBroken(cur);
+    }
+    if (this.world.rt.readOnly) return true;
+    this.world.rt.dirty = true;
+    this.saveSoonAt = Date.now();
+    this.version++;
+    return true;
+  }
+
+  /**
+   * Save trouble the player must hear about (D§13.1, D§13.4), or null when all is well:
+   * { readOnly, notSaving, restoredFrom: null|"bak"|"fresh"|"unchecked", title, message, detail, since }
+   * (title: the short label the stage notice and the Herd panel show, message: the full wording).
+   */
+  saveStatus() {
+    if (!this.loaded || this.memoryOnly || !this.world) return null;
+    const rt = this.world.rt;
+    const lines = [];
+    let readOnly = false;
+    let notSaving = false;
+    if (rt.readOnly) {
+      readOnly = true;
+      lines.push(SAVE_TEXTS.readOnly);
+    } else if (this.ioBlocked) {
+      notSaving = true;
+      lines.push(SAVE_TEXTS.ioBlocked(this.paths()));
+    } else if (this.failedWrites >= NOT_SAVING_AFTER) {
+      notSaving = true;
+      lines.push(SAVE_TEXTS.writes);
+    }
+    const from = this.stats.loadedFrom;
+    const restoredFrom = from === "bak" || from === "fresh" || from === "unchecked" ? from : null;
+    if (restoredFrom) lines.push(this.restoreNote || SAVE_TEXTS[restoredFrom]);
+    if (!lines.length) return null;
+    return Object.freeze({ readOnly, notSaving, restoredFrom, title: saveTitle(readOnly, notSaving, restoredFrom), message: lines.join(" "), detail: this.stats.warning || null, since: this.loadedAt });
+  }
+
+  /** True when saveStatus() changed since the last call (the views then rebuild). */
+  noteSaveStatus() {
+    const key = JSON.stringify(this.saveStatus());
+    if (key === this.statusKey) return false;
+    this.statusKey = key;
+    return true;
+  }
+
   // -------------------------------------------------------------------------------------------
   // Errors and the debug tooltip
 
@@ -784,13 +1250,15 @@ export class GameHost {
     for (const x of this.errors.slice(-6)) lines.push(`${x.where}: ${x.message}${x.count > 1 ? ` (×${x.count})` : ""}`);
     for (const m of engine.slice(-6)) lines.push(`engine ${m}`);
     const s = this.stats;
-    lines.push(`tick ${s.lastTickMs} ms (max ${s.maxTickMs}) · saves ${s.saves} · from ${s.loadedFrom || "-"}${rt && rt.readOnly ? " · read-only" : ""}`);
+    lines.push(`tick ${s.lastTickMs} ms (max ${s.maxTickMs}) · saves ${s.saves} · from ${s.loadedFrom || "-"}${rt && rt.readOnly ? " · read-only" : ""}${this.ioBlocked ? " · not saving" : ""}`);
+    const st = this.saveStatus();
+    if (st) lines.push(st.message);
     return lines.join("\n");
   }
 
   /** Anything for the debug tooltip? */
   hasErrors() {
     const rt = this.world && this.world.rt;
-    return this.errorCount > 0 || !!(rt && Array.isArray(rt.errors) && rt.errors.length);
+    return this.errorCount > 0 || !!(rt && Array.isArray(rt.errors) && rt.errors.length) || !!this.saveStatus();
   }
 }

@@ -224,6 +224,47 @@ test("a throwing role render shows the error chip, keeps herdr's chrome alive, a
   assert.match(dot.methods.find((m) => m[0] === "tooltip")[1][0], /disk full/);
 });
 
+test("a throwing view builder shows the error chip, not an endless loading state; the party lists herdr's agents plainly", async () => {
+  M.resetState();
+  const g = "viewerr";
+  const fx = FX.demoFixture("mid");
+  const party = await mount({ role: "party" }, { graph: g, fixture: fx });
+  const stage = await mount({ role: "stage" }, { graph: g, fixture: null });
+  const plate = await mount({ role: "nameplate", pane: "p_t1", terminal: "t1" }, { graph: g, fixture: null });
+  const host = await useDemo(party, "mid");
+  const real = host.view.bind(host);
+  host.view = (kind, args) => {
+    if (kind === "party" || kind === "stage" || kind === "nameplate") {
+      host.viewErrors[kind] = `simulated ${kind} bug`;
+      return null; // what host.view answers after a throw
+    }
+    return real(kind, args);
+  };
+  party.size(248, 600);
+  party.render();
+  assert.doesNotMatch(party.text(), /Loading/);
+  assert.match(party.text(), /party view hit a snag/);
+  const rows = party.findAll((n) => typeof n.id === "string" && n.id.startsWith("mdr-plain-") && n.id !== "mdr-plain-party");
+  assert.equal(rows.length, fx.agents.length, "herdr's agents, plainly");
+  party.fire(rows[1].id);
+  assert.deepEqual(M.calls().run.at(-1), { name: "pane.focus", args: { terminal: fx.agents[1].address }, copy: party.copy.label });
+  stage.size(960, 200);
+  stage.render();
+  assert.ok(stage.find("mdr-error-chip"));
+  assert.match(stage.text(), /stage view hit a snag/);
+  plate.render();
+  assert.equal(plate.find("mdr-error-chip"), null, "a pane header falls back to herdr's plain header instead");
+  // fixed: the roles draw again
+  host.view = real;
+  delete host.viewErrors.party;
+  delete host.viewErrors.stage;
+  party.render();
+  stage.render();
+  assert.equal(party.find("mdr-plain-party"), null);
+  assert.equal(stage.find("mdr-error-chip"), null);
+  for (const m of [party, stage, plate]) assert.deepEqual(m.errors, []);
+});
+
 test("close(): role cleanup, overlay unregistered, the save flushed only by the last copy", async () => {
   M.resetState();
   const g = "close";

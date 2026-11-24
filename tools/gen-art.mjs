@@ -8,6 +8,8 @@
 // "2x pixel" look of D§11.1) and emitted as one <path> per colour made of merged axis-aligned
 // rectangles, with shape-rendering="crispEdges". No <text>: glyphs come from a tiny pixel font.
 // Masks (svg() tinted by text colour) are emitted with a single fill (#000) and no background.
+// The viewBox is always the display size at zoom 1; full-colour art that image() draws larger than
+// that carries width/height = k × viewBox so herdr's one-time raster stays sharp (`intrinsicScale`).
 // Nothing here is random: same code, same bytes.
 //
 // `generateAll()` returns Map<relativePath, svgText> (paths relative to mods/mapledr), so the
@@ -2141,8 +2143,63 @@ export function isMaskPath(rel) {
     rel === "art/fx/loot.svg" || rel === "art/fx/starburst.svg";
 }
 
+// Intrinsic size of full-colour art (ARCHITECTURE §8). herdr's image() hands an SVG to GPUI's
+// image loader, which rasterises it ONCE at twice its width/height attributes
+// (gpui-pre elements/img.rs:773-775 `render_single_frame(&bytes, 1.0)` → svg_renderer.rs:200-207
+// ScaleFactor(1 × SMOOTH_SVG_SCALE_FACTOR 2)) and then samples that bitmap into the element's
+// bounds with a linear filter and a single mip level (gpui-pre-wgpu wgpu_renderer.rs:1416-1420,
+// wgpu_atlas.rs:215; gpui-pre-apple shaders.metal:716-717). A sprite drawn larger than its
+// width/height is therefore upscaled and its crisp pixel edges go soft. So art that is drawn
+// bigger than its viewBox carries width/height = k × viewBox: the viewBox (and so every coordinate
+// and the layout size at zoom 1) is unchanged, only the raster gets k times denser. k is the
+// largest draw / viewBox ratio, rounded up:
+//   mob/*         elite ELITE.scale 1.25 × a full grower (1 + TRAITS.grower.cap 0.6) = 2.0 → 2
+//   gear/acc-*    the sheet portrait draws them at 25.2 of 16 = 1.58                   → 2
+//   fx/campfire   the Herd panel building icon, 26 of 24                               → 2
+//   fx/mug        the Herd panel building icon, 26 of 12 = 2.17                        → 3
+//   fx/stamp-fixed  the FIXED stamp starts at 160×56 (2 × 80×28, ui/stage.js) and shrinks
+//                 to its size over 300 ms while it fades in over 150 ms                → 2
+// Transitions count: a size a width/height transition passes through while visible is a draw.
+// Everything else is drawn at or below its viewBox and stays at k = 1: a denser raster would only
+// be minified more, and one mip level aliases large downscales (bosses in the Herd panel are
+// drawn at 64 of 112). Masks go through svg(), which rasterises at the painted size, so they are
+// always k = 1. test/art.test.mjs checks k against every image() draw in the check role matrix
+// (the stamp's slam is not in it, so its k is pinned there by hand).
+const INTRINSIC_SCALE = [
+  [/^art\/fx\/mug\.svg$/, 3],
+  [/^art\/mob\//, 2],
+  [/^art\/gear\/acc-/, 2],
+  [/^art\/fx\/campfire\.svg$/, 2],
+  [/^art\/fx\/stamp-fixed\.svg$/, 2],
+];
+
+/** The intrinsic-size multiplier k of a generated file (width/height = k × viewBox). */
+export function intrinsicScale(rel) {
+  if (isMaskPath(rel)) return 1;
+  for (const [re, k] of INTRINSIC_SCALE) if (re.test(rel)) return k;
+  return 1;
+}
+
+/** Rewrite the root's width/height to k × its viewBox (svgDoc always writes them in that order). */
+function withIntrinsicScale(rel, text) {
+  const k = intrinsicScale(rel);
+  if (k === 1) return text;
+  const re = /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" width="(\d+)" height="(\d+)" viewBox="0 0 (\d+) (\d+)"/;
+  const m = re.exec(text);
+  if (!m || m[1] !== m[3] || m[2] !== m[4]) throw new Error(`gen-art: ${rel}: unexpected root tag for an intrinsic scale`);
+  return text.replace(re, (_, w, h, vw, vh) =>
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${w * k}" height="${h * k}" viewBox="0 0 ${vw} ${vh}"`);
+}
+
 /** Map<relativePath (from mods/mapledr), svgText>. */
 export function generateAll() {
+  const out = generateAt1x();
+  for (const [rel, text] of out) out.set(rel, withIntrinsicScale(rel, text));
+  return out;
+}
+
+/** Every file at width/height = viewBox (before the intrinsic scale). */
+function generateAt1x() {
   const out = new Map();
   for (const { id, size } of mobList()) out.set(`art/mob/${id}.svg`, mobSvg(id, size));
   for (const b of BOSSES) {

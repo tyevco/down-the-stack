@@ -17,11 +17,16 @@
 //    any other command is passed to the role.
 // render() delegates to the role inside a try/catch: a renderer bug shows a small error chip
 // (with the debug tooltip) instead of breaking herdr's chrome, and is rethrown once from the next
-// timer tick so herdr logs it (`herdr-app status`; the mock check fails on it).
+// timer tick so herdr logs it (`herdr-app status`; the mock check fails on it). A view builder
+// that throws (host.view answers null, which also means "still loading") shows the same chip
+// instead of an endless loading state; the party then also lists herdr's agents plainly, since
+// this layout has no other agent list. Save trouble (host.saveStatus) puts a small notice on the
+// stage until the player dismisses it.
 
 import { View, div } from "gpui-kit";
-import { props, checking, nextCommand } from "herdr";
+import { props, checking, nextCommand, agents, run } from "herdr";
 import { getHost } from "./host.js";
+import { T, kids } from "./ui/kit.js";
 import Stage from "./ui/stage.js";
 import Party from "./ui/party.js";
 import Nameplate from "./ui/nameplate.js";
@@ -35,6 +40,9 @@ const HOTKEYS = { sheet: true, herd: true, calm: true };
 // Copies that live as long as the layout; pane headers and dialogs pump only as a fallback.
 const STABLE = { stage: true, party: true, hud: true };
 const STALE_MS = 1500;
+// Roles whose view failure shows the error chip (a nameplate falls back to herdr's plain header).
+const VIEW_CHIP = { stage: true, party: true, hud: true, sheet: true, herd: true };
+const PLAIN_ROWS = 12;
 
 const msgOf = (e) => String((e && e.message) || e);
 
@@ -124,9 +132,17 @@ export default class Mapledr extends View {
       this.fail(e, "render");
       return errorChip(this.roleName, host.debugText());
     }
-    // The stage carries a tiny debug dot while anything went wrong (tooltip only).
-    if (this.roleName === "stage" && host.hasErrors() && el && typeof el.child === "function") {
-      el = el.child(debugDot(host.debugText()));
+    // The role's view builder threw: its null reads as "loading" to the role, so say what it is.
+    const viewError = VIEW_CHIP[this.roleName] && typeof host.viewError === "function" ? host.viewError(this.roleName) : null;
+    if (viewError) {
+      return this.roleName === "party" ? plainParty(host.debugText()) : errorChip(this.roleName, host.debugText());
+    }
+    if (this.roleName === "stage" && el && typeof el.child === "function") {
+      // A notice while the save is in trouble (until dismissed), and a tiny debug dot while
+      // anything went wrong (tooltip only).
+      const st = typeof host.saveStatus === "function" ? host.saveStatus() : null;
+      if (st && host.saveNoticeSeen !== st.message) el = el.child(saveNotice(st, host));
+      if (host.hasErrors()) el = el.child(debugDot(host.debugText()));
     }
     return el;
   }
@@ -162,6 +178,48 @@ function errorChip(role, tooltip) {
       .text_size(11).text_color("#F2A93B").whitespace_nowrap()
       .tooltip(String(tooltip || ""))
       .child(`Down the Stack: the ${role || "mod"} view hit a snag`));
+}
+
+/** The save is read-only, not being written, or was restored: a chip in the stage's top-right sky (under the lane bar). */
+function saveNotice(st, host) {
+  const label = String(st.title || "Save trouble");
+  return div().id("mdr-save-notice").absolute().top(22).right(8).flex().items_center().gap(6).h(20).px(8).rounded(6)
+    .bg("#1B1B1FE6").border(1).border_color("#F2A93B99").cursor_pointer()
+    .text_size(11).text_color("#F2A93B").whitespace_nowrap()
+    .tooltip(`${st.message}${st.detail ? `\n(${st.detail})` : ""}\nClick to hide this notice.`)
+    .on_click((_e, cx) => {
+      host.saveNoticeSeen = st.message;
+      cx.stop_propagation();
+      cx.notify();
+    })
+    .child(div().size(6).flex_none().rounded_full().bg("#F2A93B"))
+    .child(label);
+}
+
+/** The party's view failed: herdr's agents as a plain list (this layout has no other one). */
+function plainParty(tooltip) {
+  const t = T();
+  let list = [];
+  try { list = agents() || []; } catch (e) { list = []; }
+  const DOT = { working: t.working, blocked: t.blocked, done: t.done, idle: t.idle };
+  const rows = list.filter((a) => a && a.address != null).slice(0, PLAIN_ROWS).map((a, i) => {
+    const name = String(a.pane_name || a.title || a.tab_name || a.address);
+    return div().id(`mdr-plain-${i}`).flex().items_center().gap(8).h(26).px(10).rounded(6).cursor_pointer()
+      .hover((s) => s.bg(t.hover))
+      .on_click((_e, cx) => {
+        // agents() lists pane terminals: focus the pane (this layout has no agent block for agent.focus)
+        try { run("pane.focus", { terminal: String(a.address) }); } catch (err) { /* gone meanwhile */ }
+        cx.stop_propagation();
+      })
+      .child(div().size(7).flex_none().rounded_full().bg(DOT[a.status] || t.idle))
+      .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.fg).child(name));
+  });
+  return div().id("mdr-plain-party").size_full().flex().flex_col().gap(2).p(8).overflow_hidden()
+    .children(kids([
+      errorChip("party", tooltip).h(32).flex_none(),
+      rows.length ? null : div().px(10).text_size(12).text_color(t.dim).child("No agents running"),
+      ...rows,
+    ]));
 }
 
 /** Debug-only marker: a dim dot in the stage's top-right corner; the details are its tooltip. */

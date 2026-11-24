@@ -17,7 +17,7 @@ import {
 } from "./data.js";
 import {
   itemTier, reqLevel, weaponDmg, armorPiece, itemPower, polishCost as polishCostOf, polishMax, deprecateYield,
-  gold, chestTierOf,
+  gold, chestTierOf, logMax,
 } from "./formulas.js";
 import { rngNext, rngInt, rngPick, rngElem } from "./rng.js";
 import { stats, computeStats } from "./heroes.js";
@@ -83,6 +83,46 @@ export function newItem(state, f) {
 /** Deep copy of an item (same uid). */
 export function cloneItem(item) {
   return { ...item, aff: item.aff.map((a) => [a[0], a[1]]) };
+}
+
+/**
+ * Repairs an item in place with the save codec's D§13.4 fallbacks (save.js decItem): an unknown base
+ * becomes the Training Stick, an unknown affix Memoized with the same roll (dropped if that
+ * duplicates one), an unknown LTS property Feature-Flagged, an unknown Keepsake an LTS
+ * Feature-Flagged item; rarity, item level, polish and rolls are clamped. For items that reach the
+ * engine without passing the stash codec (herd.inbox). Returns true when anything changed.
+ */
+export function repairItem(item) {
+  if (!item || typeof item !== "object") return false;
+  let changed = false;
+  const fix = (k, v) => { if (item[k] !== v) { item[k] = v; changed = true; } };
+  const num = (v, d) => (typeof v === "number" && Number.isFinite(v) ? v : d);
+  fix("base", BASE_LIST[num(item.base, -1)] ? item.base : 0);
+  fix("ilvl", Math.max(1, num(item.ilvl, 1)));
+  fix("rar", Math.min(R_KEEPSAKE, Math.max(0, Math.round(num(item.rar, 0)))));
+  fix("pol", Math.max(0, num(item.pol, 0)));
+  fix("flags", num(item.flags, 0));
+  fix("prop", num(item.prop, -1));
+  if (item.rar === R_KEEPSAKE && !KEEPSAKES[item.prop]) { item.rar = R_LTS; item.prop = 1; changed = true; }
+  if (item.rar === R_LTS && !LTS_PROPS[item.prop]) fix("prop", 1);
+  if (item.rar < R_LTS) fix("prop", -1);
+  const list = Array.isArray(item.aff) ? item.aff : [];
+  const seen = new Set();
+  const aff = [];
+  let affChanged = !Array.isArray(item.aff);
+  for (const x of list) {
+    if (!Array.isArray(x)) { affChanged = true; continue; }
+    let id = num(x[0], -1);
+    const roll = Math.min(99, Math.max(0, num(x[1], 0)));
+    if (!AFFIXES[id]) { id = 0; affChanged = true; }
+    if (roll !== x[1]) affChanged = true;
+    if (seen.has(id)) { affChanged = true; continue; }
+    seen.add(id);
+    aff.push([id, roll]);
+  }
+  // `aff` is replaced as a whole, never edited in place (heroes.stats caches compare identity)
+  if (affChanged) { item.aff = aff; changed = true; }
+  return changed;
 }
 
 /** Required hero level (max(1, i - 3)). */
@@ -159,10 +199,15 @@ export function itemStats(item) {
  * Display name (D§8.3): Prototype "Base"; Alpha "Prefix Base" or "Base of Suffix"; Beta/Release
  * "[first prefix] Base [first suffix]", or the strongest (highest-roll) prefix when there is no
  * suffix; LTS "[Property] Base"; Keepsakes their fixed name; polish appends " +N".
+ * A base whose name already ends in "of ..." (D§14.7: "Duck of Insight", "Crown of Inbox Zero",
+ * "Parka of Prod", "Treads of Uptime", "Staff of Pure Functions") takes no suffix, which would read
+ * as two ("Treads of Uptime of Caching"): Beta and better use the prefix-only form, an Alpha whose
+ * one affix is a suffix keeps the plain base name.
  */
 export function itemName(item) {
   const b = baseOf(item);
   let name = b.name;
+  const noSuffix = / of /.test(b.name);
   if (item.rar === R_KEEPSAKE) {
     name = (KEEPSAKES[item.prop] || {}).name || b.name;
   } else if (item.rar === R_LTS) {
@@ -170,11 +215,13 @@ export function itemName(item) {
     name = p ? `${p.name} ${b.name}` : b.name;
   } else if (item.rar === 1 && item.aff.length) {
     const a = AFFIXES[item.aff[0][0]] || AFFIXES[0];
-    name = a.kind === "prefix" ? `${a.name} ${b.name}` : `${b.name} ${a.name}`;
+    name = a.kind === "prefix" ? `${a.name} ${b.name}` : noSuffix ? b.name : `${b.name} ${a.name}`;
   } else if (item.rar >= 2 && item.aff.length) {
     const pre = item.aff.filter((x) => (AFFIXES[x[0]] || AFFIXES[0]).kind === "prefix");
-    const suf = item.aff.filter((x) => (AFFIXES[x[0]] || AFFIXES[0]).kind === "suffix");
-    if (suf.length) {
+    const suf = noSuffix ? [] : item.aff.filter((x) => (AFFIXES[x[0]] || AFFIXES[0]).kind === "suffix");
+    if (!pre.length && !suf.length) {
+      name = b.name;
+    } else if (suf.length) {
       name = (pre.length ? `${AFFIXES[pre[0][0]].name} ` : "") + `${b.name} ${AFFIXES[suf[0][0]].name}`;
     } else {
       let best = pre[0];
@@ -307,10 +354,11 @@ export function lootOffset(level) {
 
 /**
  * Item level for a drop source (D§8.6): kill/elite m + U{0,1}; chest map top + U{0,1,2}; duck m + 2;
- * boss/review as given; each lowered by T.loot.ilvlOffset (at least 1). balance: D§8.6 drops land
- * 4-5 levels above the reference kit's iRef(L) = L - 2, and autopilot keeps the best of many
- * (Release by Lv 25), so worn gear ran 1.4-2x the reference kit; the offset brings it back
- * (docs/BALANCE.md). Keepsakes keep the boss level (rollKeepsake).
+ * each lowered by T.loot.ilvlOffset (at least 1). balance: D§8.6 drops land 4-5 levels above the
+ * reference kit's iRef(L) = L - 2, and autopilot keeps the best of many (Release by Lv 25), so worn
+ * gear ran 1.4-2x the reference kit; the offset brings it back (docs/BALANCE.md §4). Boss and review
+ * rewards never come through here: they roll at Lb / L as given (boss.js winFight,
+ * rollReviewReward), and Keepsakes keep the boss level (rollKeepsake).
  */
 export function dropIlvl(holder, source, level) {
   const off = lootOffset(level);
@@ -387,7 +435,10 @@ export function scoreDelta(hero, item, slotIdx, ctx = {}) {
   return w.dps * dD + w.ehp * dE;
 }
 
-/** Is the item worth equipping for this hero? (score >= +2%; design gap: any usable item fills an empty slot). */
+/**
+ * Is the item worth equipping for this hero? (score >= +2%; design gap: any usable item fills an
+ * empty slot, and a weapon of another class's type, swung like a Training Stick, counts as empty).
+ */
 export function isUpgrade(hero, item, ctx, opts = {}) {
   if (!canEquip(hero, item, opts)) return false;
   const si = slotIdxOf(item);
@@ -395,7 +446,7 @@ export function isUpgrade(hero, item, ctx, opts = {}) {
   if (cur && cur.uid === item.uid) return false;
   if (cur && cur.flags & FLAG_LOCKED) return false;
   const s = scoreDelta(hero, item, si, ctx);
-  return cur ? s >= EQUIP_THRESHOLD : s >= 0;
+  return cur && canEquip(hero, cur, { ignoreLevel: true }) ? s >= EQUIP_THRESHOLD : s >= 0;
 }
 
 /**
@@ -408,6 +459,13 @@ export function equipItem(state, hero, item) {
   const si = slotIdxOf(item);
   const old = hero.eq[si];
   if (old && old.uid === item.uid) return { ok: true, replaced: null, ported: 0 };
+  // locked items are never replaced (D§8.7), nor taken off another hero
+  if (old && old.flags & FLAG_LOCKED) return { ok: false, replaced: null, ported: 0, error: `${itemName(old)} is locked: unlock it first` };
+  if (item.flags & FLAG_LOCKED) {
+    for (const h of state.heroes || []) {
+      if (h !== hero && h.eq && h.eq.indexOf(item) >= 0) return { ok: false, replaced: null, ported: 0, error: `${itemName(item)} is locked on ${h.name}: unlock it first` };
+    }
+  }
   removeFromStash(state, item.uid);
   // an item worn by another hero moves: one item object never has two owners
   for (const h of state.heroes || []) {
@@ -492,11 +550,13 @@ function removeFromStash(state, uid) {
 }
 
 function journal(state, kind, heroId, text, value) {
-  // Same entry shape as herd.js journal(): [at, kind, heroId, text, value], newest last, max 60.
+  // Same entry shape and length as herd.js journal(): [at, kind, heroId, text, value], newest
+  // last, at most logMax(state) lines (a fixed 60 here used to cut the 120-line journal back).
   const herd = state.herd;
   if (!herd.log) herd.log = [];
   herd.log.push([herd.lastMs || 0, kind, heroId, text, value]);
-  while (herd.log.length > 60) herd.log.shift();
+  const max = logMax(state);
+  if (herd.log.length > max) herd.log.splice(0, herd.log.length - max);
 }
 
 function salvage(state, item) {

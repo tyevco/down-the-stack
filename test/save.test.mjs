@@ -237,6 +237,24 @@ describe("corruption and versions", () => {
   });
 });
 
+describe("text around the JSON", () => {
+  test("a final newline, CRLF, surrounding spaces or a BOM are not corruption", () => {
+    const text = encodeState(populated(3));
+    for (const t of [text + "\n", text + "\r\n", "  " + text + "\n\n", "\ufeff" + text, "\ufeff" + text + "\n"]) {
+      const r = decodeState(t);
+      assert.equal(encodeState(r.state), text, JSON.stringify(t.slice(-3)));
+      assert.equal(r.warning, null);
+    }
+  });
+
+  test("an edit inside the JSON still fails the checksum", () => {
+    const text = encodeState(populated(3));
+    const edited = text.replace('"gold":412350.25', '"gold":412351.25');
+    assert.notEqual(edited, text);
+    assert.throws(() => decodeState(edited + "\n"), (e) => e.code === "crc");
+  });
+});
+
 describe("size budget (D§13.3)", () => {
   test("30 heroes in full gear, 140 stash items, 60 log entries fit in 30 KB", (t) => {
     // D§13.3 worst case: every hero in full Release/LTS gear with busy counters, a full signature
@@ -261,6 +279,37 @@ describe("size budget (D§13.3)", () => {
     assert.ok(typical.bytes < 10 * 1024, `typical ${typical.bytes}`);
     t.diagnostic(`worst case ${size.bytes} B; typical 6-hero herd ${typical.bytes} B`);
     assert.equal(encodeState(decodeState(text).state), text);
+  });
+
+  test("a burst of chest items waiting in herd.inbox is stored compact and round-trips", (t) => {
+    // D§13.2: up to 20 pending chests per hero; opening a day's chests can queue ~1,000+ items
+    // for the 1-per-tick drain (agents.js queueDrop / drainInbox).
+    const s = populated(30, { stash: 140, log: 60, full: true });
+    const bare = saveSize(encodeState(s)).bytes;
+    const items = s.heroes.flatMap((h) => h.eq.filter(Boolean));
+    s.herd.inbox = [];
+    for (let k = 0; k < 1000; k++) s.herd.inbox.push([1 + (k % 30), { ...items[k % items.length], uid: 500000 + k }]);
+    const text = encodeState(s);
+    const per = (saveSize(text).bytes - bare) / 1000;
+    t.diagnostic(`inbox of 1000 items: ${per.toFixed(1)} B per item`);
+    assert.ok(per < 45, `${per.toFixed(1)} B per inbox item (readable objects took ~90)`);
+    assert.ok(JSON.parse(text).herd.ib, "under herd.ib, not the readable extras");
+    assert.equal(JSON.parse(text).herd.x?.inbox, undefined);
+    const back = decodeState(text).state;
+    assert.equal(back.herd.inbox.length, 1000);
+    assert.deepEqual(back.herd.inbox[7], [s.herd.inbox[7][0], { ...s.herd.inbox[7][1] }]);
+    assert.equal(encodeState(back), text, "byte-identical");
+    // an empty inbox is absent, as the engine leaves it
+    delete s.herd.inbox;
+    assert.equal("inbox" in decodeState(encodeState(s)).state.herd, false);
+  });
+
+  test("an inbox of an unknown shape stays on the readable extras path, and an old save's readable inbox still loads", () => {
+    const s = populated(2);
+    s.herd.inbox = [[1, { odd: true }], "not an entry"];
+    const text = encodeState(s);
+    assert.deepEqual(JSON.parse(text).herd.x.inbox, s.herd.inbox);
+    assert.deepEqual(decodeState(text).state.herd.inbox, s.herd.inbox);
   });
 
   test("saveSize counts UTF-8 bytes", () => {

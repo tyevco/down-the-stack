@@ -19,6 +19,9 @@ const { stageView } = await import("../mods/mapledr/game/view.js");
 const { _resetStageMemo, whyText } = await import("../mods/mapledr/game/view/stage.js");
 const { demoWorld, demoSnapshot, DEMO_KINDS } = await import("../mods/mapledr/game/demo.js");
 const { tick, command, createWorld } = await import("../mods/mapledr/game/world.js");
+const { careerOf } = await import("../mods/mapledr/game/heroes.js");
+const { canChallenge } = await import("../mods/mapledr/game/boss.js");
+const { BOSSES, ZONES } = await import("../mods/mapledr/game/data.js");
 
 const NOW = Date.UTC(2026, 10, 24, 9, 30, 0);
 const WIDTHS = [360, 960, 1600, 2400];
@@ -74,6 +77,7 @@ const NULLABLE = new Set([
   "heroes[].programIcon", "heroes[].hat", "heroes[].bubble", "heroes[].campfire", "heroes[].tag",
   "heroes[].rebootFrac", "mobs[].glyph", "chests[].address", "boss.banner", "boss.stamp",
   "boss.partSprite", "boss.mechText", "boss.phaseLabel", "fx[].color", "fx[].size",
+  "rooms[].pin", "rooms[].challenge", "boss.retreat", "heroes[].reviewEnd",
 ]);
 
 function conform(v, node, path, errs) {
@@ -208,9 +212,15 @@ test("empty and loading states", () => {
 // (2) Render through ui/stage.js
 // ---------------------------------------------------------------------------------------------
 
+/** panes() rows: every hero's terminal has a pane (herdr agents do), Forklings have none. */
+const panesOf = (vm) => vm.heroes.filter((h) => h.address).map((h, i) => ({
+  pane: `p${i + 1}`, terminal: h.address, tab: "tab1", title: h.name, name: null, cwd: null, branch: null, status: "working",
+  app: "claude-code", program: null, focused: false, zoomed: false, movable: true, scroll: null,
+}));
+
 async function mountStage(vm, { width = vm.width, height = vm.height, zoom = 1 } = {}) {
   M.resetState();
-  M.setFixture({ theme: "graphite", settings: { zoom }, layout: M.readLayout() });
+  M.setFixture({ theme: "graphite", settings: { zoom }, layout: M.readLayout(), panes: panesOf(vm) });
   const ref = { vm };
   const log = { commands: [] };
   const host = {
@@ -269,15 +279,25 @@ test("render: twelve working heroes on 2400 px stay within 400 elements", async 
 test("render: the stage's clicks reach the engine with the VM's ids", async () => {
   const vm = stageView(world("mid"), { width: 1200, height: 200, nowMs: NOW });
   const { mod, log } = await mountStage(vm);
+  const last = () => { const c = M.calls().run.at(-1); return { name: c.name, args: c.args }; };
   const pim = vm.heroes.find((h) => h.state === "waiting");
   mod.fire(pim.key);
   assert.deepEqual(log.commands.at(-1), { name: "markSeen", args: { heroId: pim.heroId } });
-  assert.deepEqual(M.calls().run.at(-1).args, { terminal: pim.address });
+  assert.deepEqual(last(), { name: "pane.focus", args: { terminal: pim.address } });
   mod.fire(`${pim.key}/bubble`);
-  assert.deepEqual(M.calls().run.at(-1).args, { terminal: pim.address });
+  assert.deepEqual(last(), { name: "pane.focus", args: { terminal: pim.address } });
+  // Forklings (sub-agents, no pane): herdr's peek, as its agents list opens them
   const moss = vm.heroes.find((h) => h.forklings.length);
-  mod.fire(moss.forklings[0].key);
-  assert.deepEqual(M.calls().run.at(-1).args, { terminal: moss.forklings[0].address });
+  for (const fk of moss.forklings) {
+    mod.fire(fk.key);
+    assert.deepEqual(last(), { name: "terminal.peek", args: { terminal: fk.address } });
+  }
+  assert.ok(moss.forklings.some((f) => f.bubble), "the blocked one too");
+  assert.equal(M.calls().run.filter((c) => c.name === "agent.focus").length, 0);
+  // the room header pins its heroes; the boss door (when open) challenges
+  const room = vm.rooms.find((r) => r.pin);
+  mod.fire(`${room.key}/hdr`);
+  assert.deepEqual(log.commands.slice(-room.pin.heroIds.length), room.pin.heroIds.map((heroId) => ({ name: "pinMap", args: { heroId, mapId: room.pin.mapId } })));
   assert.deepEqual(problems(mod), []);
 });
 
@@ -425,7 +445,12 @@ test("layout: the boss arena keeps fighters ≥ 56 px apart, shows no BOSS tag, 
       assert.ok(vm.boss, `${kind}@${width}: no arena`);
       const a = vm.boss.arena;
       const inside = vm.heroes.filter((h) => h.x >= a.x && h.x <= a.x + a.w).sort((p, q) => p.x - q.x);
-      assert.ok(inside.length >= 3, `${kind}@${width}: ${inside.length} fighters`);
+      // D§9.5: participants that went done / idle walked out (late: Sol shipped, Wynn resting);
+      // the ones still questing, supervising, crashed or blocked (holding) stay in the arena
+      const fight = fw.rt.fights.find((f) => f.kind !== "review");
+      const staying = fight.heroIds.filter((id) => ["questing", "supervising", "crashed", "waiting"].includes(fw.rt.live.get(id)?.state));
+      assert.ok(inside.length >= Math.min(3, staying.length) && inside.length >= 2, `${kind}@${width}: ${inside.length} fighters`);
+      for (const h of inside) assert.ok(staying.includes(h.heroId), `${kind}@${width}: ${h.name} walked out but fights`);
       for (let i = 1; i < inside.length; i++) assert.ok(inside[i].x - inside[i - 1].x >= 55.9, `${kind}@${width}: fighters ${inside[i].x - inside[i - 1].x} px apart`);
       for (const h of inside) assert.ok(!(h.tag && /BOSS/.test(h.tag.text)), `${kind}: BOSS tag in the arena`);
       // the boss and its parts stay inside the arena, right of the fighters
@@ -457,7 +482,9 @@ test("overflow: protected heroes stay, the chip counts the rest, refolds wait up
     assert.equal(vm.overflow.dots.length, vm.overflow.count);
     for (const [id, live] of w.rt.live) {
       const hero = w.state.heroes.find((h) => h.id === id);
-      const prot = live.state === "waiting" || live.focused || live.pinned || (hero.pend && hero.pend.length) || w.rt.fights.some((f) => f.heroIds.includes(id));
+      // a fight participant is protected while it is still in the fight (D§9.5: done / idle walk out)
+      const inFight = ["questing", "supervising", "crashed", "waiting"].includes(live.state) && w.rt.fights.some((f) => f.heroIds.includes(id));
+      const prot = live.state === "waiting" || live.focused || live.pinned || (hero.pend && hero.pend.length) || inFight;
       if (prot) assert.ok(shown.has(id), `late@${width}: protected hero ${id} folded`);
     }
     assert.ok(vm.overflow.x + vm.overflow.w <= width + 0.5);
@@ -476,7 +503,10 @@ test("overflow: protected heroes stay, the chip counts the rest, refolds wait up
   tick(w, snap);
   const vm1 = stageView(w, { width: 1200, height: 200, nowMs: NOW + 1000 });
   assert.ok(vm1.heroes.some((h) => h.heroId === target), "the newly blocked hero is promoted at once");
-  assert.equal(vm1.heroes.length, vm0.heroes.length, "someone else went to camp");
+  // someone else went to camp, or (when the protected heroes need squeezed slots) the promoted
+  // hero squeezed in: never more than one more slot
+  assert.ok(vm1.heroes.length - vm0.heroes.length <= 1 && vm1.heroes.length >= vm0.heroes.length, `${vm0.heroes.length} -> ${vm1.heroes.length}`);
+  assert.ok(vm1.overflow && vm1.overflow.x + vm1.overflow.w <= 1200.5, "the camp chip still fits");
 });
 
 test("cues: bubbles, crates, tags, zzz, campfires, chests and why tooltips come from the engine", () => {
@@ -530,6 +560,195 @@ test("memo: the same version and size return the same VM; a new tick builds a ne
   // a brand-new world needs no memory to render
   const blank = createWorld({ nowMs: NOW });
   assert.equal(stageView(blank, { width: 640, height: 200, nowMs: NOW }).empty.kind, "no_agents");
+});
+
+test("memo: two stage copies of different widths keep their own mob, chest and fold memory", () => {
+  // a second stage (a pane, tab or overlay with props {role:"stage"}) builds every world version
+  // at its own width too: the layout's copy must see exactly what it sees alone
+  for (const [kind, N] of [["first-day", 240], ["mid", 80], ["late", 60]]) {
+    const alone = fresh(kind);
+    const both = fresh(kind);
+    const driver = fresh(kind);
+    let now = NOW;
+    const acc = { dying: 0, opened: 0 };
+    for (let i = 0; i < N; i++) {
+      now += 1000;
+      const snap = demoSnapshot(driver, now);
+      tick(alone, snap);
+      tick(both, snap);
+      const a = stageView(alone, { width: 960, height: 200, nowMs: now });
+      const b = stageView(both, { width: 960, height: 200, nowMs: now });
+      stageView(both, { width: 1500, height: 120, nowMs: now }); // the other copy
+      assert.equal(JSON.stringify(b), JSON.stringify(a), `${kind} tick ${i}`);
+      acc.dying += a.mobs.filter((m) => m.dying).length;
+      acc.opened += a.chests.filter((c) => c.open).length;
+    }
+    assert.ok(acc.dying > 0, `${kind}: some kills fade out (${JSON.stringify(acc)})`);
+    if (kind === "first-day") assert.ok(acc.opened > 0, `${kind}: an opened chest shows its lid`);
+  }
+  // more widths than remembered: the least recently built goes, the strip still builds
+  const w = fresh("mid");
+  for (const width of [700, 800, 900, 1000, 1100]) assert.ok(stageView(w, { width, height: 200, nowMs: NOW }).heroes.length);
+});
+
+test("names: two live heroes sharing a first name get an epithet initial on their plates", () => {
+  const vm = stageView(world("late"), { width: 2880, height: 200, nowMs: NOW });
+  const ivos = vm.heroes.filter((h) => h.name.startsWith("Ivo "));
+  assert.equal(ivos.length, 2, "the late demo has two Ivos");
+  const label = (h) => h.nameplate.text.replace(/ \d+$/, "");
+  assert.deepEqual(ivos.map((h) => h.nameplate.text).sort(), ivos.map((h) => `${label(h)} ${h.level}`).sort());
+  assert.notEqual(label(ivos[0]), label(ivos[1]));
+  for (const h of ivos) assert.match(label(h), /^Ivo [A-Z]\.$/);
+  const byName = Object.fromEntries(ivos.map((h) => [h.name, label(h)]));
+  if (byName["Ivo of Small Commits"]) assert.equal(byName["Ivo of Small Commits"], "Ivo S.");
+  if (byName["Ivo Off-By-One"]) assert.equal(byName["Ivo Off-By-One"], "Ivo O.");
+  // everyone else keeps the bare first name
+  for (const h of vm.heroes) if (!h.name.startsWith("Ivo ")) assert.equal(label(h), h.name.split(" ")[0], h.name);
+  // all plates on the strip read differently
+  const labels = vm.heroes.map(label);
+  assert.equal(new Set(labels).size, labels.length);
+  // same initial too: all epithet initials, then the hero id
+  const w = fresh("mid");
+  const live = [...w.rt.live.keys()].map((id) => w.state.heroes.find((h) => h.id === id)).filter(Boolean);
+  live[0].name = "Kip the Tested";
+  live[1].name = "Kip the Typed";
+  live[2].name = "Kip";
+  w.rt.version++;
+  const vm2 = stageView(w, { width: 2400, height: 200, nowMs: NOW });
+  const kips = vm2.heroes.filter((h) => h.name.startsWith("Kip")).map(label);
+  assert.equal(kips.length, 3);
+  assert.equal(new Set(kips).size, 3, kips.join(" | "));
+  for (const k of kips) assert.match(k, /^Kip #\d+$/);
+});
+
+test("Duck Chest: a Holo Rubber Duck's kill pops a Duck Chest where it stood, open the next tick", async () => {
+  const COMBAT = await import("../mods/mapledr/game/combat.js");
+  const { MOB_BY_ID } = await import("../mods/mapledr/game/data.js");
+  const w = fresh("first-day");
+  const ref = { now: NOW };
+  const view = () => stageView(w, { width: 960, height: 200, nowMs: ref.now });
+  view();
+  const live = [...w.rt.live.values()].find((l) => l.state === "questing" && (l.lane || []).length);
+  assert.ok(live, "a questing hero with a lane");
+  const m = COMBAT._internal.makeMob(w.rt, MOB_BY_ID.holo_duck, 3, { arriveTick: live.ct, holo: true });
+  m.hp = 1;
+  live.lane.unshift(m);
+  live.engagedUid = m.uid;
+  m.engaged = true;
+  w.rt.version++;
+  const seen = view().mobs.find((x) => x.key === `mob:${m.uid}`);
+  assert.ok(seen && seen.holo, "the duck is on stage");
+  const ducks0 = w.state.herd.ducks || 0;
+  let born = null;
+  const frames = [];
+  for (let i = 0; i < 6; i++) {
+    step(w, ref);
+    const vm = view();
+    const d = vm.chests.filter((c) => c.tier === "duck");
+    if (born == null && (w.state.herd.ducks || 0) > ducks0) born = i;
+    if (born != null) frames.push(d.map((c) => ({ open: c.open, x: c.x, heroId: c.heroId })));
+    if (born != null && frames.length >= 3) break;
+  }
+  assert.ok(born != null, "the duck died");
+  assert.deepEqual(frames.map((f) => f.map((c) => c.open)), [[false], [true], []], JSON.stringify(frames));
+  assert.equal(frames[0][0].x, seen.x, "where the duck stood");
+  assert.equal(frames[0][0].heroId, live.heroId);
+  // its key, tooltip and shape conform; it is no Commit Chest (nothing pending to claim)
+  const hero = w.state.heroes.find((h) => h.id === live.heroId);
+  assert.equal((hero.pend || []).length, 0);
+});
+
+test("review end: a won review leaves the Promotion banner in the slot for 3 ticks, a lost one the card", async () => {
+  for (const outcome of ["won", "lost"]) {
+    const w = fresh("boss");
+    let now = NOW;
+    command(w, "retreat", {}, now);
+    const h = w.state.heroes.find((x) => x.L >= 30 && w.rt.live.get(x.id)?.state === "questing");
+    assert.ok(h, "a Lv 30+ questing hero");
+    h.rev = [0, 0];
+    const r = command(w, "challenge", { kind: "review", idx: 0, heroId: h.id }, now);
+    assert.equal(r.ok, true, JSON.stringify(r));
+    const f = w.rt.fights.find((x) => x.kind === "review");
+    const view = () => stageView(w, { width: 1200, height: 200, nowMs: now });
+    view();
+    if (outcome === "won") for (const p of f.parts) p.hp = p.kind === "boss" ? 1 : 0;
+    else command(w, "retreat", { heroId: h.id }, now);
+    const ends = [];
+    for (let i = 0; i < 8 && ends.length < 5; i++) {
+      if (i > 0 || outcome === "won") { now += 1000; tick(w, demoSnapshot(w, now)); }
+      if (w.rt.fights.includes(f)) continue;
+      const vm = view();
+      const hv = vm.heroes.find((x) => x.heroId === h.id);
+      ends.push(hv ? hv.reviewEnd : "gone");
+      const errs = [];
+      conform(vm, SCHEMA, "", errs);
+      errs.push(...hygiene(vm));
+      assert.deepEqual(errs, [], `${outcome} tick ${i}`);
+    }
+    assert.equal(f.result, outcome);
+    const shown = ends.filter(Boolean);
+    assert.ok(shown.length >= 3 && shown.length <= 4, `${outcome}: ${JSON.stringify(ends)}`);
+    assert.equal(ends.at(-1), null, "then gone");
+    for (const e of shown) {
+      if (outcome === "won") assert.deepEqual([e.kind, e.text, e.sub], ["promoted", "PROMOTED", careerOf(h).title]);
+      else { assert.equal(e.kind, "postmortem"); assert.match(e.text, /^Postmortem/); assert.match(e.sub, /wounds kept/); }
+    }
+    assert.deepEqual(shown.map((e) => e.age), shown.map((_, i) => shown[0].age + i), "age counts up");
+  }
+});
+
+test("clicks in the VM: room pin, boss door challenge, boss retreat and loot pillar targets", () => {
+  // pin: every hero of a room pinned here → the header unpins
+  const w = fresh("mid");
+  let vm = stageView(w, { width: 1200, height: 200, nowMs: NOW });
+  const room = vm.rooms.find((r) => r.pin && r.pin.heroIds.length);
+  assert.equal(room.pin.mapId, room.mapId);
+  for (const id of room.pin.heroIds) assert.equal(command(w, "pinMap", { heroId: id, mapId: room.mapId }, NOW).ok, true);
+  w.rt.version++;
+  vm = stageView(w, { width: 1200, height: 200, nowMs: NOW });
+  const again = vm.rooms.find((r) => r.key === room.key) || vm.rooms.find((r) => r.mapId === room.mapId);
+  assert.equal(again.pin.mapId, null, "all pinned: the click unpins");
+  assert.match(again.tooltip, /auto map choice/);
+  // the boss door: a click target only where the challenge would start (the stage shows no command
+  // result, so a door the engine refuses stays a sign and its header says why)
+  let refused = 0;
+  for (const kind of DEMO_KINDS) {
+    const v = stageView(world(kind), { width: 1600, height: 200, nowMs: NOW });
+    for (const r of v.rooms) {
+      if (!r.door) { assert.equal(r.challenge, null, `${kind} ${r.key}`); continue; }
+      const can = canChallenge(world(kind), "boss", BOSSES.findIndex((b) => ZONES[b.zone]?.id === r.zone));
+      if (can.ok) assert.ok(r.challenge && r.challenge.kind === "boss" && Number.isInteger(r.challenge.idx), `${kind} ${r.key}`);
+      else {
+        refused++;
+        assert.equal(r.challenge, null, `${kind} ${r.key}: ${can.error}`);
+        assert.ok(r.tooltip.includes(can.error), `${kind} ${r.key}: the header says why`);
+      }
+    }
+    for (const r of v.rooms) if (r.key.startsWith("room:arena:")) assert.equal(r.pin, null);
+    if (v.boss) assert.equal(Boolean(v.boss.retreat), !v.boss.stamp && !v.boss.banner?.kind?.startsWith("post"), kind);
+  }
+  assert.ok(refused >= 1, "a demo world shows an open door while another boss fight is on");
+  // the late demo: the Monolith's door is open while the Bloatodon fight runs (a sign, "A boss
+  // fight is on"); after a Retreat it challenges, and that click starts the fight
+  const wl = fresh("late");
+  let vl = stageView(wl, { width: 2400, height: 200, nowMs: NOW });
+  const doorRoom = vl.rooms.find((r) => r.door && /A boss fight is on/.test(r.tooltip));
+  assert.ok(doorRoom && doorRoom.challenge === null, "late: an open door while another boss fight is on");
+  assert.equal(command(wl, "retreat", {}, NOW).ok, true);
+  wl.rt.version++;
+  vl = stageView(wl, { width: 2400, height: 200, nowMs: NOW });
+  const reopened = vl.rooms.find((r) => r.door && r.mapId === doorRoom.mapId);
+  assert.ok(reopened && reopened.challenge, "no fight on: the door challenges");
+  assert.doesNotMatch(reopened.tooltip, /A boss fight is on/);
+  assert.equal(command(wl, "challenge", { kind: reopened.challenge.kind, idx: reopened.challenge.idx }, NOW).ok, true);
+  // a loot pillar knows the finder's sheet and the item
+  const w2 = fresh("mid");
+  const hero = w2.state.heroes.find((h) => w2.rt.live.has(h.id));
+  w2.rt.fx.push({ key: `fx:${w2.rt.tick}:999`, kind: "pillar", heroId: hero.id, roomId: null, rar: 4, value: 4242, text: "LTS", bornTick: w2.rt.tick });
+  w2.rt.version++;
+  const p = stageView(w2, { width: 1200, height: 200, nowMs: NOW }).fx.find((f) => f.kind === "pillar");
+  assert.ok(p);
+  assert.deepEqual(p.sheet, { heroId: hero.id, itemUid: 4242 });
 });
 
 // ---------------------------------------------------------------------------------------------

@@ -7,8 +7,9 @@
 
 import {
   TUNING as T, CLASSES, CAREERS, SKILLS, SKILL_SLOTS, NAMES, ZONES, TROPHY, BUILDINGS, BUILDING_IDX, CLASS_IDX,
+  RARITIES,
 } from "./data.js";
-import { g, DR, need, bareHandDmg, powerLevel, trackerTier } from "./formulas.js";
+import { g, DR, need, bareHandDmg, weaponDmg, powerLevel, trackerTier } from "./formulas.js";
 import { fnv1a32, rngNext, seedOf } from "./rng.js";
 import { itemStats, newItem, canEquip, FLAG_STARTER } from "./items.js";
 
@@ -550,6 +551,7 @@ function combine(hero, b, eq, ctx) {
   for (const s of AFFIX_STATS) a[s] = 0;
   let weapon = 0;
   let hasWeapon = false;
+  let offClass = false; // the weapon is another class's type (swung as a Training Stick)
   let armorSum = 0;
   let coffeeHeal = b.coffeeHeal;
   const lts = {};
@@ -559,8 +561,15 @@ function combine(hero, b, eq, ctx) {
     const it = eq[s];
     if (!it) continue;
     // A weapon of another class's type (left in hand by a provisional class switch or a Career
-    // Change) does nothing until autopilot or the person replaces it: weapons are class-typed (D§8.1).
-    if (s === 0 && !canEquip(hero, it, { ignoreLevel: true })) continue;
+    // Change, D§4.2) is swung like a Training Stick of its item level until autopilot or the person
+    // replaces it: no rarity, polish, affixes or property (weapons are class-typed, D§8.1). Bare
+    // hands (3 g(L)) would halve a hero's damage for a free switch (docs/BALANCE.md §4).
+    if (s === 0 && !canEquip(hero, it, { ignoreLevel: true })) {
+      weapon = weaponDmg(it.ilvl || 1, RARITIES[0].mult, 0);
+      hasWeapon = true;
+      offClass = true;
+      continue;
+    }
     const is = cachedItemStats(it);
     if (is.slot === "weapon") {
       weapon = is.weaponDmg;
@@ -608,7 +617,7 @@ function combine(hero, b, eq, ctx) {
   const st = {
     L, cls: hero.cls, clsId: b.c.id,
     might, grit: b.grit, keen: b.keen, luck: b.luck,
-    weaponDmg: hasWeapon ? weapon : bareHandDmg(L), hasWeapon,
+    weaponDmg: hasWeapon ? weapon : bareHandDmg(L), hasWeapon, offClassWeapon: offClass,
     maxHp: Math.round(T.hpBase * g(L) * (1 + b.grit / 100) * (1 + hpPct)), hpPct,
     armor, armorPct: a.armorPct, drFlat,
     crit: Math.min(T.critCap, T.critBase + 0.0015 * b.keen + crit),

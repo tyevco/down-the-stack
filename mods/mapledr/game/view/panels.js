@@ -24,7 +24,10 @@
 //    "Locked items are never replaced" (D§8.7) holds for the person's clicks too.
 //  - Per-mob kill counts are not stored by the engine (herd.bt counts kills per zone), so a bug
 //    report shows the zone's kills split by the maps' spawn weights, marked "~".
-//  - First-clear dates come from the journal (herd.log keeps 60 lines); an older clear reads "Fixed".
+//  - First-clear dates come from herd.bossAt (Herd.firstClearMs, never rolls out), else from the
+//    journal's "FIXED" line for saves made before bossAt existed; a clear neither knows reads "Fixed".
+//  - Digest lines with no date (herd.digest gives at null for kills it only knows from the counters)
+//    read "earlier", never a date made from 0.
 //  - Dates and clock times use args.tzOffsetMin, else world.rt.tzOffsetMin, else UTC; "now" is
 //    args.nowMs, else world.rt.nowMs (the last tick's clock).
 //  - VMs are memoised per (world version, args, minute): every redraw of the window within a tick
@@ -202,6 +205,11 @@ function fmtWhen(ms, clock) {
   return `${MONTHS[p.m]} ${p.d}`;
 }
 
+/** fmtWhen for a digest line that may have no date (at null or 0): "earlier", never "Jan 1". */
+function whenOrEarlier(ms, clock) {
+  return num(ms) > 0 ? fmtWhen(ms, clock) : "earlier";
+}
+
 /** "3d 02h ago" / "12m ago" / "just now". */
 function ago(ms, now) {
   const sec = (num(now) - num(ms)) / 1000;
@@ -232,10 +240,15 @@ function buildIndex(world) {
   }
   const counts = { working: 0, blocked: 0, done: 0, idle: 0 };
   for (const [, l] of pairs) counts[statusWord(l.status)]++;
-  // first clears: the journal's "<boss> FIXED" lines (value = boss index)
+  // first clears: herd.bossAt (Herd.firstClearMs, kept for good), else the journal's "<boss> FIXED"
+  // lines (value = boss index) of saves made before bossAt existed; the earlier of the two wins
   const cleared = {};
   for (const e of state.herd.log || []) {
-    if (e && e[1] === "boss" && /FIXED$/.test(str(e[3])) && Number.isInteger(e[4]) && cleared[e[4]] == null) cleared[e[4]] = e[0];
+    if (e && e[1] === "boss" && /FIXED$/.test(str(e[3])) && Number.isInteger(e[4]) && cleared[e[4]] == null && num(e[0]) > 0) cleared[e[4]] = e[0];
+  }
+  for (let bi = 0; bi < BOSSES.length; bi++) {
+    const at = Herd.firstClearMs(state, bi);
+    if (at != null && !(cleared[bi] <= at)) cleared[bi] = at;
   }
   return { rt, version: rt.version, pairs, liveOf, fights, maxL, maxByType, counts, cleared };
 }
@@ -433,7 +446,9 @@ function anyoneCanWear(idx, item) {
 
 // Per hero: the scores priced against its current stats object (`cur`) and the ones from its
 // previous stats object (`prev`, used while `cur` fills up). Keyed by hero id; a reloaded world
-// (other hero objects) starts afresh. Bounded by the roster size.
+// (other hero objects) starts afresh. Each new entry first drops the entries of heroes that are
+// gone (retired, a departed Contractor: every hire gets a fresh negative id, a reloaded world), so
+// the cache stays bounded by the roster plus the live Contractors (pruneScores).
 const SCORES = new Map();
 /** New scores priced per stash list (one scoreDelta is ~0.5 ms in QuickJS; 140 items would not fit). */
 const SCORE_BUDGET = 16;
@@ -452,6 +467,7 @@ function scorer(world, hero) {
   const st = stats(hero, ctx);
   let e = SCORES.get(hero.id);
   if (!e || e.hero !== hero) {
+    pruneScores(world);
     e = { hero, st, cur: new Map(), prev: null };
     SCORES.set(hero.id, e);
   } else if (e.st !== st) {
@@ -1031,12 +1047,18 @@ function headerVM(world, idx, hero, live, st, clock) {
   const maxHp = live && num(live.maxHp) > 0 ? live.maxHp : num(st.maxHp, 1);
   const hp = live && num(live.maxHp) > 0 ? num(live.hp) : maxHp * clamp01(num(hero.hpFrac, 1));
   const xpFrac = xpFracOf(hero);
-  let tag = null;
+  let tag = null, tagTip = null, tagTab = null;
   if (hero.contractor) tag = "contractor";
   else if (!live) tag = "off duty";
-  else if (hero.cls > 0 && hero.prov) tag = "provisional";
+  else if (hero.cls > 0 && hero.prov) {
+    // D§4.2: behaviour may still switch the class until it locks; the person can lock it now (the
+    // Career tab's class chip; the tag links there).
+    tag = "provisional";
+    tagTip = `${provisionalText(hero)}: ${firstName(hero)}'s behaviour can still switch it. Lock it with its class chip on the Career tab.`;
+    tagTab = "career";
+  }
   return {
-    name: str(hero.name, "Termling"), level: `Lv ${hero.L}`, title: career.title, tag, sub, quest,
+    name: str(hero.name, "Termling"), level: `Lv ${hero.L}`, title: career.title, tag, tagTip, tagTab, sub, quest,
     status: live ? statusWord(live.status) : "off",
     hp: { frac: r2(clamp01(hp / maxHp)), text: `${fmtInt(hp)} / ${fmtInt(maxHp)}` },
     xp: {
@@ -1309,7 +1331,7 @@ function statsVM(world, hero, live, st) {
       row("pl", "Power Level", String(pl), `PL = Lv + clamp(round(ln(DPS_est / refDPS) / ln 1.07), −5, +8): gear ${gear < 0 ? MINUS : "+"}${Math.abs(gear)}`, gear ? `${gear < 0 ? MINUS : "+"}${Math.abs(gear)}` : null),
     ] },
     { key: "offense", title: "Offense", rows: [
-      row("wd", "Weapon damage", fmtInt(st.weaponDmg), st.hasWeapon ? "6 · g(iLvl) · rarity · (1 + 0.05 · polish)" : "Bare hands: 3 · g(Lv)"),
+      row("wd", "Weapon damage", fmtInt(st.weaponDmg), st.offClassWeapon ? "Another class's weapon: swung like a Training Stick, 6 · g(iLvl) (no rarity, polish or affixes)" : st.hasWeapon ? "6 · g(iLvl) · rarity · (1 + 0.05 · polish)" : "Bare hands: 3 · g(Lv)"),
       row("hit", "Main hit", fmtInt(st.mainHit), "Weapon damage × (1 + MIGHT/100) × skill × (1 + damage %)"),
       row("dmg", "Damage bonus", pct(st.dmgPct, { sign: true }), "Affixes, skills, trophies and Bug Tracker perks", null, num(st.dmgPct) > 0 ? COL.working : null),
       row("crit", "Crit chance", pct(st.crit), `0.05 + 0.0015 × KEEN + gear, cap ${P0(T.critCap)}`),
@@ -1449,6 +1471,12 @@ function signatureVM(hero) {
   return { text, recommended: rec, state, tasks: `${n} ${plural(n, "task")} on record` };
 }
 
+/** "Provisional class (9 of 15 tasks)": how far a provisional class is from locking itself. */
+function provisionalText(hero) {
+  const lockN = T.skills.classLockTasks;
+  return `Provisional class (${Math.min(num(classSignature(hero).n), lockN)} of ${lockN} tasks)`;
+}
+
 function classesVM(world, hero) {
   const L = hero.L;
   const roster = inRoster(world, hero);
@@ -1463,9 +1491,16 @@ function classesVM(world, hero) {
     const current = L >= CAREERS[1].from ? hero.cls === c.n : hero.pref === c.n;
     const key = `cls:${c.id}`;
     const args = { heroId: hero.id, cls: c.id };
+    // A provisional current class: its chip locks it (setClass on the same class, free; heroes.js).
+    const lock = !!(roster && current && hero.prov && L >= CAREERS[1].from);
     let a;
     if (!roster) a = disabled(key, c.name, "setClass", args, current ? `${firstName(hero)}'s class (contractors keep the class they came with)` : "Contractors keep the class they came with");
-    else if (current) a = action(key, c.name, "setClass", args, { tooltip: L >= CAREERS[1].from ? `${firstName(hero)}'s class${hero.prov ? " (provisional)" : ""}` : "Your pick for Lv 10" });
+    else if (lock) {
+      a = action(key, c.name, "setClass", args, {
+        confirm: `Lock ${c.name}?`,
+        tooltip: `Lock ${c.name} now (free). ${provisionalText(hero)}: until then behaviour can still switch it.`,
+      });
+    } else if (current) a = action(key, c.name, "setClass", args, { tooltip: L >= CAREERS[1].from ? `${firstName(hero)}'s class` : "Your pick for Lv 10" });
     else if (costN > 0) {
       const short = shortfall(world.state.herd, 0, costN);
       a = action(key, c.name, "setClass", args, {
@@ -1477,7 +1512,7 @@ function classesVM(world, hero) {
         tooltip: L < CAREERS[1].from ? `Become a ${c.name} at Lv ${CAREERS[1].from}` : `Switch to ${c.name} for free (locks it)`,
       });
     }
-    return Object.assign(a, { clsId: c.id, current: !!current, recommended: c.n === rec, color: CLASS_COLORS[c.id] || COL.idle });
+    return Object.assign(a, { clsId: c.id, current: !!current, recommended: c.n === rec, color: CLASS_COLORS[c.id] || COL.idle, lock });
   });
   return { note, options };
 }
@@ -1586,6 +1621,9 @@ function careerBossVM(world, idx, hero, live) {
   else status = sprintText(world, b.zone);
   let challenge = null;
   if (f.state === "door" || f.state === "fixed") challenge = challengeAction(world, bi, f, f.fixed ? "Fight again" : "Challenge", inRoster(world, hero) ? hero.id : null);
+  // D§11.16 "boss card: Challenge / Retreat": the zone boss fight (running or paused) can be ended
+  // here too, like the Herd panel's fight banner (retreat {} ends the one non-review fight).
+  else if (f.state === "fighting") challenge = retreatAction(`retreat:boss:${bi}`);
   return { name: b.name, zone: `${ZONES[b.zone].name} · Lv ${b.level}`, status, estimate: estimateVM(f.E), challenge };
 }
 
@@ -1808,13 +1846,15 @@ function herdHeader(world, idx) {
   const parts = [`${n} ${plural(n, "hero", "heroes")}`];
   if (contractors) parts.push(`${contractors} ${plural(contractors, "contractor")}`);
   parts.push(`${idx.counts.working} working`);
-  if (idx.counts.blocked) parts.push(`${idx.counts.blocked} waiting for you`);
+  // The blocked count also goes apart (`waiting`): the panel draws it in the blocked colour.
+  const waiting = idx.counts.blocked ? `${idx.counts.blocked} waiting for you` : null;
+  if (waiting) parts.push(waiting);
   const nextLabel = `v${Math.floor((rel.r + 1) / 10)}.${(rel.r + 1) % 10}`;
   const next = rel.capped ? `${nextLabel} at ${fmtInt(rel.next)} (bonuses stop at +${Math.round(T.release.bonusPer * T.release.maxRelease * 100)}%)` : `${nextLabel} at ${fmtInt(rel.next)}`;
   return {
     name: str(herd.name).trim() || "The Herd", release: rel.label,
     releaseTip: `Release Train: ${fmtInt(rel.seals)} Seals credited · ${next} · ${pct(rel.bonus, { sign: true })} XP and gold`,
-    gold: fmtNum(num(herd.gold)), snippets: fmtNum(num(herd.snip)), sub: parts.join(" · "), sprint: sprintVM(world),
+    gold: fmtNum(num(herd.gold)), snippets: fmtNum(num(herd.snip)), sub: parts.join(" · "), waiting, sprint: sprintVM(world),
   };
 }
 
@@ -1922,6 +1962,20 @@ function bestHero(world, item, budget = Infinity) {
     if (!best || s > best.score + 1e-12) best = { hero: h, score: s };
   }
   return best;
+}
+
+/**
+ * Drop the cached scores of heroes no longer in this world: an entry stays only while its hero
+ * object is the roster hero or the live Contractor with that id. Runs when an entry is created
+ * (rare: a hero's first priced item, a reload), O(roster + cache).
+ */
+function pruneScores(world) {
+  if (!SCORES.size) return;
+  const live = new Map();
+  for (const h of world.state.heroes || []) live.set(h.id, h);
+  const cs = world.rt && world.rt.contractors;
+  if (cs) for (const c of cs.values()) live.set(c.id, c);
+  for (const [id, e] of SCORES) if (live.get(id) !== e.hero) SCORES.delete(id);
 }
 
 /** A score already priced for the hero's current stats, or null (never prices). */
@@ -2086,12 +2140,17 @@ function bossRowVM(world, idx, bi, clock) {
   };
 }
 
+/** Retreat from the herd's boss / Backlog fight (world.retreat with {}), asked first. */
+function retreatAction(key) {
+  return action(key, "Retreat", "retreat", {}, { tone: "danger", confirm: "Retreat? (a Postmortem)", tooltip: "End the fight as a Postmortem: Wounds and Lessons are kept" });
+}
+
 function fightBannerVM(world) {
   const rt = world.rt;
   const herd = world.state.herd;
   let f = null;
   for (const x of rt.fights || []) if (x.kind !== "review") { f = x; break; }
-  const retreat = action("retreat", "Retreat", "retreat", {}, { tone: "danger", confirm: "Retreat? (a Postmortem)", tooltip: "End the fight as a Postmortem: Wounds and Lessons are kept" });
+  const retreat = retreatAction("retreat");
   if (f) {
     const names = (f.heroIds || []).map((id) => {
       const h = heroById(world, id);
@@ -2286,13 +2345,13 @@ function digestVM(world, clock) {
   });
   const bosses = d.bosses.slice().reverse().map((x) => {
     const fixed = !/Postmortem/.test(str(x.text));
-    return line(keyOf("b", x), bossLine(str(x.text), x.value), fmtWhen(x.at, clock), fixed ? COL.working : COL.idle);
+    return line(keyOf("b", x), bossLine(str(x.text), x.value), whenOrEarlier(x.at, clock), fixed ? COL.working : COL.idle);
   });
   const shipped = d.shipped.slice().reverse().map((x) => line(
     keyOf("s", x), `${x.name ? firstName({ name: x.name }) : "A hero"} shipped “${str(x.text) || "Commit"}”`,
     num(x.seals) > 0 ? `${(Math.round(num(x.seals) * 10) / 10).toFixed(1)} Seals` : null, COL.done,
   ));
-  const badges = d.badges.slice().reverse().map((x) => line(keyOf("bd", x), `Badge: ${str(x.text)}`, fmtWhen(x.at, clock), COL.xp));
+  const badges = d.badges.slice().reverse().map((x) => line(keyOf("bd", x), `Badge: ${str(x.text)}`, whenOrEarlier(x.at, clock), COL.xp));
   const chests = [];
   for (const h of state.heroes) {
     const p = pendingSummary(h);
@@ -2386,7 +2445,8 @@ let HERD_MEMO = null;
 /**
  * The Herd panel (D§11.14).
  * @param {object} world
- * @param {{tab?:string, filter?:object, nowMs?:number, tzOffsetMin?:number}} args
+ * @param {{tab?:string, filter?:object, nowMs?:number, tzOffsetMin?:number, save?:object|null}} args
+ *   save: host.saveStatus() while the save is in trouble (the band under the header, D§13.4)
  * @returns {object|null} HerdVM (ui/herdpanel.js typedefs); null while the world loads
  */
 export function herdView(world, args = {}) {
@@ -2397,12 +2457,25 @@ export function herdView(world, args = {}) {
   const tab = tabIds.includes(a.tab) ? a.tab : "upgrades";
   const f = normFilter(a.filter);
   const rt = world.rt;
-  const key = JSON.stringify([tab, tab === "stash" ? f : null, Math.floor(clock.now / 60000), clock.tz]);
+  const save = saveVM(a.save);
+  const key = JSON.stringify([tab, tab === "stash" ? f : null, Math.floor(clock.now / 60000), clock.tz, save]);
   const m = HERD_MEMO;
   if (m && m.rt === rt && m.state === world.state && m.version === rt.version && m.key === key) return m.vm;
   const vm = buildHerd(world, tab, f, clock);
+  vm.save = save;
   HERD_MEMO = { rt, state: world.state, version: rt.version, key, vm };
   return vm;
+}
+
+/**
+ * D§13.4 / D§13.1: the save trouble the host passes as args.save (host.saveStatus()) as the Herd
+ * panel's band: {title, text, tooltip}, or null while the save is fine.
+ */
+function saveVM(st) {
+  if (!st || typeof st !== "object" || typeof st.message !== "string" || !st.message) return null;
+  const title = typeof st.title === "string" && st.title ? st.title
+    : st.readOnly ? "Save is read-only" : st.notSaving ? "Not saving" : "Save restored";
+  return { title, text: st.message, tooltip: st.detail ? String(st.detail) : null };
 }
 
 function buildHerd(world, tab, f, clock) {
@@ -2411,7 +2484,7 @@ function buildHerd(world, tab, f, clock) {
   const vm = {
     tab, tabs: HERD_TABS.map(([id, label]) => ({ id, label, badge: id === "digest" ? badge : null })),
     calm: !!(world.state.herd.cfg && world.state.herd.cfg.calm), header: herdHeader(world, idx),
-    upgrades: null, stash: null, tracker: null, bosses: null, roster: null, digest: null, settings: null,
+    save: null, upgrades: null, stash: null, tracker: null, bosses: null, roster: null, digest: null, settings: null,
   };
   if (tab === "upgrades") vm.upgrades = upgradesVM(world);
   else if (tab === "stash") vm.stash = herdStashVM(world, idx, f);
@@ -2421,6 +2494,11 @@ function buildHerd(world, tab, f, clock) {
   else if (tab === "digest") vm.digest = digestVM(world, clock);
   else vm.settings = settingsVM(world);
   return vm;
+}
+
+/** Test hook: the hero ids the item-score cache holds (pruneScores keeps it to live heroes). */
+export function _scoreCacheIds() {
+  return Array.from(SCORES.keys());
 }
 
 /** Test hook: forget the memoised VMs and the per-version index. */

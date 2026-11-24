@@ -136,6 +136,9 @@
  * @property {string} level     "Lv 34"
  * @property {string} title     career title + class ("Senior Refactorer")
  * @property {string|null} tag  small chip after the title ("provisional", "contractor") or null
+ * @property {string|null} tagTip   the chip's tooltip ("Provisional class (9 of 15 tasks) …") or null
+ * @property {string|null} tagTab   a click on the chip opens this tab ("career" for "provisional",
+ *                              whose class chip locks it) or null (a plain label)
  * @property {string} sub       "herdr-app · Claude Code · fighting 2-2 Nested Tunnels"
  * @property {string|null} quest   current quest (terminal title), shown in quotes
  * @property {"working"|"blocked"|"done"|"idle"|"off"} status   portrait face blink + stripe
@@ -203,11 +206,13 @@
  * @property {{text:string, recommended:string, state:string, tasks:string}} signature
  *            text "median task 12 min · 0.8 blocks/h · 10% with sub-agents"; state "Provisional (9 of 15 tasks)"
  * @property {{note:string, options:Array<ActionVM & {clsId:string, current:boolean,
- *            recommended:boolean, color:string}>}} classes   cmd "setClass"
+ *            recommended:boolean, color:string, lock:boolean}>}} classes   cmd "setClass"; lock: the
+ *            current class is provisional and this chip locks it (setClass on the same class)
  * @property {{label:string, current:string, auto:ActionVM, zones:Array<{key:string, name:string,
  *            maps:Array<ActionVM & {on:boolean}>}>}} map   cmd "pinMap" (auto: mapId null)
  * @property {null|{name:string, zone:string, status:string, estimate:null|{text:string, color:string},
- *            challenge:ActionVM|null}} boss   the boss card of the hero's zone
+ *            challenge:ActionVM|null}} boss   the boss card of the hero's zone (challenge: Challenge /
+ *            Fight again at the door, Retreat while its fight runs or is paused)
  * @property {{name:string, hint:string, canRename?:boolean}} identity   rename: act("rename", {heroId, name: typed});
  *                              canRename false (Contractors) disables the button
  * @property {ActionVM|null} retire     null for contractors; disabled below Lv 30 (tooltip says so)
@@ -232,7 +237,7 @@
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex, Input, InputState, ScrollHandle } from "gpui-base";
 import { closeOverlay, theme as herdrTheme } from "herdr";
-import { C, T, MONO, art, zoom, alpha, kids, clamp01 } from "./kit.js";
+import { C, T, MONO, art, zoom, alpha, kids, clamp01, hex } from "./kit.js";
 import { isLight, mix, ink, tone, track, thinBar, portrait, focusAgent, chromeCommand } from "./party.js";
 import { renderTermling } from "./termling.js";
 
@@ -260,12 +265,16 @@ export function dialogTheme(base) {
   return t;
 }
 
-/** The env.theme a role passes: kit.T() plus herdr's dialog tokens (read in render). */
+/**
+ * The env.theme a role passes: kit.T() plus herdr's dialog tokens (read in render). Each goes
+ * through kit.hex (herdr accepts "ff8800" in an override; .bg() does not); an unusable one is
+ * left undefined so dialogTheme's fallback applies.
+ */
 export function dialogTokens() {
   const h = herdrTheme() ?? {};
   return {
-    ...T(), popover: h.popover, input: h.input, solid: h.solid, solid_foreground: h.solid_foreground,
-    accent_foreground: h.accent_foreground,
+    ...T(), popover: hex(h.popover), input: hex(h.input), solid: hex(h.solid), solid_foreground: hex(h.solid_foreground),
+    accent_foreground: hex(h.accent_foreground),
   };
 }
 
@@ -378,13 +387,19 @@ export function plainButton(id, label, t, onClick, o = {}) {
     .on_click((_e, cx) => { cx.stop_propagation(); onClick(cx); });
 }
 
+// Hover styles and icons: herdr bakes an svg()'s colour when it builds the element, from the
+// static text_color it inherits (materialize.rs, the Svg arm); a parent's hover((s) => s.text_color(..))
+// is a paint-time style on the parent only and never reaches the svg. So anything that holds an
+// icon hovers with its background (like herdr's own tab and panel buttons), never its text colour,
+// and its icon gets an explicit colour. test/ui-panels.test.mjs walks every scenario for this.
+
 /** A square icon button (close, focus). */
 export function iconButton(id, icon, t, tip, onClick, size = 14) {
-  return div().id(id).flex_none().p(5).rounded(6).text_color(t.dim).cursor_pointer()
-    .hover((s) => s.bg(t.hover).text_color(t.fg))
+  return div().id(id).flex_none().p(5).rounded(6).cursor_pointer()
+    .hover((s) => s.bg(t.hover))
     .tooltip(tip)
     .on_click((_e, cx) => { cx.stop_propagation(); onClick(cx); })
-    .child(svg(art(icon)).w(size).h(size));
+    .child(svg(art(icon)).w(size).h(size).text_color(t.muted));
 }
 
 /** A switch drawn from two divs. */
@@ -423,7 +438,7 @@ export function fluidBar(frac, h, color, trackColor) {
 /** A labelled thin bar for the header ("HP ▬▬▬▭ 1,240 / 1,602"). */
 function statBar(label, w, frac, color, t, text, tip, extra) {
   return h_flex().flex_none().gap(6).items_center().tooltip(tip)
-    .child(div().text_size(10).font_semibold().text_color(t.dim).child(label))
+    .child(div().text_size(10).font_semibold().text_color(t.muted).child(label))
     .child(thinBar(w, 5, frac, tone(color, t), track(t), extra))
     .child(div().font_family(MONO).text_size(10.5).text_color(t.muted).whitespace_nowrap().child(text));
 }
@@ -433,13 +448,16 @@ export function tabBar(prefix, tabs, current, t, icons, onPick) {
   return h_flex().flex_none().h(34).px(10).gap(2).items_end().border_b(1).border_color(t.border)
     .children(tabs.map((tb, i) => {
       const on = tb.id === current;
-      return h_flex().id(`${prefix}-tab-${tb.id}`).relative().h(34).px(10).gap(6).items_center().cursor_pointer()
-        .text_size(12.5).font_medium().text_color(on ? t.fg : t.dim)
-        .hover((s) => s.text_color(t.fg))
+      // Inactive labels in muted (herdr's own tabs do the same; dim reads at ~2.8:1). The hover
+      // is a background so the icon and the label stay one colour (see iconButton).
+      const fg = on ? t.fg : t.muted;
+      return h_flex().id(`${prefix}-tab-${tb.id}`).relative().h(34).px(10).gap(6).items_center().cursor_pointer().rounded_t(6)
+        .text_size(12.5).font_medium().text_color(fg)
+        .hover((s) => s.bg(t.hover))
         .tooltip(`${tb.label} (${i + 1})`)
         .on_click((_e, cx) => { cx.stop_propagation(); onPick(tb.id, cx); })
         .children(kids([
-          icons?.[tb.id] ? svg(art(icons[tb.id])).w(13).h(13).flex_none() : null,
+          icons?.[tb.id] ? svg(art(icons[tb.id])).w(13).h(13).flex_none().text_color(fg) : null,
           div().whitespace_nowrap().child(tb.label),
           tb.badge ? div().flex_none().h(15).min_w(15).px(4).rounded_full().bg(on ? t.accent : alpha(t.accent, 0.22))
             .text_color(on ? t.accent_fg : ink(t.accent, t)).text_size(9.5).font_bold().flex().items_center().justify_center()
@@ -522,14 +540,16 @@ export function itemTile(prefix, it, t, o) {
 export function filterChips(prefix, filters, t, onSet) {
   const chip = (c) => {
     const dot = Boolean(c.color) && !c.icon;
+    const fg = c.on ? t.fg : t.muted;
     const el = h_flex().id(`${prefix}-f-${c.key}`).flex_none().h(22).px(dot ? 4 : c.icon ? 5 : 6).gap(4).items_center().justify_center().rounded(5)
-      .text_size(11).text_color(c.on ? t.fg : t.dim)
+      .text_size(11).text_color(fg)
       .when(c.on, (e) => e.bg(t.selected))
       .cursor_pointer()
-      .hover((s) => s.bg(t.hover).text_color(t.fg))
+      // Icon chips hover with the background only: the svg keeps the colour it was built with.
+      .hover((s) => (c.icon ? s.bg(t.hover) : s.bg(t.hover).text_color(t.fg)))
       .tooltip(c.tooltip ?? c.label)
       .on_click((_e, cx) => { cx.stop_propagation(); onSet(c.set ?? {}, cx); });
-    if (c.icon) return el.child(svg(art(c.icon)).w(13).h(13).flex_none());
+    if (c.icon) return el.child(svg(art(c.icon)).w(13).h(13).flex_none().text_color(c.on ? t.fg : t.muted));
     if (dot) return el.child(div().size(10).rounded_full().bg(tone(c.color, t)).border(c.on ? 2 : 0).border_color(t.fg));
     return el.child(div().whitespace_nowrap().child(c.label));
   };
@@ -769,8 +789,8 @@ function header(vm, env, ui, t, close, width) {
           .child(div().flex_none().h(18).px(6).rounded(5).bg(t.btn).font_family(MONO).text_size(11).font_semibold().text_color(t.fg)
             .flex().items_center().child(h.level))
           .child(div().flex_none().text_size(12.5).text_color(t.muted).whitespace_nowrap().child(h.title))
-          .when(Boolean(h.tag), (e) => e.child(tag(h.tag, C.idle, t))))
-        .child(div().h(16).min_w(0).truncate().text_size(11.5).text_color(t.dim)
+          .when(Boolean(h.tag), (e) => e.child(headerTag(h, ui, t))))
+        .child(div().h(16).min_w(0).truncate().text_size(11.5).text_color(t.muted)
           .child(h.quest ? `${h.sub} · “${h.quest}”` : h.sub)))
       .child(h_flex().flex_none().gap(4).items_center().self_start()
         .child(div().flex_none().h(24).px(7).rounded(6).border(1).border_color(t.input).font_family(MONO).text_size(11.5)
@@ -787,6 +807,17 @@ function header(vm, env, ui, t, close, width) {
       .child(h_flex().flex_1().min_w(0).gap(4).items_center().overflow_hidden().children(chips.map((b) =>
         div().id(`sh-buff-${b.key}`).flex_none().h(17).px(6).rounded(5).bg(alpha(b.color, t.light ? 0.14 : 0.16))
           .text_size(10.5).font_medium().text_color(ink(b.color, t)).whitespace_nowrap().flex().items_center().tooltip(b.tooltip).child(b.text)))));
+}
+
+/**
+ * The chip after the title ("provisional", "contractor", "off duty"). With header.tagTab it is a
+ * link to that tab ("provisional" opens Career, where the class chip locks it); tagTip explains.
+ */
+function headerTag(h, ui, t) {
+  const el = tag(h.tag, C.idle, t).id("sh-tag").when(Boolean(h.tagTip), (e) => e.tooltip(h.tagTip));
+  if (!h.tagTab || h.tagTab === ui.tab) return el;
+  return el.cursor_pointer().hover((s) => s.opacity(0.8))
+    .on_click((_e, cx) => { cx.stop_propagation(); pickTab(ui, h.tagTab, cx); });
 }
 
 // ── Gear ─────────────────────────────────────────────────────────────────────────────────────
@@ -826,7 +857,7 @@ function doll(vm, env, ui, t) {
     .child(h_flex().w(W).flex_wrap().gap(6).children((g.summary ?? []).map((m) =>
       v_flex().id(`sh-sum-${m.key}`).w((W - 6) / 2).h(36).px(8).justify_center().rounded(7).bg(t.card).border(1).border_color(t.border)
         .tooltip(m.tooltip)
-        .child(div().text_size(10).text_color(t.dim).child(m.label))
+        .child(div().text_size(10).text_color(t.muted).child(m.label))
         .child(div().font_family(MONO).text_size(12.5).font_semibold().text_color(t.fg).child(m.value)))));
   // Scrolls like the stash column: with a note band (a fight, off duty) the doll and its summary
   // are taller than the body and would otherwise spill over the footer.
@@ -1048,17 +1079,22 @@ function classCard(c, env, ui, t) {
 
 function classChip(o, env, ui, t) {
   const on = !!o.current;
-  // A career change asks first (ActionVM.confirm): the armed chip shows the question in red.
+  // The current class is inert, unless it is provisional (o.lock): then a click locks it.
+  const lock = on && !!o.lock;
+  // A career change (or a lock) asks first (ActionVM.confirm): the armed chip shows the question.
   const armed = !!o.confirm && ui.armed === o.key;
+  const fg = armed ? t.bad : on ? ink(o.color, t) : t.fg;
   const el = h_flex().id(`sh-cls-${o.key}`).flex_none().h(24).px(8).gap(5).items_center().rounded(6)
     .bg(armed ? alpha(C.hp, t.light ? 0.12 : 0.16) : on ? alpha(o.color, t.light ? 0.16 : 0.2) : t.btn)
     .border(1).border_color(armed ? alpha(C.hp, 0.5) : on ? tone(o.color, t) : t.input)
-    .text_size(11.5).font_medium().text_color(armed ? t.bad : on ? ink(o.color, t) : t.fg)
+    .when(lock && !armed, (e) => e.border_dashed())
+    .text_size(11.5).font_medium().text_color(fg)
     .child(div().size(7).flex_none().rounded_full().bg(tone(o.color, t)))
     .child(div().whitespace_nowrap().child(armed ? o.confirm : o.label))
     .when(Boolean(o.recommended), (e) => e.child(svg(art("ui/star.svg")).w(10).h(10).flex_none().text_color(ink(C.xp, t))))
+    .when(lock && !armed, (e) => e.child(svg(art("ui/lock.svg")).w(10).h(10).flex_none().text_color(fg)))
     .when(Boolean(o.tooltip || o.cost), (e) => e.tooltip([o.tooltip, o.cost].filter(Boolean).join(" · ")));
-  if (on || !o.enabled) return el.when(!on, (e) => e.opacity(0.45)).cursor_default().on_click((_e, cx) => cx.stop_propagation());
+  if ((on && !lock) || !o.enabled) return el.when(!on, (e) => e.opacity(0.45)).cursor_default().on_click((_e, cx) => cx.stop_propagation());
   return el.cursor_pointer().hover((s) => s.bg(t.btnHover)).on_click((_e, cx) => { cx.stop_propagation(); runAction(o, env, ui, cx); });
 }
 
@@ -1066,9 +1102,12 @@ function bossCard(b, env, ui, t) {
   return panel("sh-boss", t, "Zone boss", b.estimate ? div().font_family(MONO).text_size(11).font_semibold().text_color(ink(b.estimate.color, t)).child(b.estimate.text) : null)
     .child(h_flex().gap(8).items_center()
       .child(svg(art("ui/boss.svg")).w(14).h(14).flex_none().text_color(ink(C.hp, t)))
+      // The status gets its own line: beside a Challenge / Retreat button "zone · status" was cut
+      // to "… · Fighting: …".
       .child(v_flex().flex_1().min_w(0)
         .child(div().truncate().text_size(12.5).font_semibold().child(b.name))
-        .child(div().truncate().text_size(11).text_color(t.dim).child(`${b.zone} · ${b.status}`)))
+        .child(div().truncate().text_size(11).text_color(t.muted).child(b.zone))
+        .child(div().truncate().text_size(11).text_color(t.fg).child(b.status)))
       .when(Boolean(b.challenge), (e) => e.child(actionButton("sh-boss-go", b.challenge, env, ui, t, { h: 24, px: 9, size: 11.5, cost: false }))));
 }
 

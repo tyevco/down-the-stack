@@ -6,7 +6,15 @@ Design version 1.0. Start point: the "signals" design (judges' consensus winner)
 
 ## 1. Pitch and title
 
-**Title shown in the app: Down the Stack.** The mod/layout id is `mapledr`. The codename is never shown to the player: nothing on screen says "maple".
+**Title shown in the app: Down the Stack.** The mod id (its folder) is `mapledr`. The layout file is `Down-the-Stack.json`, because herdr has no display title for a layout and shows the file name. The game's own UI never shows the codename: nothing the mod draws says "maple".
+
+herdr's own chrome shows the ids:
+- the Settings layout picker, the macOS View > Layout menu and the win98 Start menu show "Down-the-Stack";
+- the palette shows "Layout: Down-the-Stack";
+- herdr names mod actions by the mod folder, so the Keys overlay shows `(layout:Down-the-Stack)` next to `mapledr sheet`;
+- a failed command shows a `mapledr.sheet failed` toast.
+
+ARCHITECTURE §4 has the source lines.
 
 Every coding agent in herdr gets a **Termling**: a small hero shaped like a living terminal window. Its screen is its face (`>_` when working, `o_o` when it needs you, `^_^` when it shipped, `-_-` when resting). Termlings fight their way down **the Stack**, a side-scrolling world of developer bugs: Typo Sprouts in Lint Meadows, Null Pointer Frogs in Callback Caverns, Merge Conflict Golems in the Merge Marshes, the Deadlock Hydra in Threadlock Keep, the Friday Deploy at the top of Production Peaks and the Heisenbug at the bottom of everything.
 
@@ -77,7 +85,7 @@ A **task** opens when a hero starts `working` and closes when a non-working stat
 | done → idle | **Seen.** Every pending chest of this hero opens (loot fountain). |
 | done → working | A new task opens. The old chest stays pending. |
 | terminal ends | An open task ≥ 1.5 min closes into a pending chest on the off-duty hero. XP already earned is kept. |
-| `seq` unchanged | Ignored. Status is only re-read when `seq` changes. |
+| `seq` unchanged | Status is re-read when `seq` changes, and also on herdr's **seen flip** (done → idle when the person looks; idle → done when a turn is marked unread elsewhere). herdr makes that flip without moving `seq` (`set_word` bumps `seq`; `mark_seen` and `set_turn` do not), so compare the status as well as `seq`. Any other unchanged snapshot is ignored. |
 | `seq` advanced more than one step between snapshots | Apply only previous → current. working → idle is treated as "dropped and opened at once" (herdr only reports idle after the person has seen it). |
 
 ### 2.4 Seals, Commit Chests and "seen"
@@ -130,13 +138,15 @@ When an agent goes blocked → working after at least 10 s blocked, and the curr
 
 A terminal with a `parent` never gets its own hero. It becomes a **Forkling** of the root hero (walk the parent chain up to 5 steps). An orphan whose parent is unknown attaches to the most recently seen hero of the same seat; if there is none it is treated as a top-level agent.
 
+Sub-agents usually have no pane. herdr's `agent.focus` only chooses the agent that an `agent` block shows, and our layout (`Down-the-Stack`) has none. So every click that **shows a hero's terminal** (a Termling, its `!` bubble, a Commit Chest, a Forkling, a sidebar row) does what herdr's agents list does: `pane.focus {terminal}` when the terminal has a pane (this also selects its space and tab, like `agent.focus`), else `terminal.peek {terminal}`. That covers Forklings and pseudo-agents such as an orphan played as top-level.
+
 | Forkling rule | Value |
 |---|---|
 | Damage | Each **working** Forkling hits the parent's target every tick for 12% of the parent's Main hit (Forkbinder: 20%, more with Process Pool). |
 | Counted Forklings | 3 (Forkbinder: 3, up to 6 with Process Pool). Extra ones are drawn as a `+n` tag and do nothing. |
 | Seals | A working Forkling adds 0.25 × its working minutes to the parent's open task (or to a side-quest bucket that joins the parent's next chest). The 120-minute task cap still applies. |
 | Supervising | Parent not working but ≥ 1 Forkling working → parent Supervises (2.2). While the parent is Waiting, its Forklings wait too. |
-| Look | Half-size Termling (20×24 px) in the parent's slot, following it. Mirrors its own status: blocked Forklings show a tiny `!` you can click to focus that sub-agent. |
+| Look | Half-size Termling (20×24 px) in the parent's slot, following it. Mirrors its own status: blocked Forklings show a tiny `!` you can click to show that sub-agent (peek, see above). |
 | Signature | "Spawned a sub-agent" is recorded on the parent's task for class choice (4.2). |
 
 ### 2.8 Space, pinned, focused, program, title
@@ -986,6 +996,8 @@ Hello, World (first kill) · First Commit (first chest opened) · 404 Not Found 
 | Pale periwinkle (#A9B8FF) | Fresh Eyes segment of the XP bar | |
 | Sidebar stripe: green #4CC38A / amber #F2A93B / gold #FFD447 / grey #8A8F98 | working / blocked / done / idle | |
 
+**Two palettes in one window.** herdr's own chrome (tabs, the status bar, its plain pane header) keeps herdr's status colours, where red means "needs you". The game's grammar above is its own: amber `!` means waiting, red means HP, danger and bosses. The layout deliberately does not override herdr's `working`/`blocked`/`done` tokens: layout colours beat the person's own overrides and are one value for light and dark themes, and the game's amber and gold read below 3:1 on light chrome. The game's surfaces never use red for "waiting".
+
 **Stillness rule:** if nothing is working, the strip is nearly still: only campfires flicker and blocked bubbles bob. Each entity has at most one looping effect. Nothing flashes faster than 1 Hz; no full-stage flash; no banner lasts more than 3 s.
 
 ### 11.2 Stage strip composition (200 px)
@@ -1103,7 +1115,7 @@ Delays are positive `animation-delay` values on elements emitted for that tick.
 
 ### 11.10 The status cues
 
-- **Blocked:** after 2 ticks, the white `!` bubble above the head (bobbing 3 px). The slot is filtered `saturate(0.6)`; the engaged mob and the queue line up with `…` bubbles; the Termling sits on a crate tapping its foot (2 frames, 1 s); after 120 s a clock tag counts up ("2m", "5m", up to "1h+"). Clicking the bubble or the Termling runs `agent.focus {terminal}`. On unblock the bubble pops and "Unblocked" floats once.
+- **Blocked:** after 2 ticks, the white `!` bubble above the head (bobbing 3 px). The slot is filtered `saturate(0.6)`; the engaged mob and the queue line up with `…` bubbles; the Termling sits on a crate tapping its foot (2 frames, 1 s); after 120 s a clock tag counts up ("2m", "5m", up to "1h+"). Clicking the bubble or the Termling shows its terminal (2.7). On unblock the bubble pops and "Unblocked" floats once.
 - **Done:** the Commit Chest drops with a bounce, sparkles, SHIPPED ribbon in the tier colour; tooltip "Shipped: <title> · 2.4 Seals · Iron chest"; the Termling hops and waves. Seen → lid opens, loot fountains, and on the next tick the Termling sits down at its campfire.
 - **Idle:** campfire at the left of the slot; the slot's background shifts to a dusk tint; mobs stop pacing; "z" bubbles after 10 minutes.
 - **Supervising:** the hero stands back at 60% opacity while its Forklings fight.
@@ -1125,7 +1137,9 @@ gold 48.2k · Snippets 133 · Sprint: Pyramid of Doom 7/10 · [Herd •] [Settin
 ```
 
 - **Row (44 px):** 3 px status stripe (11.1), 32 px portrait (head crop with the live face glyph and program icon corner; focused ring when focused), line 1 name and level, line 2 career title, class and map, line 3 HP bar (red, 3 px) and XP bar (cyan, 3 px, Fresh Eyes segment), right-side chip and badges (Forkling count, Unblocked spark, star for a pending choice, red BOSS chip, chest icon).
-- **Click a row:** `agent.focus {terminal}`. Click the portrait: character sheet. Off-duty rows open the sheet. A chest icon claims the chest.
+- **Click a row:** show its terminal (2.7). Click the portrait: character sheet. Off-duty rows open the sheet. A chest icon claims the chest.
+- **Waiting agents never hide:** the header shows "N need you" ("! N" when narrow) while anyone is blocked; a click shows the next blocked row's terminal (repeated clicks walk through them; rows still never re-sort). A guild header with a blocked row carries a `!` badge, folded or not, and in the 44 px rail a blocked portrait carries a `!` corner badge. The waiting chip's tooltip names the task ("Waiting for you for 2m on “Bump deps”").
+- **Narrow sidebars:** below about 230 px a row keeps the chips that fit (urgent first), then the level; it never runs past the edge.
 - **Order:** grouped by space (guild) in herdr's own order; rows never re-sort on status changes. Off-duty heroes collapse into one group at the bottom.
 - **Footer:** gold, Snippets, Release version, frontier Sprint meter, [Herd] button (digest dot), [Settings].
 
@@ -1137,8 +1151,8 @@ gold 48.2k · Snippets 133 · Sprint: Pyramid of Doom 7/10 · [Herd •] [Settin
 
 - Left: program icon, name, level, title. Click opens the character sheet.
 - Centre: herdr's own terminal title stays as it is; real information always wins.
-- Right: 48 px HP bar, 64 px XP bar, status chip: "fighting 2-2" (grey), "BOSS 41%" (red), "! waiting 2m" (amber), "shipped · chest ready" (gold), "resting" (grey), "supervising 2 Forklings" (grey).
-- Below 360 px only "Lv 14" and the chip remain. Hover: Power Level, current quest, Fresh Eyes, Shift, buffs and the "why" tooltip.
+- Right: 48 px HP bar, 64 px XP bar, status chip: "fighting 2-2" (grey), "BOSS 41%" (red), "! waiting 2m" (amber), "shipped · chest ready" (gold), "resting" (grey), "supervising 2 Forklings" (grey). The agent's own state comes first: "BOSS 41%" / "REVIEW" shows only while the participant is questing or supervising; a blocked participant reads "! waiting" (it holds its seat, 9.5, and its tooltip says "holding until you answer"), a done or idle one has walked out and reads "shipped" / "resting".
+- Below 360 px the header keeps the program icon, the face, herdr's terminal title (it truncates first) and the chip; the name goes, and "Lv 14" shows only while the title keeps its room. Below 200 px: the face, the chip's short form ("!", "! 2m") and the title when 48 px are left. Hover: Power Level, current quest, Fresh Eyes, Shift, buffs and the "why" tooltip.
 
 ### 11.13 Character sheet (overlay, 760 × 500; Esc or click outside closes)
 
@@ -1165,15 +1179,15 @@ Tabs: Upgrades (buildings), Stash, Bug Tracker, Trophies and bosses (meters, Wou
 
 | Target | Hover | Click |
 |---|---|---|
-| Termling on stage | Name, class, level, HP/XP numbers, map, status duration, current quest | `agent.focus {terminal}` |
-| `!` bubble | – | `agent.focus {terminal}` |
-| Commit Chest | Tier, Seals, shipped task title | Open it (counts as seen) and `agent.focus` |
-| Forkling | Sub-agent title | `agent.focus` on that sub-agent |
+| Termling on stage | Name, class, level, HP/XP numbers, map, status duration, current quest | Show its terminal (2.7) |
+| `!` bubble | – | Show its terminal (2.7) |
+| Commit Chest | Tier, Seals, shipped task title | Open it (counts as seen) and show its terminal (2.7) |
+| Forkling | Sub-agent title | Show that sub-agent: `pane.focus {terminal}` if it has a pane, else `terminal.peek {terminal}` (2.7) |
 | Nameplate pill (stage) or pane nameplate | – | Character sheet |
 | Room header | Zone, map, quota, Sprint meter | Pin or unpin the map for heroes in the room |
 | Boss door / boss card | Mechanics summary, win estimate | Challenge / Retreat |
 | Loot pillar (LTS / Keepsake) | – | Sheet opens on that item's compare card |
-| Sidebar row / portrait / chest icon | – | `agent.focus` / sheet / claim chest |
+| Sidebar row / portrait / chest icon | – | Show its terminal (2.7) / sheet / claim chest |
 | Herd button | – | Herd panel |
 
 Nothing in the game ever moves keyboard focus away from a terminal.
@@ -1240,7 +1254,8 @@ Raw (bonus-free, on-level) working time to level: Lv 5 in 11.5 min, Lv 10 in 45 
 
 - One JSON file, compact keys, UTF-8. Written atomically (write `save.tmp`, fsync, rename); the previous file is kept as `save.bak`.
 - Saved every 30 s while dirty, 2 s after a major event (level-up, boss result, Release+ drop, chest opened, promotion), and on quit.
-- `crc` is CRC32 (hex) of the file with `crc` set to `""`. On mismatch or parse failure, load `save.bak`; if that fails too, start fresh and keep the bad file as `save.broken`.
+- `crc` is CRC32 (hex) of the file with `crc` set to `""`. On mismatch or parse failure, load `save.bak` (also when `save.json` is missing); if that fails too, load whichever file's only fault is its checksum (an edited or re-encoded but intact save); only then start fresh. A file that does not load is kept aside, never overwritten: `save.broken`, then `save.broken-<ms>` for later incidents. A `save.json` that cannot be *read* (locked, invalid UTF-8) is read again before deciding, and saving resumes once it reads; a herd that started fresh meanwhile is kept as `save.unsaved-<ms>`.
+- Save trouble is never silent: a read-only, not-saving or restored save shows a notice on the stage (dismissable) and a band in the Herd panel (13.4).
 - Not saved: terminal bindings (except `addr` for fast rebind), mob lanes, effects, render state, Contractors, mid-tick state. A boss fight in progress is saved as a suspended fight.
 
 ### 13.2 Shape
@@ -1314,6 +1329,8 @@ Raw (bonus-free, on-level) working time to level: Lv 5 in 11.5 min, Lv 10 in 45 
 ### 13.3 Size budget
 
 30 heroes × ~520 B (with 6 equipped items) ≈ 16 KB; 140 stash items × ~40 B ≈ 5.6 KB; herd block ~1.5 KB; journal capped at 60 entries ≈ 3 KB. Worst case about 26 KB; a typical herd of 6 heroes about 7 KB.
+
+As built (docs/BALANCE.md §10): the journal keeps 120 lines up to 20 heroes and tapers to 60 at 30, so the 30-hero worst case stays under 30 KB (≈ 29 KB measured). Chest items waiting in `herd.inbox` are stored as compact stash rows (≈ 37 B each). Saves can still exceed the budget in rare states (many heroes each holding 20 pending chests with long titles); nothing depends on the budget, and herdr's hard limit is 1 MiB per file.
 
 ### 13.4 Versioning and migration
 

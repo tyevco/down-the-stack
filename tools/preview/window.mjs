@@ -7,7 +7,7 @@
 //   │                ├ stage (mod) ─────────────────────────────┤
 //   │ footer         ├ status bar ──────────────────────────────┤
 //
-// Sizes come from layouts/mapledr.json when it exists (sidebar / brand / sidebar-footer / stage /
+// Sizes come from layouts/Down-the-Stack.json when it exists (sidebar / brand / sidebar-footer / stage /
 // hud / status / tab-bar nodes, the party block's weight share against herdr's spaces list, the
 // work-body padding and gap, and the pane-frame header height), else defaults. Each mod block
 // holds a recorded tree.
@@ -69,7 +69,7 @@ const TERMINAL_LINES = [
   ["", ""],
   ["", "  Tests: 3 passed, 3 total"],
   ["$ ", "git status --short"],
-  ["", " M mods/mapledr/ui/stage.js"],
+  ["", " M src/auth/session.ts"],
   ["$ ", "▌"],
 ];
 
@@ -114,11 +114,11 @@ export function composeWindow(opts = {}) {
   const spaces = spacesH > 0
     ? `<div style="height:${spacesH}px;flex:none;overflow:hidden;padding:8px 10px;font-size:12px;color:${t.muted}">
         <div style="font-size:10px;letter-spacing:.08em;color:${t.dim};padding:2px 4px 6px">SPACES</div>
-        ${["mapledr", "api", "docs"].map((n, i) => `<div style="padding:4px 6px;border-radius:6px;${i === 0 ? `background:${t.selected};color:${t.foreground}` : ""}">${n}</div>`).join("")}
+        ${["webapp", "api", "docs"].map((n, i) => `<div style="padding:4px 6px;border-radius:6px;${i === 0 ? `background:${t.selected};color:${t.foreground}` : ""}">${n}</div>`).join("")}
       </div>`
     : "";
 
-  const tabs = ["mapledr", "api", "docs"].map((n, i) =>
+  const tabs = ["webapp", "api", "docs"].map((n, i) =>
     `<div style="padding:4px 12px;border-radius:6px;font-size:12px;${i === 0 ? `background:${t.raised};color:${t.foreground}` : `color:${t.muted}`}">${n}</div>`).join("");
 
   const paneHtml = panes.map((p, i) => {

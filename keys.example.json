@@ -1,5 +1,5 @@
 {
-  "layout:mapledr": {
+  "layout:Down-the-Stack": {
     "ctrl-shift-g": "layout.toggle:stage",
     "ctrl-shift-s": "mapledr.sheet",
     "ctrl-shift-a": "mapledr.herd",

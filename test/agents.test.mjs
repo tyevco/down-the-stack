@@ -9,6 +9,7 @@ import * as F from "../mods/mapledr/game/formulas.js";
 import * as Hr from "../mods/mapledr/game/heroes.js";
 import * as W from "../mods/mapledr/game/world.js";
 import * as A from "../mods/mapledr/game/agents.js";
+import * as I from "../mods/mapledr/game/items.js";
 
 const T0 = 1_790_000_000_000; // a Tuesday-ish epoch; the local day is computed with tz 0
 const near = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps;
@@ -23,7 +24,10 @@ function ag(addr, status, extra = {}) {
   }, extra);
 }
 
-// A scripted herdr: agents keep their seq until their status changes (then seq + 1).
+// A scripted herdr: agents keep their seq until their status word changes (then seq + 1). done <->
+// idle is herdr's seen flag, not a word (src/model.rs: set_word bumps seq, mark_seen / set_turn do
+// not), so that flip keeps the seq.
+const seenFlip = (a, b) => (a === "done" && b === "idle") || (a === "idle" && b === "done");
 class Sim {
   constructor({ seed = 3, world = null, now = T0 } = {}) {
     this.w = world || W.createWorld({ nowMs: now, seed });
@@ -39,7 +43,7 @@ class Sim {
     const a = this.agents.get(addr);
     if (!a) this.agents.set(addr, ag(addr, status, extra));
     else {
-      if (a.status !== status) { a.status = status; a.seq++; }
+      if (a.status !== status) { if (!seenFlip(a.status, status)) a.seq++; a.status = status; }
       Object.assign(a, extra);
     }
     return this;
@@ -240,6 +244,34 @@ describe("seq gating (D§2.3, D§2.10)", () => {
     assert.equal(sim.live("t1").state, "waiting");
   });
 
+  test("herdr's seen flip keeps the seq: done -> idle opens the chest as seen and the hero rests", () => {
+    // herdr bumps seq only on a new status word (src/model.rs set_word); done vs idle is the seen
+    // flag (mark_seen when the person looks, set_turn from another client), so seq stays put
+    const sim = new Sim().set("t1", "working").tick(600).set("t1", "done").tick(8);
+    const a = sim.agents.get("t1");
+    const h = sim.hero("t1");
+    const seq = a.seq;
+    assert.equal(h.pend.length, 1);
+    assert.equal(sim.live("t1").state, "shipped");
+    sim.set("t1", "idle").tick();
+    assert.equal(a.seq, seq, "the Sim models herdr: no seq bump");
+    assert.equal(sim.live("t1").status, "idle");
+    assert.equal(sim.live("t1").state, "resting");
+    assert.equal(h.pend.length, 0, "opened as seen (D§2.3 done -> idle), not by focus");
+    assert.ok(near(sim.state.herd.seals, 1, 1e-6), "full value: 1 Seal");
+    assert.ok(sim.state.herd.log.some((e) => e[1] === "ship" && e[2] === h.id));
+    // another client marks the turn unread: idle -> done, still the same seq
+    sim.set("t1", "done").tick();
+    assert.equal(a.seq, seq);
+    assert.equal(sim.live("t1").status, "done");
+    assert.equal(sim.live("t1").state, "shipped");
+    assert.equal(A.isSeenFlip("done", "idle"), true);
+    assert.equal(A.isSeenFlip("idle", "done"), true);
+    assert.equal(A.isSeenFlip("working", "idle"), false);
+    assert.equal(A.isSeenFlip("blocked", "working"), false);
+    noErrors(sim);
+  });
+
   test("unknown statuses count as idle", () => {
     const sim = new Sim().set("t1", "starting").tick();
     assert.equal(sim.live("t1").status, "idle");
@@ -323,6 +355,22 @@ describe("tasks and the 8-tick close (D§2.3)", () => {
     assert.equal(h.sig.tm[0], 4);
     assert.equal(h.st.tasks, 1);
   });
+
+  test("a provisional class switch asks autopilot for a class weapon at once (the old one is off-class)", () => {
+    const sim = new Sim().set("t1", "working").tick(30);
+    const h = sim.hero("t1");
+    const live = sim.live("t1");
+    // a Lv 12 provisional Refactorer (long tasks) whose last tasks were 3-minute ones
+    h.L = 12;
+    h.cls = D.CLASS_IDX.refactorer;
+    h.prov = 1;
+    h.sig = { tm: [3, 3, 3, 3, 3], tb: [0, 0, 0, 0, 0], ts: [0, 0, 0, 0, 0], blocks: 0, workMin: 15, subTasks: 0, n: 5 };
+    sim.w.rt.apGear.clear();
+    live.task.workSec = 180;
+    A.closeTask(sim.w, h, live, "done", null);
+    assert.equal(h.cls, D.CLASS_IDX.hotfixer, "switched for free (D§4.2)");
+    assert.ok(sim.w.rt.apGear.has(h.id), "the targeted equip sweep runs this tick");
+  });
 });
 
 describe("Commit Chests and seen (D§2.4)", () => {
@@ -364,6 +412,20 @@ describe("Commit Chests and seen (D§2.4)", () => {
     const where = (it) => h.eq.some((x) => x && x.uid === it.uid) || sim.state.herd.stash.some((x) => x.uid === it.uid);
     const kept = r.items.filter(where).length;
     assert.ok(kept >= 0 && kept <= 12);
+    noErrors(sim);
+  });
+
+  test("a queued chest item with ids from another content generation is repaired before it is offered", () => {
+    const sim = new Sim().set("t1", "working").tick(10);
+    const h = sim.hero("t1");
+    const bad = { uid: 4000, base: 4242, ilvl: 5, rar: 9, pol: 0, aff: [[77, 50]], flags: 0, prop: 99 };
+    sim.state.herd.inbox = [[h.id, bad]];
+    sim.tick();
+    assert.equal(sim.state.herd.inbox, undefined);
+    assert.deepEqual([bad.base, bad.rar, bad.prop, bad.aff], [0, 4, 1, [[0, 50]]]);
+    const where = h.eq.includes(bad) || sim.state.herd.stash.includes(bad);
+    assert.ok(where, "offered: worn or stashed");
+    assert.doesNotThrow(() => I.itemName(bad));
     noErrors(sim);
   });
 
@@ -444,6 +506,26 @@ describe("Commit Chests and seen (D§2.4)", () => {
     noErrors(sim);
   });
 
+  test("a pane closed inside the 8-tick close after working -> idle still opens its chest: the person watched", () => {
+    const watched = new Sim().set("t1", "working").tick(600).set("t1", "idle").tick(3);
+    const h = watched.hero("t1");
+    assert.equal(h.pend.length, 0);
+    watched.drop("t1").tick();
+    assert.equal(h.pend.length, 0, "no pending chest left on an off-duty hero");
+    assert.ok(near(watched.state.herd.seals, 1, 1e-6), "1 Seal, as if it had stayed open 8 ticks");
+    // a finish nobody saw (done) or a waiting agent still leaves a pending chest
+    const unseen = new Sim().set("t1", "working").tick(600).set("t1", "done").tick(3);
+    const hu = unseen.hero("t1");
+    unseen.drop("t1").tick();
+    assert.equal(hu.pend.length, 1);
+    assert.equal(unseen.state.herd.seals, 0);
+    const waiting = new Sim().set("t1", "working").tick(600).set("t1", "blocked").tick(3);
+    const hw = waiting.hero("t1");
+    waiting.drop("t1").tick();
+    assert.equal(hw.pend.length, 1);
+    noErrors(watched);
+  });
+
   test("an off-duty hero's chest is claimed in full by a click (claimChest)", () => {
     const sim = new Sim().set("t1", "working").tick(600);
     const h = sim.hero("t1");
@@ -472,6 +554,31 @@ describe("Unblocked (D§2.6)", () => {
     assert.equal(h.cd.unblockedUntil, until + 20, "frozen while not Questing");
     sim.set("t1", "working").tick();
     assert.equal(h.cd.unblockedUntil, until + 20, "no second grant inside the cooldown");
+  });
+
+  test("blocked time is wall-clock time: an offline gap counts towards Unblocked and the blocked clock", () => {
+    // 15 minutes blocked while the laptop slept (no ticks): the views' clock reads 15 min, and
+    // resuming grants Unblocked (D§2.6 "≥ 10 s blocked")
+    const sim = new Sim().set("t1", "working").tick(120).set("t1", "blocked").tick(2);
+    sim.jump(15 * 60000);
+    const live = sim.live("t1");
+    const t = sim.w.rt.tick;
+    // seen blocked at the snapshot 1 s after the last working one: 901 s of wall-clock time since
+    assert.equal(t - live.blockedSince, 15 * 60 + 1, "tick - blockedSince is real seconds");
+    assert.equal(A.blockedSec(sim.w, live), 15 * 60 + 1);
+    assert.ok(live.bubbleShown);
+    sim.set("t1", "working").tick();
+    assert.ok(buff(sim.live("t1")), "Unblocked after the gap");
+    // the gap and the resume in the same snapshot: the transition reads the wall clock
+    const same = new Sim().set("t1", "working").tick(120).set("t1", "blocked").tick(2);
+    same.set("t1", "working");
+    same.jump(5 * 60000);
+    assert.ok(buff(same.live("t1")), "Unblocked when the answer came during the gap");
+    // a catch-up that drops seconds (a 30 s stall runs 5 ticks) keeps the clock on real time too
+    const stall = new Sim().set("t1", "working").tick(120).set("t1", "blocked").tick(2);
+    stall.jump(30000);
+    assert.equal(stall.w.rt.tick - stall.live("t1").blockedSince, 31);
+    noErrors(sim);
   });
 
   test("no Unblocked after a short block or early in a task", () => {

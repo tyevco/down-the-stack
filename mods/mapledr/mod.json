@@ -16,12 +16,6 @@
       "title": "Down the Stack: calm mode",
       "command": "mapledr.calm",
       "words": "quiet reduce motion damage numbers banners dim rpg game"
-    },
-    {
-      "title": "Down the Stack: switch to layout",
-      "command": "layout.switch",
-      "args": { "name": "mapledr" },
-      "words": "look rpg game mapledr"
     }
   ]
 }

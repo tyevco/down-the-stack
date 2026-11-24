@@ -40,7 +40,7 @@ function freshCalls() {
   return {
     run: [], openOverlay: [], closeOverlay: [], notify: [], setAgentOrder: [], playSound: [],
     setWindowTitle: [], setBadge: [], setShared: [], exec: [], hc: [], readTextFile: [],
-    writeTextFile: [], openUrl: [], setTheme: [], presentUpdateNotes: [], watchFolder: [],
+    writeTextFile: [], openUrl: [], setTheme: [], presentUpdateNotes: [], watchFolder: [], toasts: [],
   };
 }
 
@@ -62,7 +62,7 @@ const DEFAULT_WINDOW = { platform: "linux", titlebar: "none", buttons: true, max
 export function defaultFixture() {
   return {
     agents: [], panes: [], terminals: [], spaces: [], machines: [{ name: null, layout: "ready" }],
-    focused: null, layout: null, layouts: ["main", "terminals", "win98", "mapledr"],
+    focused: null, layout: null, layouts: ["main", "terminals", "win98", "Down-the-Stack"],
     window: { ...DEFAULT_WINDOW }, placement: null, props: null,
     theme: resolveTheme("graphite"), settings: structuredClone(DEFAULT_SETTINGS),
     fonts: ["Geist", "Geist Mono", "JetBrains Mono"], keys: [], knownAgents: [],
@@ -131,8 +131,52 @@ export function setChecking(on) {
   S.checking = !!on;
 }
 
-/** Reset everything (fixture, copies, calls, fs, shared, clock, errors). */
+// ---------------------------------------------------------------------------------------------
+// Per-VM globals. herdr runs one QuickJS VM per window: globalThis survives a hot reload (a mod
+// may hand state to its next build through it) but not a VM restart, and two windows never see
+// each other's. Node has one globalThis, so the mock keeps `globalThis[Symbol.for("<mod>.…")]`
+// (registered symbols named after the mod) per VM: a mount on a fresh graph starts with none; a
+// reload, or a mount into an existing graph, sees that VM's own. The harness swaps them at mount
+// and reload, which is when a mod reads them (a read from a later timer sees the VM mounted last).
+// What globalThis holds belongs to the VM entered last: a value set later (a host that registers
+// when its load finishes, after the mount returned) is that VM's, and is kept for it when another
+// VM is entered.
+
+const VM_GLOBALS = new Map(); // vm -> Map(symbol -> value)
+const VM_MODS = new Set();
+const VM_SHOWN = new Map(); // modName -> the vm whose globals globalThis holds now
+// (the mock's own `Symbol.for("<mod>.mock.…")` hooks are not the mod's)
+const vmSymbols = (modName) => Object.getOwnPropertySymbols(globalThis).filter((sym) => {
+  const k = Symbol.keyFor(sym);
+  if (typeof k !== "string" || !k.startsWith(`${modName}.`) || k.startsWith(`${modName}.mock.`)) return false;
+  return Object.getOwnPropertyDescriptor(globalThis, sym)?.configurable !== false;
+});
+/** Make globalThis show VM `vm`'s per-VM globals of mod `modName` (none for a new VM). */
+export function enterVm(vm, modName) {
+  VM_MODS.add(modName);
+  const cur = VM_SHOWN.get(modName);
+  if (VM_SHOWN.has(modName) && cur === vm) return; // already this VM's, late writes included
+  if (VM_SHOWN.has(modName)) leaveVm(cur, modName);
+  for (const sym of vmSymbols(modName)) delete globalThis[sym];
+  const saved = VM_GLOBALS.get(`${modName}|${vm}`);
+  if (saved) for (const [sym, v] of saved) globalThis[sym] = v;
+  VM_SHOWN.set(modName, vm);
+}
+/** Remember what VM `vm` left in its per-VM globals. */
+export function leaveVm(vm, modName) {
+  const m = new Map();
+  for (const sym of vmSymbols(modName)) m.set(sym, globalThis[sym]);
+  VM_GLOBALS.set(`${modName}|${vm}`, m);
+}
+function resetVmGlobals() {
+  for (const mod of VM_MODS) for (const sym of vmSymbols(mod)) delete globalThis[sym];
+  VM_GLOBALS.clear();
+  VM_SHOWN.clear();
+}
+
+/** Reset everything (fixture, copies, calls, fs, shared, clock, errors, per-VM globals). */
 export function resetState({ checking = false } = {}) {
+  resetVmGlobals();
   for (const c of S.copies) c.alive = false;
   S.copies = [];
   S.lastCopy = null;

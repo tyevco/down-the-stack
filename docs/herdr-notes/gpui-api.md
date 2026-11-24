@@ -38,7 +38,7 @@ Legend: **CONFIRMED** = read in code. **UNCONFIRMED** = inferred or not traced t
    - `.child(false)` renders the text "false". `true` and numbers become text too (`Q:5874-5891`).
    - `.child(null)` or `.child(undefined)` throws a TypeError.
    - Guard conditional children with `.when(cond, el => el.child(x))`.
-9. **Render has a 50 ms budget.** An event or task has 500 ms. Top-level module evaluation has 5 s (`SH/engine/quickjs/sandbox.rs:436-443`, installed at `Q:1853`). `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval` and `require` exist but throw a hint (`sandbox.rs:228-241`).
+9. **Render has a 50 ms budget.** An event or task has 500 ms. Top-level module evaluation has the 5 s `detached` budget only outside any scope (`SH/engine/quickjs/sandbox.rs:436-443`, installed at `Q:1853`); herdr loads mods inside a Task scope (`SH/plugin.rs:1235-1250`), so in practice module evaluation also has 500 ms (`sandbox.rs:513-517`). `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval` and `require` exist but throw a hint (`sandbox.rs:228-241`).
 10. **Unknown methods throw**, and so does a bad unit or type in a style argument. The check runs eagerly at the call site (`Q:8250-8254`). The render then fails, and the view shows an error banner while the previous build stays alive (`AG` "A broken save keeps the old version running").
 
 ---
@@ -328,12 +328,12 @@ This pattern is the win98 `gradient()` helper (`defaults/mods/win98/kit.js:190-1
   - Frame state (`ImgState {frame_index, last_frame_time}`, `img.rs:254-354`) is keyed by the element id (`MAT:1534`, `element_id(id, key)`). Without `.id()` it is the creation index, so a conditional sibling earlier in the render restarts the GIF. Give sprite images a stable `.id()`. A newly seen image starts at frame 0.
   - **Sprite-sheet cropping works**: `div().w(32).h(32).overflow_hidden().child(image(sheet).absolute().left(-32*k).top(0).w(32*N).h(32))`. Stepping frames still needs a re-render, because `frames()` only swaps text.
 - **Sizing:**
-  - With neither `w` nor `h` set, the image takes its intrinsic size in raw image px, which is **not** zoom-scaled.
+  - With neither `w` nor `h` set, the image takes its intrinsic size in raw image px, which is **not** zoom-scaled. For an SVG that is its `width`/`height` attributes (the 2× raster divided by its scale factor 2, `GP/assets.rs:168-172`, used at `img.rs:357`).
   - With one side set as an absolute length, the other follows the aspect ratio (`img.rs:358-382`).
   - **Always set `w` and `h`** (or `size`) in script px.
 - **Object fit is always `Contain`** (`img.rs:141`). `object_fit` and `grayscale` are not exposed, so give the box the same aspect ratio as the image.
-- **SVG through `image()`** is rasterized once at 2× its intrinsic size (`GP/svg_renderer.rs:81,195-219`, `img.rs:771-773`). Drawn larger than that, it may blur, so give sprite SVGs intrinsic `width`/`height` at least half their largest on-screen device size.
-- **Upscaling filter:** no nearest-neighbor option was found, so pixel art scaled up is likely smoothed (UNCONFIRMED). Author art at display size, or as SVG `<rect>`s.
+- **SVG through `image()`** is rasterized once, at 2× its intrinsic size: the loader calls `render_single_frame(&bytes, 1.0)` (`img.rs:773-775`; the TODO at `img.rs:654-655` shows the display scale factor is ignored), and `ScaleFactor(1)` becomes 1 × `SMOOTH_SVG_SCALE_FACTOR` (2) of the SVG's `width`/`height` (`GP/svg_renderer.rs:81,200-207,272-283`). Neither the drawn size, the display's DPR nor herdr's zoom changes that raster. Drawn larger than that, it blurs, so give sprite SVGs intrinsic `width`/`height` at least half their largest on-screen device size. On a 2× display at zoom 1 that means `width`/`height` ≥ the largest drawn size in script px. mapledr keeps the viewBox at the zoom-1 display size and writes `width`/`height` = k × viewBox for art drawn bigger (`tools/gen-art.mjs` `intrinsicScale`, ARCHITECTURE §8).
+- **Sampling filter (confirmed):** the atlas sampler is linear for both magnification and minification (`gpui-pre-wgpu/src/wgpu_renderer.rs:1416-1420`; Metal `gpui-pre-apple/src/shaders.metal:716-717` for polychrome sprites). Atlas textures have a single mip level (`wgpu_atlas.rs:215` `mip_level_count: 1`; `metal_atlas.rs:143-160` sets none, so Metal's default of 1 applies). There is no nearest-neighbor option. So a raster drawn larger is smoothed, and a raster drawn much smaller is point-sampled and can alias. Integer ratios of axis-aligned pixel art stay exact. Don't make the intrinsic size bigger than the largest draw needs.
 - **What else applies:** `opacity`, `rounded_*` (corner radii are applied, `img.rs:495-501`), `bg`, `border`, `absolute`, `left` and `top`, plus `transition`, `loop` and `spring` on the 5 motion properties.
   - There is no tint, flip, rotate or scale.
   - There are no handlers; wrap the image in a div.
@@ -510,7 +510,7 @@ Herdr multiplies every script px by `settings().zoom` (`src/settings.rs:782` →
 ## Appendix B — UNCONFIRMED list
 
 - ~~Whether taffy positions absolute children against their direct parent~~ SETTLED by the critic: direct parent, always (see §2.3 Position).
-- Whether an upscaled image uses smooth (linear) filtering, and whether `svg()` defaults to 0×0 when given no size.
+- ~~Whether an upscaled image uses smooth (linear) filtering~~ SETTLED: linear for magnification and minification, one mip level (see §3.2). Still open: whether `svg()` defaults to 0×0 when given no size.
 - Whether `invisible()` and `opacity(0)` elements keep receiving pointer events.
 - Whether a path's own `.opacity()` style is ignored.
 - Whether a loop or transition inside a retained child view wakes only that child.

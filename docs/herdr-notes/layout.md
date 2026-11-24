@@ -3,9 +3,15 @@
 Source: `/home/user/herdrdev/herdr-app` (master, ~0.1.17). Paths below are relative to it.
 Read only: nothing was built or run. "UNCONFIRMED" marks things I could not confirm from source.
 
-Files written next to these notes:
+Files written next to these notes during the research (not kept in the repo; they became
+`layouts/Down-the-Stack.json` and `mods/mapledr/preview.svg`):
 - `mapledr.json`: the draft layout (section 3)
 - `mapledr.svg`: the draft settings preview (320x200, same style as `win98.svg`)
+
+Shipped naming (decided after these notes): the layout ships as `layouts/Down-the-Stack.json`. herdr
+has no display title for a layout and shows the file name (section 4, "The settings card name").
+The mod folder stays `mapledr`. The keys section is therefore `layout:Down-the-Stack`, while the
+actions stay `mapledr.<cmd>`. "`mapledr.json`" below is the research draft's name.
 
 ---
 
@@ -474,7 +480,22 @@ The file is in this folder. It is `main.json` with these changes:
   copy a `themes/` file, and a missing theme only reports an error and falls back to graphite.
   If you ship one anyway, say so in RECIPE.md "Watch out".
 - The settings card name is the file name: `LOOKS[name] ?? name` (`frame/settings/main.js:18`, `316`).
-  There is no display-name field, so it shows as "mapledr".
+  There is no display-name field, so a `mapledr.json` would show as "mapledr". The shipped file is
+  `Down-the-Stack.json` for this reason.
+- The same name, or the mod folder name, is shown everywhere else herdr lists layouts or mod actions:
+  - Palette: one row per installed layout, titled `Layout: ${Cap(name)}` (only main, terminals and
+    win98 have nicer titles), so "Layout: Down-the-Stack" (`frame/palette/main.js:154-157`).
+    A mod palette entry that only switches to the layout duplicates this row.
+  - macOS menu bar: View > Layout has one item per layout, titled with the raw name
+    (`src/macos.rs:66-69`).
+  - win98 Start menu: the raw name; only win98 itself is renamed, to "Herdr 98"
+    (`mods/win98/taskbar.js:209-210`).
+  - Keys overlay: the key, its section in brackets, then the action with `.`/`_` turned into spaces.
+    So `ctrl-shift-s  (layout:Down-the-Stack)` reads `mapledr sheet` (`mods/help/main.js:17-22,83`).
+  - Mod palette entries show their own `title` (ours say "Down the Stack: …"). But a command that
+    fails toasts `<mod>.<cmd> failed` (`src/window.rs:3076-3078`).
+  - So a layout or mod name is visible to the person. Pick one you are happy to show, or accept that
+    the id shows in herdr's chrome.
 
 ### Preview SVG
 
@@ -496,7 +517,7 @@ The file is in this folder. It is `main.json` with these changes:
 
 ```json
 {
-  "layout:mapledr": {
+  "layout:Down-the-Stack": {
     "ctrl-shift-g": "layout.toggle:stage",
     "ctrl-shift-j": "layout.toggle:hud",
     "ctrl-shift-i": "mapledr.inventory"
@@ -504,7 +525,8 @@ The file is in this folder. It is `main.json` with these changes:
 }
 ```
 
-- Section `layout:<name>` applies while `layouts/<name>.json` shows. It maps to the GPUI context
+- Section `layout:<name>` applies while `layouts/<name>.json` shows. The Keys overlay prints the
+  section name next to each key, and the action as words (`mapledr.sheet` → "mapledr sheet"). It maps to the GPUI context
   `layout == <name>` set on the window root (`keys.rs:119-130`, `window.rs:5675`).
   Precedence: `terminal` > `layout:` > `global` (AGENTS.md:548-550). A key also in `terminal`
   (`ctrl-shift-c/v/f`, `ctrl-v`, ...) loses while a terminal has focus. `mod:mapledr` applies where a
@@ -533,9 +555,9 @@ The file is in this folder. It is `main.json` with these changes:
   mapledr/
     RECIPE.md
     preview.png                  screenshot (herdr-app shot)
-    layouts/mapledr.json
+    layouts/Down-the-Stack.json
     mods/mapledr/                mod.json {"place":"none", ...}, main.js, roles, art/, fonts/?, preview.svg
-    keys.json                    optional: {"layout:mapledr": {...}} (AGENTS.md names keys.json for mods; a layout folder "laid out like this home" can carry one too)
+    keys.json                    optional: {"layout:Down-the-Stack": {...}} (AGENTS.md names keys.json for mods; a layout folder "laid out like this home" can carry one too)
   ```
 - **Repo topic:** `herdr-layout` (`herdr-mod` for a mod). It shows up at herdr.dev/layouts within the
   hour (CONTRIBUTING.md:13 links github.com/topics/herdr-layout).
@@ -547,7 +569,8 @@ The file is in this folder. It is `main.json` with these changes:
   then `layout.switch {name}`.
   Make renames easy. Spell asset paths as the literal `"mods/mapledr/..."` and overlay names as
   `mod: "mapledr"`; `mod.clone` rewrites exactly these patterns (`mods.rs:247-257`). Our
-  `layout:mapledr` section, `mapledr.<cmd>` actions and the `preview` path also contain the name.
+  `mapledr.<cmd>` actions and the layout's `preview` path also contain the mod name; the
+  `layout:Down-the-Stack` keys section contains the layout name.
 - **RECIPE.md order** (a brief another agent can rebuild from):
   1. `# Name`, one paragraph of what the person sees, `![Name](preview.png)`
   2. **What you see:** regions in order, with sizes, colors and type, and what each shows

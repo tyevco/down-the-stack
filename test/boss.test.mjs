@@ -550,6 +550,48 @@ describe("suspend and resume (D§9.5, D§13.1)", () => {
     assert.ok(JSON.stringify(Bo.packFight(f)).length < 600);
   });
 
+  test("a suspended fight resumes only when a participant works in its zone; one working elsewhere is never pulled in", () => {
+    // The Octopus Merge (zone 3) with two participants; both go idle and the fight is suspended
+    const w = makeWorld({ seed: 5, heroes: [{ cls: "shellmancer", L: 45, mapId: map3(3) }, { cls: "refactorer", L: 45, mapId: map3(3) }] });
+    const ev = makeEv();
+    const f = Bo.startFight(w, "boss", 3, [1, 2], ev);
+    assert.ok(f);
+    stepWorld(w, ev, 20);
+    for (const id of [1, 2]) liveOf(w, id).state = "resting";
+    stepWorld(w, ev, 600);
+    assert.equal(w.rt.fights.length, 0);
+    const t = w.state.herd.fight.t;
+    // hero 2 works pinned to map 1-1 (zone 0): no resume, the fight keeps its time
+    heroOf(w, 2).pinMap = "1-1";
+    liveOf(w, 2).mapId = "1-1";
+    liveOf(w, 2).state = "questing";
+    assert.equal(Bo.resumeFight(w, ev), null);
+    assert.equal(w.state.herd.fight.t, t);
+    // hero 1 works in zone 3 again: the fight is back, without the hero working in zone 0
+    liveOf(w, 1).state = "questing";
+    const g = Bo.resumeFight(w, ev);
+    assert.ok(g);
+    assert.equal(g.t, t);
+    assert.deepEqual(g.heroIds, [1]);
+    assert.deepEqual(w.state.herd.fight.ids, [1]);
+  });
+
+  test("a suspended repeat-kill fight of Answer-calls helpers resumes when a helper works anywhere", () => {
+    const { w, ev, f } = solo(3, "shellmancer", 45, 9);
+    stepWorld(w, ev, 5);
+    // the participant joined from elsewhere as a helper (D§9.5 Answer calls)
+    f.helpers = [1];
+    liveOf(w, 1).mapId = "4-2";
+    liveOf(w, 1).state = "resting";
+    stepWorld(w, ev, 600);
+    assert.equal(w.rt.fights.length, 0);
+    assert.deepEqual(w.state.herd.fight.hl, [1]);
+    liveOf(w, 1).state = "questing";
+    const g = Bo.resumeFight(w, ev);
+    assert.ok(g, "a helper wakes the fight from another zone");
+    assert.deepEqual(g.helpers, [1]);
+  });
+
   test("startFight on a boss with a suspended fight resumes it instead of starting over", () => {
     const { w, ev, f } = solo(5, "refactorer", 67, 3);
     stepWorld(w, ev, 15);

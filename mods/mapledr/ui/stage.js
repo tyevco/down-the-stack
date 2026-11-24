@@ -33,6 +33,12 @@
  *
  * @typedef {object} RoomVMAdditions
  * @property {string} [tooltip]  Room header hover: zone, map, quota, Sprint meter (D§11.16).
+ * @property {{heroIds:number[], mapId:string|null}|null} [pin]  Header click (D§11.16): pinMap
+ *           {heroId, mapId} for each hero (mapId null unpins); null: the header is not clickable.
+ * @property {{kind:string, idx:number, tooltip?:string}|null} [challenge]  Boss-door click
+ *           (D§11.16): the `challenge` command {kind, idx}; null: the door is only a sign (also
+ *           while the engine would refuse the challenge: a boss fight on, a retry wait, nobody
+ *           working in the zone; the room tooltip says why).
  * @property {string} [stats]    Header numbers after the quota bar, e.g. "31/40 · Sprint 4/6";
  *           shown as given (the part after " · " is dropped when the header cannot fit it; the
  *           title falls back to `shortTitle` first).
@@ -43,6 +49,9 @@
  *           #00000033 overlay (ARCHITECTURE §9.3).
  * @property {{clsId:string, color:string, edge?:boolean}} weapon  edge: tier-5 cyan rim mask.
  * @property {number|null} [rebootFrac]  0..1 progress of the "Rebooting…" bar while crashed.
+ * @property {{key, kind:"promoted"|"postmortem", text, sub, age}|null} [reviewEnd]  A review that
+ *           just ended, in the hero's slot (D§11.8): the Promotion banner (confetti) or the
+ *           Postmortem card. age 0 = about to show, 1–2 shown, ≥ 3 going. Calm keeps only the card.
  * @property {Array<{key, address, x, y, face, status, bubble, tooltip?:string}>} forklings
  *           tooltip: the sub-agent's title (hover, D§11.16).
  *   Faces/colours are final: the renderer shows `face` as given (">_" blinks while questing).
@@ -55,9 +64,10 @@
  *   phaser → opacity flicker loop 1 → 0.6 (1.2 s); pending → "…" ring; dying → fades out.
  *
  * @typedef {object} ChestVMAdditions
- * @property {string|null} address  Terminal to focus after claiming (D§11.16).
- *   tier: "wooden"|"iron"|"silver"|"gold"|"duck"; count > 1 shows "×n"; unopened chests carry
- *   the SHIPPED ribbon and a sparkle.
+ * @property {string|null} address  Terminal to show after claiming (D§11.16).
+ *   tier: "wooden"|"iron"|"silver"|"gold" (a Commit Chest) | "duck" (a Holo Rubber Duck's Duck
+ *   Chest, D§9.7: a picture of the kill, its item already given); count > 1 shows "×n"; unopened
+ *   chests sparkle, unopened Commit Chests carry the SHIPPED ribbon and claim on click.
  *
  * @typedef {object} BossVMAdditions
  * @property {number} age      Ticks since the fight started (entrance: 0 dim + hidden, 1 rise,
@@ -65,6 +75,8 @@
  * @property {string} [tooltip]  Mechanics summary and win estimate (hover).
  * @property {string|null} [partSprite]  Part art (e.g. "boss/octopus_merge-part.svg"); null draws
  *           parts as small labelled bars (e.g. the Pyramid's layers).
+ * @property {{confirm:string, args?:object}|null} [retreat]  D§11.16 Retreat on the boss: the first
+ *           click arms (shows `confirm` over the boss), a second one within 4 ticks runs `retreat`.
  * @property {{key, text, sub, age, kind?:"entrance"|"postmortem"}|null} banner
  *           age 0 = about to slide in, 1–2 shown, ≥ 3 sliding out (view.js drops it after 3).
  * @property {{key, text, age, sprite?:string|null}|null} stamp  age 0 = about to slam, ≥ 1 down.
@@ -75,14 +87,20 @@
  *
  * FxVM: x/y = centre at age 0; age 1 is drawn at (x + dx, y + dy) fading out (two-tick
  * pattern). levelup/pillar/stamp are multi-tick: shown statically while the VM keeps them.
+ * A pillar's optional `sheet: {heroId, itemUid}` makes it a click target (D§11.16): the sheet
+ * opens on that item's compare card.
+ *
+ * Clicks that show a terminal (hero, "!" bubble, chest, Forkling) use party.js showTerminal, as
+ * herdr's agents list does: pane.focus when the terminal has a pane, else terminal.peek
+ * (agent.focus shows nothing without a pane here: the layout has no agent block).
  */
 // ---------------------------------------------------------------------------------------------
 
 import { div, svg, image } from "gpui-kit";
-import { run, openOverlay, focused, theme as herdrTheme } from "herdr";
-import { art, C, MONO, T, zoom, alpha, jitter, kids, clamp01 } from "./kit.js";
+import { openOverlay, focused, theme as herdrTheme } from "herdr";
+import { art, C, MONO, T, zoom, alpha, jitter, kids, clamp01, hex } from "./kit.js";
 import { renderTermling, renderForkling, programIcon } from "./termling.js";
-import { openSheet } from "./party.js";
+import { openSheet, showTerminal } from "./party.js";
 
 const REF_H = 200;           // the reference composition height (D§11.2)
 const GROUND = 160;          // ground line in the reference composition
@@ -106,6 +124,15 @@ const placed = (list, also) => (Array.isArray(list) ? list.filter((e) => e && Nu
 const clampX = (left, w, ctx) => Math.max(1, Math.min(ctx.W - w - 1, left));
 
 const SHEET = (heroId) => ({ mod: "mapledr", kind: "dialog", width: 760, height: 500, props: { role: "sheet", heroId } });
+
+/** The sheet on one item's compare card (props.focus): through the host's one-sheet registry. */
+function openSheetOn(heroId, itemUid, ctx) {
+  const host = ctx.env?.host;
+  const opts = Number.isFinite(itemUid) ? { focus: itemUid } : {};
+  if (host && typeof host.openSheet === "function") return host.openSheet(heroId, opts);
+  const spec = SHEET(heroId);
+  return openOverlay({ ...spec, props: { ...spec.props, ...opts } });
+}
 const HERD = () => ({ mod: "mapledr", kind: "dialog", width: 760, height: 520, props: { role: "herd" } });
 
 // ---------------------------------------------------------------------------------------------
@@ -116,6 +143,7 @@ export default class Stage {
     this.props = props ?? {};
     this.host = host ?? null;
     this.size = null; // logical {width, height}, from on_size_change
+    this.ui = { armed: null }; // a boss Retreat armed by a first click: {key, tick}
   }
 
   /** env for renderStage; theme = T() plus the layout's mdr_* tokens (herdr merges them into theme()). */
@@ -123,8 +151,9 @@ export default class Stage {
     const host = this.host;
     const th = T();
     const raw = herdrTheme() ?? {};
-    for (const k of Object.keys(raw)) if (k.startsWith("mdr_")) th[k] = raw[k];
-    return { width, height, zoom: zoom(), theme: th, host, act: (name, args) => host?.command?.(name, args) };
+    // kit.hex: a hand-edited "151126" (herdr accepts it) would make .bg() throw; unusable → the built-in colour
+    for (const k of Object.keys(raw)) if (k.startsWith("mdr_")) { const v = hex(raw[k]); if (v) th[k] = v; }
+    return { width, height, zoom: zoom(), theme: th, host, ui: this.ui, act: (name, args) => host?.command?.(name, args) };
   }
 
   viewModel(width, height) {
@@ -173,7 +202,8 @@ export default class Stage {
 
 /**
  * Build the stage tree from a StageVM (or null while the world loads).
- * env = { width, height, zoom, theme: T() (+ mdr_* tokens), host, act(name, args) }.
+ * env = { width, height, zoom, theme: T() (+ mdr_* tokens), host, act(name, args), ui? } where ui
+ * is the role's mutable UI state ({armed}: a boss Retreat armed by a first click); optional.
  */
 export function renderStage(model, env = {}) {
   const th = env.theme ?? {};
@@ -193,6 +223,9 @@ export function renderStage(model, env = {}) {
     compact: H < COMPACT_H,
     motion: !calm && !model?.stillness,  // loops allowed at all (stillness keeps only fires + bubbles)
     act: (name, args) => env.act?.(name, args),
+    ui: env.ui ?? { armed: null },
+    // calm dims the scene to 60 %, but "bubbles and chests stay" (D§11.15): they go on top of it
+    keep: calm ? [] : null,
   };
   const root = div().id("stage").relative().size_full().overflow_hidden().bg(night.sky);
   if (!model) return root.child(localhost(null, ctx));
@@ -213,7 +246,7 @@ export function renderStage(model, env = {}) {
   if (!ctx.compact) {
     for (const s of vm.signs ?? []) scene.children(sign(s, ctx));
   }
-  for (const c of vm.chests ?? []) scene.child(chest(c, ctx));
+  for (const c of vm.chests ?? []) put(scene, chest(c, ctx), ctx);
   if (!ctx.compact) {
     for (const h of heroes) if (h.campfire) scene.children(campfire(h.key, h.campfire, ctx));
     for (const h of heroes) if (h.crate) scene.child(image(art("fx/crate.svg")).absolute().left(r2(h.x - 12)).top(r2(ctx.oy + h.y - 16)).w(24).h(16));
@@ -232,17 +265,18 @@ export function renderStage(model, env = {}) {
       scene.children(hero(h, ctx));
     }
   }
-  for (const c of vm.chests ?? []) scene.children(chestMarks(c, ctx));
+  for (const c of vm.chests ?? []) for (const el of chestMarks(c, ctx)) put(scene, el, ctx);
   if (!ctx.compact) {
     for (const h of heroes) {
-      if (h.bubble) scene.child(bubble(h, ctx));
+      if (h.bubble) put(scene, bubble(h, ctx), ctx);
       if (h.zzz) scene.child(zzz(h, ctx));
     }
   } else {
-    for (const h of heroes) if (h.bubble) scene.child(bubble(h, ctx));
+    for (const h of heroes) if (h.bubble) put(scene, bubble(h, ctx), ctx);
   }
   for (const h of heroes) scene.children(plate(h, ctx));
   if (!ctx.compact) {
+    for (const h of heroes) if (h.reviewEnd) scene.children(reviewEnd(h, ctx));
     for (const f of fxOrder(vm.fx, ctx.fxCap)) scene.children(fx(f, ctx));
     if (vm.boss) scene.children(bossOverlays(vm.boss, ctx));
   }
@@ -250,7 +284,15 @@ export function renderStage(model, env = {}) {
   if (note) scene.child(note);
   if (vm.herdBanner && !calm && !ctx.compact) scene.children(herdBanner(vm.herdBanner, ctx));
   if (vm.overflow) scene.child(overflowChip(vm.overflow, ctx));
-  return root.child(scene);
+  root.child(scene);
+  if (ctx.keep) root.children(ctx.keep);
+  return root;
+}
+
+/** Into the scene, or (calm) onto the full-opacity layer over it (D§11.15 bubbles and chests). */
+function put(scene, el, ctx) {
+  if (ctx.keep) ctx.keep.push(el);
+  else scene.child(el);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -278,13 +320,14 @@ function detail(vm, rooms, heroes, ctx) {
     const w = num(r.w, 0);
     const g = Math.ceil(w / 32), f = Math.ceil((w + 48) / 160), p = Math.min(3, (r.props ?? []).length);
     ground += g; far += f + 1; props += Math.max(0, p - 1);
-    est += 5 + g + f + 1 + p + (r.door ? 2 : 0) + (r.quota ? 2 : 0) + (r.stats || r.quota ? 1 : 0) + (r.dusk ? 1 : 0) + (r.dividerLeft ? 1 : 0);
+    est += 5 + g + f + 1 + p + (r.door ? (r.challenge ? 3 : 2) : 0) + (r.quota ? 2 : 0) + (r.stats || r.quota ? 1 : 0) + (r.dusk ? 1 : 0) + (r.dividerLeft ? 1 : 0);
   }
   for (const h of heroes) {
     est += 13 + (h.programIcon ? 0 : -1) + (h.hat ? 0 : -1) + (h.weapon?.edge ? 1 : 0) + (h.pinned ? 1 : 0) + (h.tag?.text ? 1 : 0)
       + (h.bubble ? 2 : 0) + (h.campfire ? 2 : 0) + (h.crate ? 1 : 0) + (h.zzz ? 1 : 0) + (h.focused ? 1 : 0)
       + (h.state === "waiting" && h.slot ? 1 : 0) + (h.state === "crashed" && Number.isFinite(h.rebootFrac) ? 2 : 0)
-      + (h.forklings ?? []).reduce((a, f) => a + forkCost(f), 0) + (h.forklingExtra > 0 ? 1 : 0);
+      + (h.forklings ?? []).reduce((a, f) => a + forkCost(f), 0) + (h.forklingExtra > 0 ? 1 : 0)
+      + reviewEndCost(h, ctx);
   }
   for (const m of vm.mobs ?? []) {
     if (m.dying) { est += 1; continue; }
@@ -295,7 +338,7 @@ function detail(vm, rooms, heroes, ctx) {
   const fxs = fxOrder(vm.fx);
   for (const f of fxs) est += fxCost(f);
   est += (vm.signs ?? []).length * 2 + (vm.headerNote ? 1 : 0) + (vm.herdBanner ? 3 : 0);
-  if (vm.boss) est += 14 + num(vm.boss.segments, 1) + (vm.boss.parts ?? []).length * 4 + (vm.boss.banner ? 5 : 0) + (vm.boss.stamp ? 1 : 0);
+  if (vm.boss) est += 14 + num(vm.boss.segments, 1) + (vm.boss.parts ?? []).length * 4 + (vm.boss.banner ? 5 : 0) + (vm.boss.stamp ? 1 : 0) + (armed(vm.boss, ctx) ? 1 : 0);
   if (vm.overflow) est += 6 + Math.min(10, (vm.overflow.dots ?? []).length);
   if (est > BUDGET) { out.groundTiles = false; est -= ground; }
   if (est > BUDGET) { out.maxProps = 1; est -= props; }
@@ -414,12 +457,13 @@ function headerFit(r, w) {
   const hasQuota = Boolean(r.quota && num(r.quota.need, 0) > 0);
   let stats = typeof r.stats === "string" ? r.stats : hasQuota ? `${r.quota.have}/${r.quota.need}` : "";
   const bw = w < 220 ? 24 : 36;
-  const space = (st) => w - 14 - (hasQuota ? bw + 5 : 0) - (st ? monoW(st, 9.5) + 5 : 0) - (r.door ? 16 : 0);
+  const doorW = r.door ? (r.challenge ? 19 : 16) : 0;
+  const space = (st) => w - 14 - (hasQuota ? bw + 5 : 0) - (st ? monoW(st, 9.5) + 5 : 0) - doorW;
   const textW = (t) => String(t ?? "").length * 10.5 * 0.56;  // the UI font averages ≈ 0.56 em
   let title = r.title ?? "";
   if (textW(title) > space(stats)) title = r.shortTitle ?? title;
   if (textW(title) > space(stats) && stats.includes(" · ")) stats = stats.slice(0, stats.indexOf(" · "));
-  const used = (r.dividerLeft ? 7 : 6) + textW(title) + (hasQuota ? bw + 5 : 0) + (stats ? monoW(stats, 9.5) + 5 : 0) + (r.door ? 16 : 0) + 5;
+  const used = (r.dividerLeft ? 7 : 6) + textW(title) + (hasQuota ? bw + 5 : 0) + (stats ? monoW(stats, 9.5) + 5 : 0) + doorW + 5;
   return { hasQuota, stats, bw, title, used: Math.min(w, used) };
 }
 
@@ -431,13 +475,32 @@ function roomHeader(r, w, ctx) {
   // Rooms of the same zone have no divider; a hairline still separates their headers.
   if (!r.dividerLeft && num(r.x, 0) > 0.5) strip.border_l(1).border_color("#FFFFFF24");
   if (r.tooltip) strip.tooltip(r.tooltip);
+  // D§11.16: pin (or unpin) the map for the heroes in the room
+  const pin = r.pin;
+  if (pin && Array.isArray(pin.heroIds) && pin.heroIds.length) {
+    strip.cursor_pointer().on_click((_e, cx) => {
+      cx.stop_propagation();
+      for (const heroId of pin.heroIds) ctx.act("pinMap", { heroId, mapId: pin.mapId ?? null });
+    });
+  }
   strip.child(String(title));
   if (hasQuota) {
     strip.child(div().flex_none().relative().w(bw).h(3).rounded(1).bg("#FFFFFF2E")
       .child(div().absolute().left(0).top(0).h(3).w(Math.round(bw * clamp01(r.quota.have / r.quota.need))).bg(C.working)));
   }
   if (stats) strip.child(div().flex_none().text_size(9.5).font_weight(400).font_family(MONO).text_color(alpha(CREAM, 0.8)).child(stats));
-  if (r.door) strip.child(svg(art("ui/boss.svg")).flex_none().w(11).h(11).text_color(C.hp));
+  if (r.door) {
+    const icon = svg(art("ui/boss.svg")).w(11).h(11).text_color(C.hp);
+    const ch = r.challenge;
+    if (ch) {
+      // the boss door challenges the zone's boss (D§11.16); its own hit box, over the header's
+      const door = div().id(`${r.key}/door`).flex_none().flex().items_center().justify_center().w(14).h(16).cursor_pointer()
+        .on_click((_e, cx) => { cx.stop_propagation(); ctx.act("challenge", { kind: ch.kind, idx: ch.idx }); })
+        .child(icon);
+      if (ch.tooltip) door.tooltip(String(ch.tooltip));
+      strip.child(door);
+    } else strip.child(icon.flex_none());
+  }
   return strip;
 }
 
@@ -469,17 +532,23 @@ function chest(c, ctx) {
   const h = CHEST_H[tier] ?? 22;
   const left = r2(c.x - 14);
   const top = r2(ctx.compact ? Math.max(1, ctx.oy + c.y - h) : ctx.oy + c.y - h);
-  const el = div().id(c.key).absolute().left(left).top(top).w(28).h(h).cursor_pointer()
-    .transition("left", { duration: 900, easing: "ease-out" })
-    .on_click((_e, cx) => {
+  const el = div().id(c.key).absolute().left(left).top(top).w(28).h(h)
+    .transition("left", { duration: 900, easing: "ease-out" });
+  // Only a closed Commit Chest claims: an opened one and a Duck Chest (its item is already given)
+  // are pictures, and a click on them falls through to whatever stands behind.
+  if (claimable(c)) {
+    el.cursor_pointer().on_click((_e, cx) => {
       cx.stop_propagation();
-      if (c.address) run("agent.focus", { terminal: c.address });
+      if (c.address) showTerminal(c.address);
       ctx.act("claimChest", { heroId: c.heroId });
     });
+  }
   if (c.tooltip) el.tooltip(c.tooltip);
   el.child(image(art(`fx/chest-${tier}${c.open ? "-open" : ""}.svg`)).absolute().left(0).top(0).w(28).h(h));
   return el;
 }
+
+const claimable = (c) => !c.open && c.tier !== "duck";
 
 /** What must read over the hero standing next to the chest: SHIPPED ribbon, sparkle, "×n". */
 function chestMarks(c, ctx) {
@@ -489,7 +558,7 @@ function chestMarks(c, ctx) {
   const top = ctx.compact ? Math.max(1, ctx.oy + c.y - h) : ctx.oy + c.y - h;
   const out = [];
   if (!c.open && !ctx.compact) {
-    out.push(image(art("fx/ribbon.svg")).absolute().left(r2(left - 6)).top(r2(top - 13)).w(40).h(10));
+    if (tier !== "duck") out.push(image(art("fx/ribbon.svg")).absolute().left(r2(left - 6)).top(r2(top - 13)).w(40).h(10));
     const spark = svg(art("fx/starburst.svg")).absolute().left(r2(left + 23)).top(r2(top - 3)).w(9).h(9).text_color(CREAM).opacity(0.85);
     if (ctx.motion) spark.loop("opacity", { from: 0.15, to: 1, period: jitter(c.key, 1800, 53), easing: "ease-in-out" });
     out.push(spark);
@@ -577,7 +646,7 @@ function hero(h, ctx) {
   }).cursor_pointer().on_click((e, cx) => {
     cx.stop_propagation();
     if (num(e?.click_count, 1) >= 2) { openSheet(h.heroId); return; }
-    if (h.address) run("agent.focus", { terminal: h.address });
+    if (h.address) showTerminal(h.address);
     ctx.act("markSeen", { heroId: h.heroId });
   });
   if (h.tooltip) body.tooltip(h.tooltip);
@@ -595,11 +664,16 @@ function hero(h, ctx) {
       .cursor_pointer()
       .on_click((_e, cx) => {
         cx.stop_propagation();
-        if (fk.address) run("agent.focus", { terminal: fk.address });
+        // a sub-agent rarely has a pane: herdr's peek shows it (D§11.16, as the agents list does)
+        if (fk.address) showTerminal(fk.address);
       });
     if (fk.tooltip) el.tooltip(fk.tooltip);
     out.push(el);
-    if (fk.bubble) out.push(image(art("fx/bubble.svg")).absolute().left(r2(fk.x + 3)).top(r2(ctx.oy + fk.y - 36)).w(9).h(10));
+    if (fk.bubble) {
+      const b = image(art("fx/bubble.svg")).absolute().left(r2(fk.x + 3)).top(r2(ctx.oy + fk.y - 36)).w(9).h(10);
+      if (ctx.keep) ctx.keep.push(b);
+      else out.push(b);
+    }
   }
   if (extra > 0 && fks.length) {
     const last = fks[fks.length - 1];
@@ -609,7 +683,7 @@ function hero(h, ctx) {
   return out;
 }
 
-/** The "!" bubble (blocked only): 18×20 art in a 32×32 hit area; bobs 3 px; click focuses. */
+/** The "!" bubble (blocked only): 18×20 art in a 32×32 hit area; bobs 3 px; click shows the terminal. */
 function bubble(h, ctx) {
   let left, top;
   if (ctx.compact) {
@@ -626,7 +700,7 @@ function bubble(h, ctx) {
   const el = div().id(`${h.key}/bubble`).absolute().left(left).top(top).w(32).h(32).cursor_pointer()
     .on_click((_e, cx) => {
       cx.stop_propagation();
-      if (h.address) run("agent.focus", { terminal: h.address });
+      if (h.address) showTerminal(h.address);
     })
     .child(image(art("fx/bubble.svg")).absolute().left(7).top(6).w(18).h(20));
   if (h.bubble?.label) el.tooltip(String(h.bubble.label));
@@ -671,6 +745,58 @@ function plate(h, ctx) {
   return out;
 }
 
+/** A review's end in the hero's slot (D§11.8): the Promotion banner with confetti, or the card. */
+// No reserved meaning colours (gold is only "done", orange only blocked): XP cyan and rarity tones.
+const CONFETTI = ["#7FE9F5", "#4EA3FF", "#B36BFF", "#FF7AA8", "#FFF4D6", "#A9B8FF"];
+const CONFETTI_N = 12;
+
+function reviewEndShown(h, ctx) {
+  const e = h.reviewEnd;
+  return Boolean(e && h.slot && !ctx.compact && (!ctx.calm || e.kind === "postmortem"));
+}
+
+function reviewEndCost(h, ctx) {
+  if (!reviewEndShown(h, ctx)) return 0;
+  return 1 + (h.reviewEnd.text ? 1 : 0) + (h.reviewEnd.sub ? 1 : 0) + (h.reviewEnd.kind === "promoted" ? CONFETTI_N : 0);
+}
+
+function reviewEnd(h, ctx) {
+  if (!reviewEndShown(h, ctx)) return [];
+  const e = h.reviewEnd;
+  const pm = e.kind === "postmortem";
+  const sw = num(h.slot.w, 150);
+  const bw = Math.max(80, Math.min(260, sw - 10));
+  const base = num(h.slot.x, 0) + sw / 2 - bw / 2;
+  const age = num(e.age, 1);
+  const shown = age >= 1 && age < 3;
+  // across the slot above the heads; on short stages just under the header band
+  const top = Math.max(20, ctx.oy + 34);
+  const bh = e.sub ? 34 : 22;
+  const el = div().id(e.key).absolute().left(r2(clampX(base, bw, ctx))).top(r2(top + (age === 0 ? -10 : age >= 3 ? 10 : 0))).w(bw).h(bh)
+    .opacity(shown ? 1 : 0).transition("top", { duration: 450, easing: "ease-out" }).transition("opacity", { duration: 450 })
+    .flex().flex_col().items_center().justify_center().gap(2).px(8);
+  if (pm) el.bg("#1A1726F2").rounded(6).border(1).border_color("#FFFFFF33");
+  else el.bg("#16121FF2").rounded(2).border_t(2).border_b(2).border_color(C.xp);
+  if (e.text) {
+    el.child(div().max_w(bw - 16).truncate().text_size(pm ? 11 : 12).line_height(1).font_weight(800)
+      .text_color(pm ? CREAM : C.xp).child(String(e.text)));
+  }
+  if (e.sub) el.child(div().max_w(bw - 16).truncate().text_size(9.5).line_height(1).text_color(alpha(CREAM, 0.8)).child(String(e.sub)));
+  const out = [el];
+  if (!pm) {
+    // 12 confetti squares fall from the banner (age 1 → 2) and fade out
+    for (let i = 0; i < CONFETTI_N; i++) {
+      const cx0 = base + 6 + (jitter(`${e.key}c${i}`, 0, 1, 997) / 997) * (bw - 12);
+      const fall = 18 + jitter(`${e.key}f${i}`, 0, 1, 23);
+      const y = top + bh / 2 + (age <= 0 ? 0 : age === 1 ? fall : fall * 2.2);
+      out.push(div().id(`${e.key}/c${i}`).absolute().left(r2(cx0)).top(r2(y)).w(4).h(4).bg(CONFETTI[i % CONFETTI.length])
+        .opacity(age === 1 ? 1 : age === 2 ? 0.6 : 0)
+        .transition("top", { duration: 900, easing: "ease-in" }).transition("opacity", { duration: 900 }));
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Boss
 
@@ -687,10 +813,47 @@ function boss(b, ctx) {
     .transition("top", { duration: 900, easing: "ease-out" }).transition("opacity", { duration: 600 })
     .child(image(art(b.sprite ?? `boss/${b.bossId}.svg`)).absolute().left(0).top(0).w(w).h(h));
   if (b.tooltip) sprite.tooltip(b.tooltip);
+  const retreat = b.retreat;
+  if (retreat) {
+    // D§11.16 Retreat on the boss, with the sheet's confirm pattern: arm, then click again. GPUI
+    // fires on_click for each click of a double-click (click_count 1, then 2): only a fresh single
+    // click confirms, so a double-click on the boss arms and never retreats on its own.
+    sprite.cursor_pointer().on_click((e, cx) => {
+      cx.stop_propagation();
+      if (num(e?.click_count, 1) >= 2) return;
+      const ui = ctx.ui;
+      if (armed(b, ctx)) {
+        ui.armed = null;
+        ctx.act("retreat", retreat.args ?? {});
+      } else ui.armed = { key: b.key, tick: num(ctx.vm.tick, 0) };
+      cx.notify();
+    });
+  }
   out.push(sprite);
   for (const p of b.parts ?? []) out.push(part(b, p, ctx));
   if (!b.stamp && b.arena) out.push(ctx.H < SLIM_HUD_H ? bossHudSlim(b, ctx) : bossHud(b, ctx));
   return out;
+}
+
+/** The armed Retreat question (red pill) over the boss's lower body, painted over everything. */
+function armedPill(b, ctx) {
+  const text = String(b.retreat?.confirm ?? "");
+  const pw = monoW(text, 10) + 16;
+  const top = Math.max(20, ctx.oy + num(b.y, GROUND) - 44);
+  return div().id(`${b.key}/armed`).absolute().left(r2(clampX(b.x - pw / 2, pw, ctx))).top(r2(top)).w(pw).h(18).rounded(9)
+    .bg("#5A1620F2").border(1).border_color(C.hp).flex().items_center().justify_center()
+    .text_size(10).line_height(1).font_family(MONO).font_weight(800).text_color(CREAM).whitespace_nowrap().child(text);
+}
+
+/** Ticks a first click on the boss keeps Retreat armed. */
+const ARM_TICKS = 4;
+
+/** This boss's Retreat is armed (a first click less than ARM_TICKS ticks ago). */
+function armed(b, ctx) {
+  const a = ctx.ui?.armed;
+  if (!a || a.key !== b.key) return false;
+  const dt = num(ctx.vm?.tick, 0) - num(a.tick, 0);
+  return dt >= 0 && dt <= ARM_TICKS;
 }
 
 /** Below this stage height the boss HUD moves into the arena's header band (one 16 px row). */
@@ -830,6 +993,7 @@ function bossOverlays(b, ctx) {
       .transition("width", { duration: 300, easing: "ease-in" }).transition("height", { duration: 300, easing: "ease-in" })
       .transition("opacity", { duration: 150 }));
   }
+  if (b.retreat && armed(b, ctx)) out.push(armedPill(b, ctx));
   return out;
 }
 
@@ -912,9 +1076,15 @@ function levelUp(f, ctx) {
 function lootPillar(f, ctx) {
   const { oy } = ctx;
   const c = f.color ?? "#FF9A2E";
+  const col = div().id(f.key).absolute().left(r2(f.x - 24)).top(r2(oy + 20)).w(48).h(GROUND - 20).rounded(6).bg(alpha(c, 0.28))
+    .opacity(num(f.age, 0) >= 3 ? 0 : 1).transition("opacity", { duration: 600 });
+  const sh = f.sheet;
+  if (sh && sh.heroId != null) {
+    // D§11.16: the sheet opens on that item's compare card
+    col.cursor_pointer().on_click((_e, cx) => { cx.stop_propagation(); openSheetOn(sh.heroId, sh.itemUid, ctx); });
+  }
   return [
-    div().id(f.key).absolute().left(r2(f.x - 24)).top(r2(oy + 20)).w(48).h(GROUND - 20).rounded(6).bg(alpha(c, 0.28))
-      .opacity(num(f.age, 0) >= 3 ? 0 : 1).transition("opacity", { duration: 600 }),
+    col,
     div().id(`${f.key}/t`).absolute().left(r2(f.x - 40)).top(r2(oy + 24)).w(80).h(12).flex().justify_center()
       .text_size(9.5).line_height(1).font_family(MONO).font_weight(800).text_color(c).whitespace_nowrap()
       .opacity(num(f.age, 0) >= 3 ? 0 : 1).transition("opacity", { duration: 600 }).child(String(f.text ?? "")),
@@ -924,38 +1094,32 @@ function lootPillar(f, ctx) {
 // ---------------------------------------------------------------------------------------------
 // Header band messages, overflow chip, empty states
 
+/** Narrowest header note worth showing (truncated with an ellipsis below its full width). */
+const NOTE_MIN_W = 60;
+
 /**
- * The ≤ 3 s header note (D§11.15). It never covers a room title: it sits right-aligned in the
- * header band of the room with the most free header space, or, when no header has room for it,
- * just under the header band, centred on the widest room that is not the boss arena.
+ * The ≤ 3 s header note (D§11.15: "text only, inside the header band"). It never covers a room
+ * title and never leaves the band (below it, on short stages, are heads and "!" bubbles): it sits
+ * right-aligned in the header of the room with the most free header space, truncated when that
+ * space is narrower than the text, and is not shown when no header has NOTE_MIN_W px to spare.
+ * The boss arena's header holds the slim boss HUD on short stages, so it takes no note there.
  */
 function headerNote(n, ctx, rooms) {
   const text = String(n.text ?? "");
   const want = Math.min(ctx.W - 16, monoW(text, 10) + 24);
+  const arena = ctx.vm.boss?.arena ?? null;
   let best = null;
   for (const r of rooms) {
     const w = num(r.w, 0);
+    if (arena && ctx.H < SLIM_HUD_H && num(r.x, 0) + w > num(arena.x, 0) + 1 && num(r.x, 0) < num(arena.x, 0) + num(arena.w, 0) - 1) continue;
     const free = w - headerFit(r, w).used - 8;
     if (!best || free > best.free) best = { free, right: num(r.x, 0) + w - 4 };
   }
-  let left;
-  let top = 1;
-  if (best && best.free >= want) {
-    left = best.right - want;
-  } else {
-    // under the header band, never over the boss arena (its HUD lives there): left of it, or
-    // nowhere on a strip too narrow for both (the note is a 3 s nicety)
-    const arena = ctx.vm.boss?.arena ?? null;
-    const limit = arena ? num(arena.x, ctx.W) : ctx.W;
-    if (limit < want + 8) return null;
-    let wide = null;
-    for (const r of rooms) if (num(r.x, 0) < limit - 1 && (!wide || num(r.w, 0) > num(wide.w, 0))) wide = r;
-    left = wide ? num(wide.x, 0) + num(wide.w, 0) / 2 - want / 2 : limit / 2 - want / 2;
-    left = Math.max(1, Math.min(limit - want - 4, left));
-    top = 21;
-  }
-  const bw = want;
-  return div().id(n.key).absolute().left(r2(clampX(left, bw, ctx))).top(top).w(bw).h(16).rounded(8)
+  if (!best || best.free < Math.min(want, NOTE_MIN_W)) return null;
+  const bw = Math.min(want, best.free);
+  const left = best.right - bw;
+  const top = 1;
+  return div().id(n.key).absolute().left(r2(clampX(left, bw, ctx))).top(top).w(r2(bw)).h(16).rounded(8)
     .bg("#0B0A12EB").border(1).border_color(alpha(n.color ?? CREAM, 0.55))
     .flex().items_center().justify_center().px(8).truncate()
     .text_size(10).line_height(1).font_weight(700).text_color(n.color ?? CREAM).child(text);

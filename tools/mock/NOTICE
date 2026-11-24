@@ -1,0 +1,19 @@
+Third-party material in tools/mock (the Node stand-in for herdr's runtime; none of it is installed
+with the mod)
+
+tools/mock/herdr.d.ts
+    A verbatim copy of defaults/herdr.d.ts from herdr-app 0.1.17.
+    Licensed under the Apache License, Version 2.0 (LICENSE-APACHE-2.0 in this folder).
+
+tools/mock/herdr-commands.md
+    A verbatim copy of docs/commands.md from herdr-app 0.1.17.
+    Licensed under the Apache License, Version 2.0 (LICENSE-APACHE-2.0 in this folder).
+
+tools/mock/elements.mjs
+    Ports parts of gpui-kit's QuickJS prelude (vendor/gpui-kit/crates/shell/src/engine/quickjs/mod.rs
+    in herdr-app 0.1.17): element method behaviour and error messages. Modified for Node.
+    Copyright 2024 - 2026 Longbridge <https://longbridge.com>.
+    Licensed under the Apache License, Version 2.0 (LICENSE-APACHE-2.0 in this folder).
+
+Everything else in this repository is the project's own work under its own licence
+(package.json "license").

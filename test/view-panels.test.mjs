@@ -105,7 +105,7 @@ const anyItemUid = (world) => (world.state.herd.stash[0] || world.state.heroes.f
 const typeOf = (v) => (v === null ? "null" : Array.isArray(v) ? "array" : typeof v);
 // keys the ui typedefs allow to be null, with the type they have otherwise
 const NULLABLE = {
-  note: ["object", "string"], good: "boolean", tag: "string", quest: "string", fe: "string", focus: "object", weapon: "object", hat: "object",
+  note: ["object", "string"], good: "boolean", tag: "string", tagTip: "string", tagTab: "string", waiting: "string", quest: "string", fe: "string", focus: "object", weapon: "object", hat: "object",
   programIcon: "object", card: "object", squash: "object", delta: "object", pol: "string", cost: "string", tooltip: "string",
   tone: "string", confirm: "string", reroll: "object", prop: "object", vs: "string", score: "object", owner: "string",
   flavor: "string", learn: "object", lockText: "string", next: "string", cd: "string", sub: "string", color: "string",
@@ -777,14 +777,113 @@ function sampleItems(vm, heroL) {
   });
 }
 
+test("rules: a provisional class: the header tag links to Career, whose current class chip locks it (setClass, free)", () => {
+  const world = D.demoWorld("mid", NOW).world;
+  const hero = world.state.heroes.find((h) => h.cls > 0 && world.rt.live.has(h.id));
+  hero.prov = 1;
+  world.rt.version++;
+  const vm = V.sheetView(world, { heroId: hero.id, tab: "career", filter: FILTER });
+  assertShape(vm, S.scenarios.provisional, "provisional");
+  assert.equal(vm.header.tag, "provisional");
+  assert.equal(vm.header.tagTab, "career");
+  assert.match(vm.header.tagTip, /^Provisional class \(\d+ of \d+ tasks\): .* Lock it with its class chip on the Career tab\.$/);
+  const cur = vm.career.classes.options.find((o) => o.current);
+  assert.equal(cur.lock, true);
+  assert.equal(cur.enabled, true);
+  assert.equal(cur.confirm, `Lock ${cur.label}?`);
+  assert.match(cur.tooltip, /^Lock \w+ now \(free\)\. Provisional class/);
+  assert.ok(vm.career.classes.options.every((o) => o.lock === (o === cur)));
+  const r = W.command(world, cur.cmd, cur.args, NOW);
+  assert.equal(r.ok, true, r.error);
+  assert.equal(hero.prov, 0, "the same class locks it");
+  const after = V.sheetView(world, { heroId: hero.id, tab: "career", filter: FILTER });
+  assert.equal(after.header.tag, null);
+  assert.equal(after.header.tagTab, null);
+  assert.equal(after.header.tagTip, null);
+  assert.ok(after.career.classes.options.every((o) => o.lock === false));
+  // a locked class in an untouched world: no tag, no link
+  const plain = V.sheetView(demo("mid"), { heroId: demo("mid").state.heroes[0].id, tab: "gear", filter: FILTER }).header;
+  assert.equal(plain.tagTab, null);
+  assert.equal(plain.tagTip, null);
+});
+
+test("rules: the career boss card offers Retreat while its zone boss fight runs or is paused (D§11.16)", () => {
+  for (const paused of [false, true]) {
+    const world = D.demoWorld("boss", NOW).world;
+    if (paused) {
+      // a suspended fight lives only in herd.fight (D§9.5)
+      assert.ok(world.state.herd.fight, "the running fight is mirrored in herd.fight");
+      world.rt.fights = world.rt.fights.filter((f) => f.kind !== "boss");
+      world.rt.version++;
+    }
+    const heroId = world.state.heroes[0].id;
+    const b = V.sheetView(world, { heroId, tab: "career", filter: FILTER }).career.boss;
+    assert.match(b.status, paused ? /^Fight paused$/ : /^Fighting: \d+% left$/);
+    assert.equal(b.challenge.cmd, "retreat");
+    assert.deepEqual(b.challenge.args, {});
+    assert.equal(b.challenge.tone, "danger");
+    assert.equal(b.challenge.confirm, "Retreat? (a Postmortem)");
+    assert.equal(b.challenge.enabled, true);
+    const r = W.command(world, b.challenge.cmd, b.challenge.args, NOW);
+    assert.equal(r.ok, true, r.error);
+    const after = V.sheetView(world, { heroId, tab: "career", filter: FILTER }).career.boss;
+    assert.doesNotMatch(after.status, /^Fight/);
+    assert.notEqual(after.challenge?.cmd, "retreat");
+  }
+});
+
+test("rules: the Herd header gives the blocked count apart (waiting) so the panel can colour it", () => {
+  let some = 0, none = 0;
+  for (const kind of D.DEMO_KINDS) {
+    const h = V.herdView(demo(kind), { tab: "upgrades", filter: FILTER }).header;
+    if (/waiting for you/.test(h.sub)) {
+      some++;
+      assert.match(h.waiting, /^\d+ waiting for you$/, kind);
+      assert.ok(h.sub.endsWith(` · ${h.waiting}`), kind);
+    } else {
+      none++;
+      assert.equal(h.waiting, null, kind);
+    }
+  }
+  assert.ok(some > 0 && none > 0, `both cases covered (${some} / ${none})`);
+});
+
+test("rules: the item-score cache keeps only live heroes (Contractor churn does not grow it)", () => {
+  const { world, snapshot } = D.demoWorld("mid", NOW);
+  let now = NOW;
+  const hired = [];
+  for (let i = 1; i <= 12; i++) {
+    // an agent past today's roster becomes a Contractor (a fresh negative id each time); its gear
+    // sheet prices items; then it leaves
+    const ag = { ...snapshot.agents[0], address: `tc${i}`, pane: `p_tc${i}`, seq: 700 + i, focused: false };
+    now += 1000;
+    W.tick(world, { ...snapshot, nowMs: now, agents: [...snapshot.agents, ag] });
+    const id = world.rt.bind.get(`tc${i}`);
+    assert.ok(id < 0, "a Contractor");
+    hired.push(id);
+    assert.ok(V.sheetView(world, { heroId: id, tab: "gear", filter: FILTER, nowMs: now }).gear.stash.items.length > 0);
+    now += 1000;
+    W.tick(world, { ...snapshot, nowMs: now, agents: snapshot.agents });
+  }
+  assert.equal(new Set(hired).size, hired.length);
+  assert.equal(world.rt.contractors.size, 0, "every Contractor left");
+  const roster = new Set(world.state.heroes.map((h) => h.id));
+  let cached = P._scoreCacheIds();
+  assert.ok(cached.length <= 1, `at most the last Contractor stays until the next entry: ${cached}`);
+  for (const h of world.state.heroes) V.sheetView(world, { heroId: h.id, tab: "gear", filter: FILTER, nowMs: now });
+  cached = P._scoreCacheIds();
+  assert.ok(cached.every((id) => roster.has(id)), `only roster heroes: ${cached}`);
+  assert.ok(cached.length <= roster.size);
+});
+
 test("samples: every sample item is one the engine could make (name, tier base, affix slots, polish, required level)", () => {
   const problems = [];
   const views = [];
   for (const name of Object.keys(S.scenarios)) {
     const vm = S.scenarios[name];
     if (!vm || vm.missing) continue;
-    // Rue's and Juno's samples borrow Kip's gear for the Gear tab (viewFor): no level check there
-    const L = vm.heroId === 2 || vm.heroId === 7 ? null : Number(String(vm.header.level).replace(/^Lv /, ""));
+    // Rue's, Pip's and Juno's samples borrow Kip's gear for the Gear tab (viewFor): no level check there
+    const L = vm.heroId === 2 || vm.heroId === 5 || vm.heroId === 7 ? null : Number(String(vm.header.level).replace(/^Lv /, ""));
     for (const f of [{}, { focus: 921 }, { focus: 803 }, { focus: 2101 }]) views.push([`sheet/${name}`, S.viewFor(name, { tab: "gear", filter: f }), L]);
   }
   for (const name of Object.keys(H.scenarios)) for (const f of [{}, { focus: 921 }, { focus: 951 }]) views.push([`herd/${name}`, H.viewFor(name, { tab: "stash", filter: f }), null]);
@@ -846,4 +945,44 @@ test("perf: view + render per call stays well inside the 50 ms render budget in 
     worst = Math.max(worst, performance.now() - t0);
   }
   assert.ok(worst < 40, `worst view + render ${worst.toFixed(1)} ms`);
+});
+
+test("rules: args.save (host.saveStatus()) becomes the Herd panel's save band (D§13.4); none while the save is fine", () => {
+  const world = demo("mid");
+  assert.equal(V.herdView(world, { tab: "roster", filter: FILTER }).save, null);
+  const st = {
+    readOnly: true, notSaving: false, restoredFrom: null, title: "Save is read-only",
+    message: "This save is from a newer version of Down the Stack, so it was opened read-only.",
+    detail: "Save is from a newer version (v2); opened read-only", since: NOW,
+  };
+  for (const tab of HERD_TABS) {
+    const vm = V.herdView(world, { tab, filter: FILTER, save: st });
+    assert.deepEqual(vm.save, { title: st.title, text: st.message, tooltip: st.detail }, tab);
+    assertShape(vm, { ...HERD_SAMPLE[tab], save: H.scenarios.saveReadOnly.save }, `save/${tab}`);
+  }
+  // the memo keys on it: the band goes away with the trouble, without a world change
+  assert.equal(V.herdView(world, { tab: "roster", filter: FILTER }).save, null);
+  // a status without a title (an older host) still reads
+  assert.equal(V.herdView(world, { tab: "roster", filter: FILTER, save: { notSaving: true, message: "x" } }).save.title, "Not saving");
+});
+
+test("rules: digest lines without a date read \"earlier\" (never Jan 1); first clears come from herd.bossAt", () => {
+  const world = demo("mid");
+  const herd = world.state.herd;
+  // a kill the journal no longer has, before the digest was ever read: herd.digest gives at null
+  herd.digestAt = 0;
+  herd.digestSnap = null;
+  herd.log = herd.log.filter((e) => e[1] !== "boss");
+  herd.bossKills[0] = (herd.bossKills[0] || 0) + 1;
+  world.rt.version++;
+  const d = V.herdView(world, { tab: "digest", filter: FILTER }).digest;
+  const lines = d.sections.flatMap((s) => s.lines);
+  assert.ok(lines.length > 0);
+  for (const l of lines) assert.doesNotMatch(String(l.sub ?? ""), /^Jan 1$/, l.text);
+  assert.ok(lines.some((l) => l.sub === "earlier"), "an undated kill says so");
+  // the bosses tab: the first-clear date survives the journal (herd.bossAt)
+  const at = DATA.BOSSES.findIndex((_, bi) => herd.boss[bi]);
+  assert.ok(at >= 0);
+  const row = V.herdView(world, { tab: "bosses", filter: FILTER }).bosses.bosses.find((r) => r.key === DATA.BOSSES[at].id);
+  assert.match(String(row.firstClear), /^First fixed \w+ \d+$/);
 });

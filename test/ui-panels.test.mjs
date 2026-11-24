@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 const M = await import("../tools/mock/index.mjs");
-const { View } = await import("gpui-kit");
+const { View, div, svg } = await import("gpui-kit");
 const SheetMod = await import("../mods/mapledr/ui/sheet.js");
 const HerdMod = await import("../mods/mapledr/ui/herdpanel.js");
 const S = await import("../tools/vm-samples/sheet.mjs");
@@ -364,6 +364,134 @@ test("sheet: props.focus opens on that item's card (loot pillar)", async () => {
   assert.equal(lastView(host).filter.focus, 921);
 });
 
+test("sheet: the provisional tag opens Career; the current class chip locks it (asks first); the boss card retreats", async () => {
+  const { m, host } = await mount("sheet", "provisionalGear");
+  const tagNode = m.node("sh-tag");
+  assert.ok(tagNode, "the header tag");
+  assert.ok(tagNode.last("tooltip")[0].startsWith("Provisional class (9 of 15 tasks)"));
+  click(m, "sh-tag");
+  assert.equal(lastView(host).tab, "career", "the tag is a link to Career");
+  assert.deepEqual(host.commands, []);
+  // on Career the tag is a plain label
+  assert.equal(m.node("sh-tag").handlers.on_click, undefined);
+  // the provisional current class: dashed, with a lock icon; first click arms, second locks
+  const chip = m.node("sh-cls-cls:hotfixer");
+  assert.ok(chip.has("border_dashed"));
+  assert.ok(m.findAll((n) => n.type === "svg" && n.src.endsWith("ui/lock.svg") && n.parent === chip).length === 1);
+  click(m, "sh-cls-cls:hotfixer");
+  assert.ok(m.text().includes("Lock Hotfixer?"));
+  assert.deepEqual(host.commands, []);
+  click(m, "sh-cls-cls:hotfixer");
+  assert.deepEqual(host.commands, [["setClass", { heroId: 5, cls: "hotfixer" }]]);
+  // the zone boss fight runs: the boss card's button is a (confirmed) Retreat
+  assert.ok(m.text().includes("Fighting: 81% left"));
+  click(m, "sh-boss-go");
+  assert.ok(m.text().includes("Retreat? (a Postmortem)"));
+  click(m, "sh-boss-go");
+  assert.deepEqual(host.commands.at(-1), ["retreat", {}]);
+  // a locked current class stays inert; other tags (off duty) are plain labels
+  const rue = await mount("sheet", "career");
+  assert.equal(rue.m.node("sh-tag"), null);
+  click(rue.m, "sh-cls-cls:hotfixer");
+  assert.deepEqual(rue.host.commands, []);
+  const benched = await mount("sheet", "benched");
+  assert.equal(benched.m.node("sh-tag").handlers.on_click, undefined);
+  assert.ok(m.ok && rue.m.ok && benched.m.ok, errorsOf(m).join("; "));
+});
+
+// ---------------------------------------------------------------------------------------------
+// hover and icons, contrast
+
+/**
+ * svg() icons under an element that hovers its text colour. herdr gives an svg its colour once,
+ * from the static text_color it inherits when it builds the element (materialize.rs, the Svg arm);
+ * the parent's hover((s) => s.text_color(..)) never reaches it, so the icon would not follow the
+ * label. An element on the way with its own static text_color stops the walk (its text does not
+ * follow the hover either).
+ */
+function hoverIconMisses(m) {
+  const out = [];
+  const walk = (n, root) => {
+    for (const c of [...n.children, ...Object.values(n.slots)]) {
+      if (c.type === "svg") { out.push(`${root.id ?? root.type} → ${c.src}`); continue; }
+      if (c.type === "text" || c.has("text_color")) continue;
+      walk(c, root);
+    }
+  };
+  for (const n of m.findAll((x) => (x.state.hover ?? []).some(([k]) => k === "text_color"))) walk(n, n);
+  return out;
+}
+
+test("icons: no svg sits under a hover text_color (herdr would not recolour it); every scenario of both dialogs", async () => {
+  // the check itself catches the pattern
+  M.resetState();
+  const probe = await M.mountView(class extends View {
+    render() {
+      return div().id("probe").hover((s) => s.text_color("#ffffff")).child(div().child(svg("mods/mapledr/art/ui/close.svg").w(12).h(12)));
+    }
+  }, { props: {} });
+  probe.render();
+  assert.deepEqual(hoverIconMisses(probe), ["probe → mods/mapledr/art/ui/close.svg"]);
+  for (const kind of ["sheet", "herd"]) {
+    const { samples } = KIND[kind];
+    for (const name of Object.keys(samples.scenarios)) {
+      for (const theme of THEMES) {
+        const { m } = await mount(kind, name, { theme });
+        assert.deepEqual(hoverIconMisses(m), [], `${kind}/${name} ${theme}`);
+      }
+    }
+  }
+});
+
+test("tabs, icon buttons and slot chips hover with their background; icons carry the label's colour", async () => {
+  for (const [kind, name, prefix] of [["sheet", "gear", "sh"], ["herd", "stash", "hd"]]) {
+    for (const theme of THEMES) {
+      const { m, host } = await mount(kind, name, { theme });
+      const t = SheetMod.dialogTheme(SheetMod.dialogTokens());
+      const tabs = m.findAll((n) => typeof n.id === "string" && n.id.startsWith(`${prefix}-tab-`));
+      assert.ok(tabs.length >= 5);
+      const current = lastView(host).tab;
+      for (const tb of tabs) {
+        const on = tb.id === `${prefix}-tab-${current}`;
+        assert.equal(tb.last("text_color")[0], on ? t.fg : t.muted, `${kind} ${tb.id} label colour (muted when inactive)`);
+        assert.deepEqual(tb.state.hover.map(([k]) => k), ["bg"], `${kind} ${tb.id} hovers its background`);
+        const icon = tb.children.find((c) => c.type === "svg");
+        assert.equal(icon.last("text_color")[0], tb.last("text_color")[0], `${kind} ${tb.id} icon = label colour`);
+      }
+      for (const id of [`${prefix}-close`, `${prefix}-f-slot-hat`]) {
+        const n = m.node(id);
+        assert.ok(n, id);
+        assert.deepEqual(n.state.hover.map(([k]) => k), ["bg"], `${id} hovers its background`);
+        assert.ok(n.children.find((c) => c.type === "svg").has("text_color"), `${id} icon has its own colour`);
+      }
+      // label chips still brighten their text on hover
+      assert.ok(m.node(`${prefix}-f-usable`).state.hover.some(([k]) => k === "text_color"));
+    }
+  }
+});
+
+test("herd header: the counts in muted, the waiting part in the blocked colour; the sheet's status line in muted", async () => {
+  const { ink } = await import("../mods/mapledr/ui/party.js");
+  const { C } = await import("../mods/mapledr/ui/kit.js");
+  for (const theme of THEMES) {
+    const { m } = await mount("herd", "upgrades", { theme });
+    const t = SheetMod.dialogTheme(SheetMod.dialogTokens());
+    const textNode = (s) => m.findAll((n) => n.type === "text" && n.text === s)[0]?.parent ?? null;
+    const counts = textNode("9 heroes · 2 working ·");
+    const waiting = textNode("1 waiting for you");
+    assert.ok(counts && waiting, theme);
+    assert.equal(waiting.last("text_color")[0], ink(C.blocked, t), theme);
+    assert.equal(counts.parent.last("text_color")[0], t.muted, theme);
+    // nobody waiting: one muted line
+    const quiet = await mount("herd", "stashEmpty", { theme });
+    const line = quiet.m.findAll((n) => n.type === "text" && n.text === "1 hero · 1 working")[0]?.parent;
+    assert.equal(line.last("text_color")[0], t.muted, theme);
+    const sheet = await mount("sheet", "gear", { theme });
+    const sub = sheet.m.findAll((n) => n.type === "text" && n.text.startsWith("herdr-app · Claude Code"))[0]?.parent;
+    assert.equal(sub.last("text_color")[0], t.muted, theme);
+  }
+});
+
 // ---------------------------------------------------------------------------------------------
 // herd behaviour
 
@@ -495,4 +623,21 @@ test("herd: mapledr.herd closes the panel; sheet and calm act like the chrome ro
 test("herd: props.tab opens that tab (the sidebar's settings button)", async () => {
   const { host } = await mount("herd", "upgrades", { props: { tab: "settings" } });
   assert.equal(lastView(host).tab, "settings");
+});
+
+test("herd: a save in trouble shows the band under the header (D§13.4), with the full text in its tooltip", async () => {
+  for (const theme of THEMES) {
+    const { m } = await mount("herd", "saveReadOnly", { theme });
+    assertClean(m, `saveReadOnly ${theme}`);
+    const band = m.node("hd-save");
+    assert.ok(band, theme);
+    assert.ok(m.findAll((n) => n.type === "text" && n.text === "Save is read-only").length === 1, theme);
+    assert.match(band.last("tooltip")[0], /newer version/);
+    // the tabs still switch with the band shown, and it stays
+    m.fire("hd-tab-stash");
+    m.render();
+    assert.ok(m.node("hd-save"), `${theme}: the band stays on another tab`);
+  }
+  const fine = await mount("herd", "upgrades");
+  assert.equal(fine.m.node("hd-save"), null, "no band while the save is fine");
 });

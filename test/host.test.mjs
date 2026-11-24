@@ -1,12 +1,16 @@
 // GameHost (mods/mapledr/host.js) through the mock herdr runtime: one shared world per module
 // graph, the 900 ms pump gate, the snapshot from herdr's live data, the save policy (expected
-// text, save.bak, conflicts), corrupt and newer-version saves, checking() without IO, hot reload
-// resuming from the save, the view memo, and the dialog registry.
+// text, save.bak, conflicts, our own writes landing unanswered, flush on close), corrupt,
+// checksum-only and newer-version saves, unreadable saves, the save status shown to the player,
+// checking() without IO, hot reload taking the previous build's world over, the broadcast only
+// while a copy is shown, the view memo, the dialog registry, and mod.clone.
 
 import "../tools/mock/register.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
 
 const M = await import("../tools/mock/index.mjs");
 const FX = await import("../tools/fixtures.mjs");
@@ -85,7 +89,8 @@ test("pump: at most once per 900 ms, snapshot from herdr's live data, version an
   const snap = host.snapshot(NOW + 5000);
   assert.equal(snap.nowMs, NOW + 5000);
   assert.deepEqual(snap.agents.map((a) => a.address), ["t1", "t2", "t3", "t4", "t5", "t6"]);
-  assert.deepEqual(Object.keys(snap.agents[0]).sort(), ["address", "app", "focused", "pane", "pane_name", "pinned", "program", "seq", "space", "space_name", "status", "tab", "tab_index", "tab_name", "title"].sort());
+  assert.deepEqual(Object.keys(snap.agents[0]).sort(), ["address", "app", "focused", "pane", "pane_name", "parent", "pinned", "program", "seq", "space", "space_name", "status", "tab", "tab_index", "tab_name", "title"].sort());
+  assert.equal(snap.agents[0].parent, null);
   assert.deepEqual(snap.subagents.map((s) => [s.address, s.parent, s.status]), [["s5a", "t5", "working"], ["s5b", "t5", "blocked"]]);
   assert.equal(snap.focusedTerminal, "t2");
   assert.equal(snap.windowActive, true);
@@ -272,24 +277,132 @@ test("corrupt save.json → save.bak is loaded, save.broken keeps the bad text, 
   assert.deepEqual(mod.errors, [], "IO trouble is not a script error");
 });
 
-test("corrupt save and corrupt bak → a fresh world; save.broken is written once and never overwritten", async () => {
+/** Every save.broken* file: name → text. */
+const names = () => M.memfs.readdir(DIR).map((e) => e[0]);
+const brokenFiles = () => Object.fromEntries(names().filter((n) => n.startsWith("save.broken")).map((n) => [n, M.memfs.readText(`${DIR}/${n}`)]));
+
+test("corrupt save and corrupt bak → a fresh world; both texts kept aside, an earlier save.broken never overwritten", async () => {
   M.resetState();
-  const mod = await mount({ role: "hud" }, { fixture: {}, files: { [SAVE]: "{not json", [BAK]: '{"v":1,"herd":{},"crc":"00000000"}' } });
+  const mod = await mount({ role: "hud" }, { fixture: {}, files: { [SAVE]: "{not json", [BAK]: '{"v":1,"herd":' } });
   const host = await hostOf(mod);
   assert.equal(host.stats.loadedFrom, "fresh");
   assert.equal(host.world.state.heroes.length, 0);
   assert.equal(M.memfs.readText(BROKEN), "{not json");
+  // the bad bak is kept too: the second save after this one rotates over save.bak
+  assert.deepEqual(Object.values(brokenFiles()).sort(), ["{not json", '{"v":1,"herd":'].sort());
   await M.tickAll(3000);
   assert.equal(writes(SAVE)[0].expected, "{not json");
   assert.equal(writes(BAK).length, 0, "the corrupt text never becomes the bak");
   await M.tickAll(31000);
   assert.equal(M.memfs.readText(BAK), writes(SAVE)[0].text, "the next save backs up the first good one");
-  // a second broken load (another session) keeps the first save.broken
+  const st = host.saveStatus();
+  assert.equal(st.restoredFrom, "fresh");
+  assert.match(st.message, /new herd started/);
+  // a second broken load (another session) keeps the first save.broken and adds its own
   M.memfs.write(SAVE, "{still not json", { mkdirs: true });
   const again = await mount({ role: "hud" }, { fixture: null });
   const h2 = await hostOf(again);
   assert.equal(h2.stats.loadedFrom, "bak", "the first session's good save is the bak now");
   assert.equal(M.memfs.readText(BROKEN), "{not json");
+  assert.ok(Object.values(brokenFiles()).includes("{still not json"), JSON.stringify(Object.keys(brokenFiles())));
+  for (const w of M.calls().writeTextFile.filter((c) => c.path.startsWith(BROKEN))) assert.equal(w.expected, null, "kept-aside files are only ever created");
+});
+
+test("save.json missing but save.bak there: the herd comes back from the bak, never a new herd that rotates over it", async () => {
+  M.resetState();
+  const good = saveOf("idle");
+  const mod = await mount({ role: "hud" }, { fixture: {}, files: { [BAK]: good } });
+  const host = await hostOf(mod);
+  assert.equal(host.stats.loadedFrom, "bak");
+  assert.equal(host.world.state.heroes.length, 4);
+  assert.equal(host.saveStatus().message, "The save file was missing, so the herd was restored from its backup (save.bak).");
+  await M.tickAll(3000);
+  assert.equal(writes(SAVE)[0].expected, null, "save.json is created again");
+  assert.equal(writes(BAK).length, 0);
+  await M.tickAll(31000);
+  const again = await mount({ role: "hud" }, { fixture: null });
+  const h2 = await hostOf(again);
+  assert.equal(h2.stats.loadedFrom, "save");
+  assert.equal(h2.world.state.heroes.length, 4);
+  assert.deepEqual(mod.errors, []);
+});
+
+test("the restore notice says what was found and what it was kept as, nothing more", async () => {
+  // a damaged save.json and no bak: no backup was damaged, one file was kept
+  M.resetState();
+  let mod = await mount({ role: "hud" }, { fixture: {}, files: { [SAVE]: "{not json" } });
+  let st = (await hostOf(mod)).saveStatus();
+  assert.equal(st.restoredFrom, "fresh");
+  assert.equal(st.message, "The save file was damaged and there was no backup, so a new herd started. The damaged file was kept as save.broken.");
+  // an earlier incident's save.broken stays: the notice names the file the text really went to
+  M.resetState();
+  mod = await mount({ role: "hud" }, { fixture: {}, files: { [SAVE]: "{not json", [BAK]: saveOf("idle"), [BROKEN]: "an old incident" } });
+  st = (await hostOf(mod)).saveStatus();
+  const kept = Object.keys(brokenFiles()).find((n) => n !== "save.broken");
+  assert.ok(kept, JSON.stringify(Object.keys(brokenFiles())));
+  assert.equal(st.message, `The save file was damaged, so the herd was restored from its backup (save.bak). The damaged file was kept as ${kept}.`);
+  assert.equal(M.memfs.readText(BROKEN), "an old incident");
+  // an unreadable save.json is not called damaged, and nothing is said to be kept
+  M.resetState();
+  const fixture = { readError: (p) => (p === SAVE ? new Error("os error 32") : null) };
+  mod = await mount({ role: "hud" }, { fixture, files: { [SAVE]: saveOf("idle"), [BAK]: saveOf("idle", NOW - 120000) } });
+  const host = await hostOf(mod);
+  await M.tickAll(11000);
+  assert.equal(host.stats.loadedFrom, "bak");
+  assert.doesNotMatch(host.saveStatus().message, /damaged|kept as/);
+  assert.match(host.saveStatus().message, /couldn't be read, so the herd was restored from its backup/);
+});
+
+test("the stage notice's label names the kind of trouble (a checksum load is not a restore from the backup)", async () => {
+  const edited = saveOf("late").replace(/"gold":(\d)/, (m, d) => `"gold":${(Number(d) + 1) % 10}`);
+  const labels = {};
+  for (const [name, files] of [["unchecked", { [SAVE]: edited }], ["bak", { [SAVE]: "{not json", [BAK]: saveOf("idle") }], ["fresh", { [SAVE]: "{not json" }]]) {
+    M.resetState();
+    const mod = await mount({ role: "stage" }, { fixture: FX.demoFixture("idle"), files });
+    assert.equal((await hostOf(mod)).stats.loadedFrom, name);
+    mod.size(960, 200);
+    mod.render();
+    const notice = mod.node("mdr-save-notice");
+    assert.ok(notice, name);
+    const parts = [];
+    M.walkLive(notice, (n) => { if (n.type === "text") parts.push(n.text); });
+    labels[name] = parts.join(" ");
+  }
+  assert.match(labels.unchecked, /checksum/);
+  assert.doesNotMatch(labels.unchecked, /backup/);
+  assert.match(labels.bak, /restored from backup/);
+  assert.match(labels.fresh, /new herd/);
+});
+
+test("a herd whose only fault is its checksum (both files) loads anyway instead of a new herd", async () => {
+  M.resetState();
+  const good = saveOf("late");
+  // a one-digit edit of the gold (an editor, a stray byte): JSON and shape fine, CRC wrong
+  const edited = good.replace(/"gold":(\d)/, (m, d) => `"gold":${(Number(d) + 1) % 10}`);
+  assert.notEqual(edited, good);
+  const mod = await mount({ role: "hud" }, { fixture: {}, files: { [SAVE]: edited, [BAK]: edited + "x" } });
+  const host = await hostOf(mod);
+  assert.equal(host.stats.loadedFrom, "unchecked");
+  assert.equal(host.world.state.heroes.length, demoWorld("late", NOW - 60000).world.state.heroes.length, "the herd, not a new one");
+  assert.equal(M.memfs.readText(BROKEN), edited, "the original text is kept");
+  assert.match(host.saveStatus().message, /checksum/);
+  assert.doesNotMatch(host.saveStatus().message, /backup/, "not restored from the backup");
+  await M.tickAll(3000);
+  assert.equal(writes(SAVE).length, 1, "replaced (re-signed) soon after");
+  assert.equal(host.lastGood, true);
+  await M.tickAll(31000);
+  const again = await mount({ role: "hud" }, { fixture: null });
+  assert.equal((await hostOf(again)).stats.loadedFrom, "save", "the next session loads it normally");
+});
+
+test("a save with an editor's final newline (or a BOM) loads as the save", async () => {
+  M.resetState();
+  const mod = await mount({ role: "hud" }, { fixture: {}, files: { [SAVE]: "\ufeff" + saveOf("idle") + "\n" } });
+  const host = await hostOf(mod);
+  assert.equal(host.stats.loadedFrom, "save");
+  assert.equal(host.world.state.heroes.length, 4);
+  assert.equal(host.saveStatus(), null);
+  assert.deepEqual(brokenFiles(), {});
 });
 
 test("a save from a newer version loads read-only and is never written", async () => {
@@ -299,6 +412,24 @@ test("a save from a newer version loads read-only and is never written", async (
   const host = await hostOf(mod);
   assert.equal(host.world.rt.readOnly, true);
   assert.equal(host.world.state.heroes.length, 4);
+  // the player is told (D§13.4): the save status, the views' args.save, the stage notice
+  const st = host.saveStatus();
+  assert.equal(st.readOnly, true);
+  assert.match(st.message, /newer version/);
+  assert.ok(host.hasErrors(), "the debug dot shows too");
+  assert.deepEqual(host.viewArgs("herd", { tab: "roster" }).save, st);
+  assert.equal(st.title, "Save is read-only");
+  assert.deepEqual(host.view("herd", { tab: "roster" }).save, { title: st.title, text: st.message, tooltip: st.detail }, "the Herd panel's band (D§13.4)");
+  assert.deepEqual(host.viewArgs("hud", {}).save, st);
+  assert.equal(host.viewArgs("nameplate", { terminal: "t1" }).save, undefined);
+  mod.size(960, 200);
+  mod.render();
+  assert.ok(mod.node("mdr-save-notice"), "the stage shows a save notice");
+  assert.match(mod.find("mdr-save-notice").methods.find((m) => m[0] === "tooltip")[1][0], /read-only/);
+  mod.fire("mdr-save-notice");
+  await M.flush();
+  mod.render();
+  assert.equal(mod.node("mdr-save-notice"), null, "dismissed by a click");
   await M.tickAll(35000);
   const r = host.command("setting", { key: "calm", value: true });
   assert.equal(r.ok, false);
@@ -331,7 +462,7 @@ test("checking(): an in-memory world, no IO, no timers, no commands", async () =
   M.setChecking(false);
 });
 
-test("hot reload wipes module state; the new host resumes from the save", async () => {
+test("hot reload: the new build takes the previous build's world over (no rollback to the last save)", async () => {
   M.resetState();
   const mod = await mount({ role: "stage" }, { fixture: FX.demoFixture("first-day") });
   const h1 = await hostOf(mod);
@@ -340,18 +471,77 @@ test("hot reload wipes module state; the new host resumes from the save", async 
   assert.ok(saved);
   const savedTick = JSON.parse(saved).tick;
   assert.ok(savedTick > 0);
+  await M.tickAll(20000); // progress the file does not have yet
+  const liveTick = h1.world.state.herd.tick;
+  assert.ok(liveTick > savedTick + 10, `${liveTick} vs ${savedTick}`);
   const ids = h1.world.state.heroes.map((h) => [h.id, h.name]);
   await mod.reload();
   const h2 = await hostOf(mod);
   assert.notEqual(h2, h1, "module state is new");
-  assert.equal(h2.stats.loadedFrom, "save");
-  assert.equal(h2.lastText, saved);
+  assert.equal(h2.stats.loadedFrom, "reload");
+  assert.equal(h2.lastText, M.memfs.readText(SAVE), "the expected text is the file's");
   assert.deepEqual(h2.world.state.heroes.map((h) => [h.id, h.name]), ids);
-  assert.equal(h2.world.state.herd.tick, savedTick);
-  // and it keeps going: the agents rebind to the same heroes
-  await M.tickAll(2000);
+  assert.ok(h2.world.state.herd.tick >= liveTick, `tick ${h2.world.state.herd.tick} < ${liveTick}: rolled back`);
+  assert.equal(h1.retired, true, "the old host never writes again");
+  // the progress reaches the disk soon, and the agents rebind to the same heroes
+  await M.tickAll(3000);
+  assert.ok(JSON.parse(M.memfs.readText(SAVE)).tick >= liveTick);
   assert.deepEqual([...h2.world.rt.bind.values()].sort(), ids.map((x) => x[0]).sort());
   assert.deepEqual(mod.errors, []);
+});
+
+test("hot reload of every copy: one new module scope and one new host for all of them", async () => {
+  M.resetState();
+  const a = await mount({ role: "stage" }, { graph: "hr", fixture: FX.demoFixture("mid") });
+  const b = await mount({ role: "party" }, { graph: "hr", fixture: null });
+  const c = await mount({ role: "nameplate", pane: "p_t1", terminal: "t1" }, { graph: "hr", fixture: null });
+  const h1 = await hostOf(a);
+  await M.tickAll(5000);
+  const tick = h1.world.state.herd.tick;
+  await M.reloadAll([a, b, c]);
+  const h2 = await hostOf(a);
+  assert.notEqual(h2, h1);
+  assert.equal(await hostOf(b), h2);
+  assert.equal(await hostOf(c), h2);
+  assert.equal(a.view.host, h2);
+  assert.equal(c.view.host, h2);
+  assert.equal(h2.stats.loadedFrom, "reload");
+  assert.ok(h2.world.state.herd.tick >= tick);
+  // the old builds' timers are gone from the clock: one 1 s timer per copy remains
+  assert.equal(M.clock.timers.length, 3);
+  await M.tickAll(3000);
+  for (const m of [a, b, c]) assert.deepEqual(m.errors, []);
+});
+
+test("hot reload hands over a world whose load finished after its mount (a retried read), another VM mounted meanwhile", async () => {
+  M.resetState();
+  let fails = 1;
+  const fixture = { ...FX.demoFixture("mid"), readError: (p) => (p === SAVE && fails-- > 0 ? new Error("os error 32") : null) };
+  const a = await mount({ role: "stage" }, { graph: "late-a", fixture });
+  const h1 = await hostOf(a);
+  assert.equal(h1.ready, false, "still loading: the read is retried after 1 s");
+  await M.tickAll(3000);
+  assert.equal(h1.stats.loadedFrom, "new");
+  const b = await mount({ role: "stage" }, { graph: "late-b", fixture: null }); // another window
+  const hb = await hostOf(b);
+  await M.tickAll(5000);
+  await M.reloadAll([a]);
+  const h2 = await hostOf(a);
+  assert.notEqual(h2, h1);
+  assert.equal(h2.stats.loadedFrom, "reload", "the late registration belongs to its own VM");
+  assert.equal(h1.retired, true);
+  assert.equal(hb.retired, false, "the other window's host is not touched");
+});
+
+test("a new VM (or another window) never takes another VM's world: it loads the file", async () => {
+  M.resetState();
+  const a = await mount({ role: "stage" }, { graph: "vm-a", fixture: FX.demoFixture("mid") });
+  const ha = await hostOf(a);
+  await M.tickAll(2000);
+  const b = await mount({ role: "stage" }, { graph: "vm-b", fixture: null });
+  const hb = await hostOf(b);
+  assert.notEqual(hb.world, ha.world);
+  assert.equal(hb.stats.loadedFrom, ha.lastText == null ? "new" : "save");
 });
 
 test("a load whose task died is retried by the next copy's timer", async () => {
@@ -368,6 +558,99 @@ test("a load whose task died is retried by the next copy's timer", async () => {
   await M.tickAll(6000);
   assert.equal(host.ready, true, "retried after 10 s");
   assert.equal(host.world.state.heroes.length, 4);
+});
+
+test("a sub-agent kept in a pane (listed in agents()) stays its parent's Forkling (D§2.7)", async () => {
+  M.resetState();
+  const P = M.PROGRAMS.claude;
+  const agent = (address, seq) => M.agent(seq, { address, pane: `p_${address}`, status: "working", seq, program: P, title: `task ${address}` });
+  const t1 = agent("t1", 1);
+  const t2 = agent("t2", 2);
+  const fixture = {
+    agents: [t1, t2],
+    terminals: [M.terminalFor(t1), { ...M.terminalFor(t2), parent: "t1" }],
+  };
+  const mod = await mount({ role: "stage" }, { fixture });
+  const host = await hostOf(mod);
+  const snap = host.snapshot(Date.now());
+  assert.deepEqual(snap.agents.map((a) => [a.address, a.parent]), [["t1", null], ["t2", "t1"]]);
+  await M.tickAll(3000);
+  assert.equal(host.world.state.heroes.length, 1, "one hero, not two");
+  const hero = host.world.state.heroes[0];
+  assert.equal(host.heroForTerminal("t1"), hero.id);
+  assert.equal(host.heroForTerminal("t2"), hero.id, "t2 is a Forkling of t1's hero");
+  assert.deepEqual(mod.errors, []);
+});
+
+test("tab ids that name Object.prototype members (a herdr.tab label) neither throw nor vanish", async () => {
+  M.resetState();
+  const fx = FX.demoFixture("mid");
+  const tabs = ["constructor", "__proto__", "toString", "hasOwnProperty"].map((id, i) => ({ ...fx.spaces[0].tabs[0], id, index: 10 + i, working_since: 1000 + i }));
+  const mod = await mount({ role: "hud" }, { fixture: { ...fx, spaces: [{ ...fx.spaces[0], tabs: [...fx.spaces[0].tabs, ...tabs] }, ...fx.spaces.slice(1)] } });
+  const host = await hostOf(mod);
+  const snap = host.snapshot(NOW);
+  assert.equal(Object.getPrototypeOf(snap.tabs), null, "no prototype: assigning such a key cannot hit a frozen Object.prototype (herdr freezes it)");
+  for (const [i, t] of tabs.entries()) {
+    assert.ok(Object.prototype.hasOwnProperty.call(snap.tabs, t.id), t.id);
+    assert.equal(snap.tabs[t.id].working_since, 1000 + i);
+  }
+  assert.equal(host.pump(NOW + 1000), true);
+  assert.deepEqual(mod.errors, []);
+});
+
+test("broadcast: only while a copy can be shown (herdr toasts \"mapledr.tick failed\" when none listens)", async () => {
+  M.resetState();
+  const fx = FX.demoFixture("mid");
+  const stage = await mount({ role: "stage" }, { graph: "bc", fixture: fx });
+  const party = await mount({ role: "party" }, { graph: "bc", fixture: null });
+  const host = await hostOf(stage);
+  const runs = () => M.calls().run.filter((r) => r.name === "mapledr.tick").length;
+  await M.tickAll(3000);
+  const n0 = runs();
+  assert.ok(n0 >= 2, "broadcasts while shown");
+  // the sidebar and the stage hidden (ctrl-shift-b, ctrl-shift-g) and no tab open
+  const lay = JSON.parse(JSON.stringify(fx.layout));
+  const hide = (n) => { if (n.id === "sidebar" || n.id === "stage") n.hidden = true; for (const k of n.children ?? []) hide(k); };
+  hide(lay);
+  M.updateFixture({ layout: lay, focused: null });
+  stage.hide();
+  party.hide();
+  await M.tickAll(10000);
+  assert.equal(runs(), n0, "no broadcast without a shown copy");
+  assert.deepEqual(M.calls().toasts, []);
+  assert.ok(host.world.rt.tick > 0, "the world still advanced");
+  // with a pane open, the pane headers are shown copies
+  M.updateFixture({ focused: fx.focused });
+  assert.equal(host.mayBeShown(), true);
+  M.updateFixture({ focused: null });
+  // a copy shown again draws, and the broadcasts resume
+  M.updateFixture({ layout: fx.layout });
+  stage.hide(false);
+  party.hide(false);
+  await M.tickAll(3000);
+  assert.ok(runs() > n0);
+  assert.deepEqual(M.calls().toasts, []);
+  for (const m of [stage, party]) assert.deepEqual(m.errors, []);
+});
+
+test("mayBeShown follows herdr's visibility: a stack shows its active visible child, floats and stack headers count", async () => {
+  M.resetState();
+  const mod = await mount({ role: "hud" }, { fixture: { focused: null } });
+  const host = await hostOf(mod);
+  const block = (id, content, extra = {}) => ({ id, type: "block", content, ...extra });
+  const ours = { mod: "mapledr", props: { role: "stage" } };
+  const shown = (layout) => { M.updateFixture({ layout }); return host.mayBeShown(); };
+  // the active child hidden: herdr shows the first visible child instead (layout.rs active_child)
+  assert.equal(shown({ id: "r", type: "stack", active: "a", children: [block("a", { mod: "files" }, { hidden: true }), block("b", ours)] }), true);
+  assert.equal(shown({ id: "r", type: "stack", active: "a", children: [block("a", { mod: "files" }), block("b", ours)] }), false);
+  // a block floating over a shown node, unless the float is hidden
+  assert.equal(shown({ id: "r", type: "column", children: [block("t", { mod: "tabs" })], floating: [{ id: "f", content: ours }] }), true);
+  assert.equal(shown({ id: "r", type: "column", children: [block("t", { mod: "tabs" })], floating: [{ id: "f", content: ours, hidden: true }] }), false);
+  // a stack's header block shows with its stack
+  assert.equal(shown({ id: "r", type: "stack", header: { content: ours }, children: [block("a", { mod: "files" })] }), true);
+  assert.equal(shown({ id: "r", type: "stack", hidden: true, header: { content: ours }, children: [block("a", { mod: "files" })] }), false);
+  // a layout that never names this mod: true (the copies are somewhere this does not know)
+  assert.equal(shown({ id: "r", type: "column", children: [block("t", { mod: "tabs" })] }), true);
 });
 
 test("dialog registry: one sheet and one Herd panel at a time; dialog copies register and unregister", async () => {
@@ -413,6 +696,66 @@ test("heroForTerminal: bound agents, contractors and Forklings (their parent's h
   assert.equal(host.heroForTerminal(null), null);
 });
 
+test("a throwing view builder is told apart from loading (viewError)", async () => {
+  M.resetState();
+  const mod = await mount({ role: "hud" }, { fixture: FX.demoFixture("mid") });
+  const host = await hostOf(mod);
+  host.world = (await mod.import("./game/demo.js")).demoWorld("mid", NOW).world;
+  host.version++;
+  assert.equal(host.viewError("sheet"), null);
+  assert.equal(host.view("sheet", { heroId: 1, filter: { get slot() { throw new Error("bad filter"); } } }), null);
+  assert.equal(host.viewError("sheet"), "bad filter");
+  assert.ok(host.view("sheet", { heroId: 1 }));
+  assert.equal(host.viewError("sheet"), null, "cleared by the next good build");
+  assert.equal(host.view("constructor", {}), null, "only the six view kinds");
+  assert.equal(host.view("toString", {}), null);
+});
+
+test("mod.clone: the clone's host names its own mod (overlays, <mod>.tick, the save folder)", async () => {
+  // clone_mod_at (herdr src/mods.rs:247-257) rewrites these text forms in every file, nothing else
+  const from = "mapledr";
+  const to = "mapledr-copy";
+  const rewrite = (text) => {
+    let t = text.replaceAll(`mods/${from}/`, `mods/${to}/`).replaceAll(`"mods/${from}"`, `"mods/${to}"`).replaceAll(`'mods/${from}'`, `'mods/${to}'`);
+    for (const key of ["mod", '"mod"', "'mod'"]) for (const space of ["", " "]) for (const q of ['"', "'"]) {
+      t = t.replaceAll(`${key}:${space}${q}${from}${q}`, `${key}:${space}${q}${to}${q}`);
+    }
+    return t;
+  };
+  const src = path.join(M.REPO, "mods", "mapledr");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mdr-clone-"));
+  const dst = path.join(dir, to);
+  const copy = (a, b) => {
+    fs.mkdirSync(b, { recursive: true });
+    for (const e of fs.readdirSync(a, { withFileTypes: true })) {
+      if (e.isDirectory()) copy(path.join(a, e.name), path.join(b, e.name));
+      else if (/\.(js|json)$/.test(e.name)) fs.writeFileSync(path.join(b, e.name), rewrite(fs.readFileSync(path.join(a, e.name), "utf8")));
+    }
+  };
+  try {
+    copy(src, dst);
+    for (const rel of ["host.js", "ui/kit.js"]) {
+      const code = fs.readFileSync(path.join(dst, rel), "utf8").split("\n").filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
+      assert.doesNotMatch(code, /["']mapledr["']|["']mods\/mapledr["'/]/, `${rel} still names the original mod`);
+    }
+    M.resetState();
+    const mod = await M.mountMod(path.join(dst, "main.js"), { props: { role: "stage" }, fixture: FX.demoFixture("mid"), nowMs: NOW, name: to });
+    const H = await mod.import("./host.js");
+    assert.equal(H.MOD, to);
+    const host = H.getHost();
+    assert.equal(host.paths().dir, `${M.APP_HOME}/data/${to}`, "its own save");
+    mod.render();
+    await M.tickAll(2000);
+    assert.ok(M.calls().run.some((r) => r.name === `${to}.tick`));
+    assert.ok(!M.calls().run.some((r) => r.name === "mapledr.tick"));
+    host.openSheet(1);
+    assert.equal(M.calls().openOverlay.at(-1).spec.mod, to);
+    await mod.close();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("debug text carries host and engine errors; error() counts and dedupes", async () => {
   M.resetState();
   const mod = await mount({ role: "hud" }, { fixture: {} });
@@ -430,6 +773,114 @@ test("debug text carries host and engine errors; error() counts and dedupes", as
   assert.ok(host.hasErrors());
   assert.deepEqual(host.takeUnreported(), [], "IO errors are not rethrown");
   createWorld; // (imported for completeness of the engine surface used by these tests)
+});
+
+test("our own save that landed while its promise never came back is not mistaken for another writer's", async () => {
+  M.resetState();
+  const mod = await mount({ role: "stage" }, { fixture: FX.demoFixture("first-day") });
+  const host = await hostOf(mod);
+  await M.tickAll(31000);
+  assert.ok(writes(SAVE).length >= 1);
+  // the next save.json write lands on disk but its promise never settles (its copy went away)
+  let hang = 1;
+  M.updateFixture({ hangAfterWrite: (p) => p === SAVE && hang-- > 0 });
+  host.world.rt.dirty = true;
+  const p = host.maybeSave(true);
+  await M.flush();
+  const landed = M.memfs.readText(SAVE);
+  assert.notEqual(landed, host.lastText, "landed, unanswered");
+  assert.equal(host.saving, p);
+  await M.tickAll(16000); // given up after 15 s, then saved again with the stale expected text
+  await M.tickAll(31000);
+  assert.equal(host.stats.reloads, 0, "no reload of our own text");
+  assert.equal(host.lastText, M.memfs.readText(SAVE));
+  assert.notEqual(host.lastText, landed, "saved over it");
+  assert.ok(host.world.state.herd.tick > JSON.parse(landed).tick, "the world was not rolled back");
+});
+
+test("flush on close never waits for a save started earlier (on quit it may never finish)", async () => {
+  M.resetState();
+  const mod = await mount({ role: "stage" }, { fixture: FX.demoFixture("first-day") });
+  const host = await hostOf(mod);
+  await M.tickAll(31000);
+  await M.tickAll(31000); // a save.bak exists now
+  const before = M.memfs.readText(SAVE);
+  // the next save's save.bak write lands but never settles: the save.json write never starts
+  let hang = 1;
+  M.updateFixture({ hangAfterWrite: (p) => p === BAK && hang-- > 0 });
+  host.world.rt.dirty = true;
+  host.maybeSave(true);
+  await M.flush();
+  assert.ok(host.saving);
+  assert.equal(M.memfs.readText(SAVE), before, "save.json not written yet");
+  const baks = writes(BAK).length;
+  const done = await Promise.race([host.flush().then(() => true), M.flush(20).then(() => false)]);
+  assert.equal(done, true, "flush finished without the earlier save");
+  assert.notEqual(M.memfs.readText(SAVE), before, "the final save was written");
+  assert.equal(writes(SAVE).at(-1).expected, before);
+  assert.equal(writes(BAK).length, baks, "no save.bak step in the final save");
+  assert.equal(host.lastText, M.memfs.readText(SAVE));
+});
+
+test("a save.json that fails to read once is read again before the host decides", async () => {
+  M.resetState();
+  let fails = 1;
+  const fixture = { readError: (p) => (p === SAVE && fails-- > 0 ? new Error("os error 32: the file is being used by another process") : null) };
+  const mod = await mount({ role: "hud" }, { fixture, files: { [SAVE]: saveOf("idle"), [BAK]: saveOf("first-day") } });
+  const host = await hostOf(mod);
+  assert.equal(host.ready, false, "still loading: it tries again in a second");
+  await M.tickAll(1500);
+  assert.equal(host.stats.loadedFrom, "save");
+  assert.equal(host.ioBlocked, false);
+  assert.equal(host.world.state.heroes.length, 4);
+  host.command("setting", { key: "calm", value: true });
+  await M.tickAll(3000);
+  assert.equal(writes(SAVE).length, 1, "saving works");
+});
+
+test("an unreadable save.json: run from the bak, tell the player, read it again on the 30 s beat, then save", async () => {
+  M.resetState();
+  let unreadable = true;
+  const fixture = { readError: (p) => (p === SAVE && unreadable ? new Error("os error 32") : null) };
+  const json = saveOf("idle");
+  const mod = await mount({ role: "stage" }, { fixture: { ...FX.demoFixture("idle"), ...fixture }, files: { [SAVE]: json, [BAK]: saveOf("idle", NOW - 120000) } });
+  const host = await hostOf(mod);
+  await M.tickAll(11000); // three more reads (1 s, 3 s, 6 s apart)
+  assert.equal(host.stats.loadedFrom, "bak");
+  assert.equal(host.ioBlocked, true);
+  assert.equal(host.saveStatus().notSaving, true);
+  assert.match(host.saveStatus().message, /can't be read/);
+  host.command("setting", { key: "calm", value: true });
+  await M.tickAll(31000);
+  assert.equal(writes(SAVE).length, 0, "never writes over what it cannot read");
+  unreadable = false;
+  await M.tickAll(31000);
+  assert.equal(host.ioBlocked, false, "it reads again");
+  await M.tickAll(3000);
+  assert.ok(writes(SAVE).length >= 1, "saving resumed");
+  assert.equal(writes(SAVE)[0].expected, json);
+  assert.equal(M.memfs.readText(BAK), json, "the file's text became the bak");
+  assert.equal(JSON.parse(M.memfs.readText(SAVE)).herd.cfg.calm, 1, "the command made while blocked is saved");
+  assert.equal(host.saveStatus()?.notSaving ?? false, false);
+});
+
+test("an unreadable save.json and no bak: once it reads, the herd comes back and this session is kept aside", async () => {
+  M.resetState();
+  let unreadable = true;
+  const json = saveOf("idle");
+  const mod = await mount({ role: "hud" }, { fixture: { readError: (p) => (p === SAVE && unreadable ? new Error("os error 5") : null) }, files: { [SAVE]: json } });
+  const host = await hostOf(mod);
+  await M.tickAll(11000);
+  assert.equal(host.stats.loadedFrom, "fresh");
+  assert.equal(host.world.state.heroes.length, 0);
+  unreadable = false;
+  await M.tickAll(31000);
+  assert.equal(host.world.state.heroes.length, 4, "the herd is back");
+  assert.equal(host.stats.loadedFrom, "save");
+  const kept = names().filter((n) => n.startsWith("save.unsaved"));
+  assert.equal(kept.length, 1, names().join(", "));
+  assert.ok(writes(SAVE).every((w) => w.expected === json || w.expected === writes(SAVE)[0].text), "the herd's file is only written over knowingly");
+  assert.equal(writes(SAVE).length ? writes(SAVE)[0].expected : json, json);
 });
 
 test("a save whose host call never came back (its copy closed) is given up after 15 s", async () => {

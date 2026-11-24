@@ -14,19 +14,24 @@
 // Scripted agents (ARCHITECTURE §3.3 Snapshot):
 //   makeAgent(spec)            an agent that follows a plan of [status, seconds] phases
 //   makeCast(agents, opts)     agents + focus/window/timezone; castSnapshot(cast, nowMs)
-//   advanceCast(cast, sec)     moves every plan forward (seq increments on each status change)
+//   advanceCast(cast, sec)     moves every plan forward (seq increments on each status change,
+//                              except herdr's done <-> idle seen flip, which keeps the seq)
 //   untilChange(cast)          seconds until the next status change anywhere in the cast
 //   runCast(world, cast, toMs) drives world.tick up to toMs in steps of at most 5 s that never
 //                              skip a status change
 //
 // Pure: no host calls, no Date.now(), no Math.random().
+//
+// Shipped with the mod but never loaded by it: nothing main.js reaches imports this file (it costs
+// nothing at runtime). It lives here, next to the engine it drives, because tests, tools/check.mjs,
+// the previews and tools/pacing-sim.mjs all build their worlds through it.
 
 import { TUNING as T, CLASS_IDX, ZONES, MAPS, BOSSES, SLOTS, BADGES, REVIEWS, BACKLOG } from "./data.js";
 import { need, polishMax } from "./formulas.js";
 import { createWorld, tick, command } from "./world.js";
 import { grantXP, recordTask, autoLearn, setClass, winReview } from "./heroes.js";
 import { rollItem, rollKeepsake, equipItem, stashPut } from "./items.js";
-import { awardBadge, addGold, addSnippets } from "./herd.js";
+import { awardBadge, addGold, addSnippets, noteFirstClear, logMax } from "./herd.js";
 import { liveHeroes } from "./agents.js";
 
 const SEC = 1000;
@@ -104,8 +109,10 @@ export function makeAgent(spec = {}) {
 }
 
 /**
- * Moves an agent's plan `sec` seconds forward. A status change increments seq (herdr bumps seq on
- * every change); a new working phase after a non-working one takes the next quest title.
+ * Moves an agent's plan `sec` seconds forward. A status change increments seq as herdr does: herdr
+ * bumps seq when the core's status word changes (src/model.rs set_word), but done <-> idle is its
+ * seen flag (mark_seen / set_turn), so that flip keeps the seq. A new working phase after a
+ * non-working one takes the next quest title.
  * @param {boolean} [quiet] (setup only) skip seq increments
  */
 export function advanceAgent(a, sec, quiet) {
@@ -135,8 +142,9 @@ function nextPhase(a, quiet) {
   const st = a.plan[p][0];
   if (st !== a.status) {
     if (st === "working" && a.status !== "blocked") a.titleIdx++;
+    const seenFlip = (a.status === "done" && st === "idle") || (a.status === "idle" && st === "done");
     a.status = st;
-    if (!quiet) a.seq++;
+    if (!quiet && !seenFlip) a.seq++;
   }
   return true;
 }
@@ -327,10 +335,11 @@ function xpTo(L) {
  * then grantXP level-ups (skill points, auto-learn, class at Lv 10), reviews won when due, and a
  * kit of rolled items around its level (rarity `rar`, polish `pol`).
  */
-function grow(world, hero, { L, cls, rar = 1, pol = 0, reviews = true, keepsake = -1 }) {
+function grow(world, hero, { L, cls, rar = 1, pol = 0, reviews = true, keepsake = -1, prov = false }) {
   const { state } = world;
   const task = CLASS_TASKS[cls] || CLASS_TASKS.shellmancer;
-  for (let k = 0; k < 16; k++) recordTask(hero, task);
+  // prov: fewer than the 15 qualifying tasks that lock a class, so it stays provisional (D§4.2)
+  for (let k = 0, n = prov ? 9 : 16; k < n; k++) recordTask(hero, task);
   const ev = silentEv();
   if (L > hero.L) grantXP(state, hero, xpTo(L) - xpTo(hero.L) - hero.xp + Math.floor(need(L) * 0.37), ev);
   if (cls && CLASS_IDX[cls] != null && hero.cls !== CLASS_IDX[cls] && hero.L >= 10) setClass(state, hero, CLASS_IDX[cls]);
@@ -355,18 +364,31 @@ function grow(world, hero, { L, cls, rar = 1, pol = 0, reviews = true, keepsake 
   return hero;
 }
 
-// The herd after `zones` boss kills (what boss.js / herd.js record on a herd-first kill).
+// The herd after `zones` boss kills (what boss.js / herd.js record on a herd-first kill): trophies,
+// kill counts, quotas, the first-clear dates (a boss a day, the last one yesterday) and the
+// journal lines of the kills, older than everything the cast has logged since.
 function clearZones(world, zones, { kills = 2 } = {}) {
-  const herd = world.state.herd;
+  const { state, rt } = world;
+  const herd = state.herd;
+  const now = rt.nowMs || herd.lastMs || 0;
+  const lines = [];
   for (let z = 0; z < zones; z++) {
     herd.boss[z] = 1;
     herd.bossKills[z] = Math.max(1, kills - (z > zones - 3 ? 1 : 0));
     for (const m of ZONES[z].maps) herd.quota[m.id] = T.quotaPerMap;
     herd.bt[z] = 600 + 1900 * (zones - z);
+    const at = now - (zones - z) * DAY_MS + 3600000 * (9 + (z % 5));
+    noteFirstClear(state, z, at);
+    lines.push([at, "boss", 0, `${BOSSES[z].name} FIXED`, z]);
+    for (let k = 1; k < herd.bossKills[z]; k++) lines.push([at + k * 7200000, "boss", 0, `${BOSSES[z].name} fixed again`, z]);
   }
+  lines.sort((a, b) => a[0] - b[0]);
+  herd.log = lines.concat(herd.log || []).slice(-logMax(state));
   herd.zone = zones >= ZONES.length ? BACKLOG.n : zones;
   if (zones >= ZONES.length) herd.backlog = { floor: 1, kills: 0 };
   herd.meter = 0;
+  // credited here, not by a fight: world.tick must not journal them again
+  rt.bossSeen = herd.bossKills.slice();
 }
 
 function boundHeroes(world) {
@@ -441,7 +463,7 @@ const KINDS = {
     const spec = [
       { L: 33, cls: "refactorer", rar: 2, pol: 3 }, { L: 31, cls: "hotfixer", rar: 2, pol: 2 },
       { L: 30, cls: "shellmancer", rar: 2, pol: 2 }, { L: 29, cls: "rubberducker", rar: 1, pol: 3 },
-      { L: 26, cls: "forkbinder", rar: 1, pol: 2 }, { L: 24, cls: "shellmancer", rar: 1, pol: 1 },
+      { L: 26, cls: "forkbinder", rar: 1, pol: 2 }, { L: 24, cls: "shellmancer", rar: 1, pol: 1, prov: true },
     ];
     const heroes = boundHeroes(world);
     heroes.forEach((h, i) => grow(world, h, Object.assign({ keepsake: i < 2 ? i : -1 }, spec[i])));

@@ -2,7 +2,11 @@
 // list (defaults/mods/agents) in the mapledr layout, so it keeps that list's behaviour:
 //  - setAgentOrder(order) in render, so agent.next / agent.prev / agent.select follow the party;
 //  - click a row: pane.focus on the agent's pane (plus act("markSeen") so a pending chest counts
-//    as seen); hover / selected (focused) styling from the theme; foldable groups;
+//    as seen); a terminal without a pane (a paneless sub-agent) opens in herdr's peek
+//    (terminal.peek), as the agents list does for its sub-agent rows; hover / selected (focused)
+//    styling from the theme; foldable groups;
+//  - blocked agents stand out without re-sorting: a "N need you" chip in the header (click: the
+//    next one), a "!" badge on the folded or unfolded group and on the rail's portrait;
 //  - a hover pin toggle (terminal.pin) like the agents list's;
 //  - the rail when the sidebar is narrower than 160 px, with the "»" button that unfolds it
 //    (workspace-chrome hides its own toggle on the macOS rail and relies on this one).
@@ -33,9 +37,9 @@
  *                                   small dim label like herdr's agents list; null when local.
  * RowVM.status is herdr's status word ("working"|"blocked"|"done"|"idle"); RowVM.chips kinds the
  * renderer knows: "blocked" | "boss" | "review" (text pills), "chest" (icon, click claims; text
- * e.g. "×2" optional), "fork" (icon + count; chip.terminal = the sub-agent a click shows with
- * agent.focus), "star" (icon), "unblocked" (spark icon); any other kind (e.g. "crashed") renders as
- * a text pill in its colour. chip.tooltip (optional string) is the chip's hover text.
+ * e.g. "×2" optional), "fork" (icon + count; chip.terminal = the sub-agent a click shows: its
+ * pane if it has one, else herdr's peek; see showTerminal), "star" (icon), "unblocked" (spark
+ * icon); any other kind (e.g. "crashed") renders as a text pill in its colour. chip.tooltip (optional string) is the chip's hover text.
  * Rows never move on status, focus or pin changes (D§11.11): a pinned agent keeps its place here
  * (its pin shows as the portrait dot and the stage banner).
  *
@@ -51,7 +55,7 @@
 
 import { div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { run, setAgentOrder, openOverlay, layout, focused, shared, setShared, window as herdrWindow } from "herdr";
+import { run, setAgentOrder, openOverlay, layout, focused, panes, shared, setShared, window as herdrWindow } from "herdr";
 import { C, T, MONO, art, zoom, alpha, kids, clamp01 } from "./kit.js";
 
 // ---------------------------------------------------------------------------------------------
@@ -92,6 +96,23 @@ export function ink(color, t) {
 /** A game colour as a shape (bar fill, stripe): slightly deepened on light themes. */
 export function tone(color, t) {
   return isLight(t) ? mix(color, "#000000", 0.18) : color;
+}
+
+// A status stripe on a light theme: deepened per status so each clears 3:1 against the chrome
+// (paper: working 3.8, blocked 5.2, done 3.2, idle 4.1) while blocked (darker) and done (lighter)
+// stay apart. Dark themes show the game colours as they are.
+const STRIPE_K = { working: 0.3, blocked: 0.45, done: 0.38, idle: 0.18 };
+
+/** A row's status stripe colour (RowVM.stripe, deepened by status on light themes). */
+export function stripeColor(color, status, t) {
+  const k = Object.prototype.hasOwnProperty.call(STRIPE_K, status) ? STRIPE_K[status] : 0.4;
+  return isLight(t) ? mix(color, "#000000", k) : color;
+}
+
+/** A raised button's hover: the raised colour nudged toward the foreground (t.hover is
+ *  translucent and would darken a raised button on dark themes). */
+export function lift(t) {
+  return hex6(t.raised) && hex6(t.fg) ? mix(t.raised, t.fg, isLight(t) ? 0.07 : 0.09) : t.hover;
 }
 
 /** Bar track: the foreground at low alpha reads on both light and dark chrome. */
@@ -201,10 +222,23 @@ export function openHerd(tab) {
   return openOverlay({ mod: "mapledr", kind: "dialog", width: 760, height: 520, props: tab ? { role: "herd", tab } : { role: "herd" } });
 }
 
-/** Focus an agent's pane the way herdr's agents list does. */
+/**
+ * Show a terminal the way herdr's agents list does: its pane when it has one (pane.focus), else
+ * herdr's peek (terminal.peek), as the list opens a paneless sub-agent. pane.focus {terminal} on a
+ * terminal without a pane fails with a "no such pane" toast, and agent.focus only shows one where
+ * the layout has an agent block (the mapledr layout has none). Handlers only (reads panes()).
+ */
+export function showTerminal(address) {
+  if (!address) return;
+  const terminal = String(address);
+  if ((panes() ?? []).some((p) => p.terminal === terminal)) run("pane.focus", { terminal });
+  else run("terminal.peek", { terminal });
+}
+
+/** Focus an agent's pane (its pane id when known), else showTerminal(address). */
 export function focusAgent(pane, address) {
   if (pane) run("pane.focus", { pane });
-  else if (address) run("pane.focus", { terminal: address });
+  else showTerminal(address);
 }
 
 /**
@@ -295,22 +329,62 @@ export function renderParty(vm, env) {
   const empty = vm.groups.every((g) => g.rows.length === 0);
 
   return root
-    .when(!compact, (el) => el.child(header(t, vm, env)))
+    .when(!compact, (el) => el.child(header(t, vm, env, width)))
     .when(empty && !compact, (el) => el.child(div().px(16).pb(8).text_size(12).text_color(t.dim)
       .child("No heroes yet. Every coding agent that reports its status joins the party as a Termling.")))
     .child(v_flex().id("party-list").flex_1().min_h(0).px(compact ? 0 : 8).pt(compact ? 6 : 0).pb(4).overflow_y_scrollbar().children(rows))
     .child(compact ? railFooter(vm, env, t) : footer(vm, env, t, width));
 }
 
-function header(t, vm, env) {
+/** The live rows that wait for the person (herdr's "blocked"), in the order they are drawn. */
+export function blockedRows(vm) {
+  const out = [];
+  for (const g of vm?.groups ?? []) if (!g.offDuty) for (const r of g.rows) if (r.status === "blocked" && r.address) out.push(r);
+  return out;
+}
+
+/** The blocked row the header chip jumps to: the first, or the one after the focused one. */
+function nextBlocked(list) {
+  const at = list.findIndex((r) => r.focused);
+  return list[(at + 1) % list.length];
+}
+
+/**
+ * "2 need you" (herdr's status bar words): rows never re-sort (D§11.11), so a blocked hero below
+ * the fold is found from here. A click jumps to the next one (clickRow: markSeen + its pane).
+ */
+function needYouChip(list, t, env, width) {
+  const n = list.length;
+  const light = isLight(t);
+  const next = nextBlocked(list);
+  const names = list.slice(0, 4).map((r) => String(r.name ?? "")).join(", ") + (n > 4 ? ` and ${n - 4} more` : "");
+  return h_flex().id("party-needyou").flex_none().h(18).px(6).rounded(5).items_center().cursor_pointer()
+    .bg(alpha(C.blocked, light ? 0.2 : 0.16)).text_size(10.5).font_semibold().text_color(ink(C.blocked, t)).whitespace_nowrap()
+    .hover((s) => s.bg(alpha(C.blocked, light ? 0.32 : 0.28)))
+    .tooltip(`Waiting for you: ${names}\nClick to jump to ${String(next.name ?? "")}`)
+    .on_click((e, cx) => { cx.stop_propagation(); clickRow(next, env)(e, cx); })
+    .child(width >= 220 ? `${n} ${n === 1 ? "needs" : "need"} you` : `! ${n}`);
+}
+
+/** herdr's compact "!" badge (its agents list's rail and folded groups). */
+function bangBadge(t) {
+  return div().size(14).flex_none().rounded(4).bg(alpha(C.blocked, isLight(t) ? 0.22 : 0.16)).text_size(10.5).font_bold()
+    .text_color(ink(C.blocked, t)).flex().items_center().justify_center().child("!");
+}
+
+function header(t, vm, env, width = 268) {
   const calm = !!vm?.calm;
+  const waiting = vm ? blockedRows(vm) : [];
   return h_flex().px(16).h(41).pt(14).pb(5).flex_none().items_center().gap(6)
     .child(div().min_w(0).truncate().text_size(11.5).font_medium().text_color(t.dim).child(String(vm?.title ?? "Party")))
     .when(Boolean(vm), (el) => el.child(div().text_size(11.5).text_color(t.dim).child(String(vm.count))))
     .child(div().flex_1())
+    .when(waiting.length > 0, (el) => el.child(needYouChip(waiting, t, env, width)))
+    // icon-only buttons hover with a background: herdr fixes an svg's colour when it builds the
+    // element, so a hover text colour would not reach the icon
     .when(Boolean(vm), (el) => el.child(div().id("party-calm").p(2).rounded(4).cursor_pointer()
       .text_color(calm ? t.accent : t.dim)
-      .hover((s) => s.bg(t.hover).text_color(calm ? t.accent : t.fg))
+      .hover((s) => s.bg(t.hover))
       .tooltip(calm ? "Calm mode is on: click to turn it off" : "Calm mode: no damage numbers, banners or blinking")
       .on_click((_e, cx) => { cx.stop_propagation(); env.act?.("setting", { key: "calm", value: !calm }); })
       .child(svg(art("ui/calm.svg")).w(14).h(14))));
@@ -318,7 +392,10 @@ function header(t, vm, env) {
 
 function groupHeader(g, folded, ui, t) {
   const top = g.rows.reduce((m, r) => ((RANK[r.status] ?? 0) > (RANK[m] ?? 0) ? r.status : m), null);
-  const dot = folded && !g.offDuty && top && top !== "idle";
+  // blocked: herdr's "!" badge, folded or not (the blocked row may be below the fold); done /
+  // working: a dot on a folded group
+  const bang = !g.offDuty && top === "blocked";
+  const dot = folded && !g.offDuty && top && top !== "idle" && !bang;
   return h_flex().id(`pg-${g.key}`).px(8).pt(8).h(30).flex_none().gap(6).items_center()
     .text_size(11).font_medium().text_color(t.dim).cursor_pointer()
     .hover((s) => s.text_color(t.fg))
@@ -330,12 +407,14 @@ function groupHeader(g, folded, ui, t) {
     .child(div().min_w(0).truncate().child(String(g.name ?? "")))
     .when(folded || g.offDuty, (el) => el.child(div().flex_none().child(String(g.rows.length))))
     .child(div().flex_1())
-    .when(dot, (el) => el.child(div().size(7).flex_none().rounded_full().bg(tone(statusColor(top), t))))
+    .when(bang, (el) => el.child(bangBadge(t)))
+    .when(dot, (el) => el.child(div().size(7).flex_none().rounded_full().bg(stripeColor(statusColor(top), top, t))))
     .child(div().flex_none().w(10).text_size(10).text_center().child(folded ? "▸" : "▾"));
 }
 
+const STATUS_COLOR = { working: C.working, blocked: C.blocked, done: C.done, idle: C.idle };
 function statusColor(status) {
-  return { working: C.working, blocked: C.blocked, done: C.done, idle: C.idle }[status] ?? C.idle;
+  return Object.prototype.hasOwnProperty.call(STATUS_COLOR, status) ? STATUS_COLOR[status] : C.idle;
 }
 
 /** Click a row: count it as seen, then focus the agent (off duty: open the sheet). */
@@ -358,7 +437,8 @@ function heroRow(r, g, vm, env, ui, t, width) {
   const sub = [r.careerTitle, r.mapLabel].filter(Boolean).join(" · ");
 
   const right = hovered ? rowButtons(r, t) : levelText(r, t);
-  const chips = rowChips(r, env, t, r.chips.length);
+  // line 2: the chips (urgent first) get the text column before the career · map line does
+  const chips = rowChips(r, env, t, chipsThatFit(r.chips, mid, 4));
 
   return h_flex().id(`pr-${r.key}`).relative().h(44).flex_none().pl(4).pr(8).gap(8).items_center().rounded(8)
     .when(r.focused, (el) => el.bg(t.selected))
@@ -376,7 +456,7 @@ function heroRow(r, g, vm, env, ui, t, width) {
     .children(kids([
       shimmer ? div().id(`pl-${r.key}`).absolute().left(0).top(0).size_full().rounded(8).bg(alpha(C.xp, isLight(t) ? 0.3 : 0.2))
         .opacity(r.levelUpAge === 0 ? 1 : 0).transition("opacity", { duration: 800, easing: "ease-out" }) : null,
-      div().w(3).h(30).flex_none().rounded(2).bg(tone(r.stripe, t)),
+      div().w(3).h(30).flex_none().rounded(2).bg(stripeColor(r.stripe, r.status, t)),
       portrait(`pp-${r.key}`, r, 32, t, { calm: vm.calm, pinned: r.pinned })
         .cursor_pointer()
         .on_click((_e, cx) => { cx.stop_propagation(); openSheet(r.heroId); }),
@@ -386,7 +466,7 @@ function heroRow(r, g, vm, env, ui, t, width) {
           .when(Boolean(r.machine), (el) => el.child(div().flex_none().text_size(10).text_color(t.dim).child(String(r.machine))))
           .child(right))
         .child(h_flex().h(15).gap(4).items_center()
-          .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(sub))
+          .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.muted).child(sub))
           .children(chips))
         .child(h_flex().mt(3).gap(4).items_center()
           .child(thinBar(hpW, 3, r.hpFrac, tone(C.hp, t), track(t)))
@@ -412,16 +492,60 @@ function levelText(r, t) {
   return div().flex_none().text_size(10.5).font_family(MONO).text_color(t.muted).child(`Lv ${r.level}`);
 }
 
+// Estimated chip widths (logical px), so a narrow sidebar drops chips instead of pushing a row past
+// the sidebar's edge: a text pill is px 5 plus Geist 10 px semibold (about 6 px a character); an
+// icon chip is its icon, plus a 2 px gap and its count.
+const CHIP_ICON = { chest: 12, unblocked: 12, fork: 11, star: 11 };
+function chipWidth(c) {
+  const text = c?.text ? String(c.text) : "";
+  const icon = Object.prototype.hasOwnProperty.call(CHIP_ICON, c?.kind) ? CHIP_ICON[c.kind] : 0;
+  return icon ? icon + (text ? 2 + text.length * 6 : 0) : 10 + text.length * 6;
+}
+
+/** How many of `chips` (in order: the urgent ones come first) fit in `room` px, each after a `gap`. */
+export function chipsThatFit(chips, room, gap) {
+  let used = 0;
+  let n = 0;
+  for (const c of chips ?? []) {
+    used += gap + chipWidth(c);
+    if (used > room) break;
+    n++;
+  }
+  return n;
+}
+
+/** The hero's name in a slim row keeps at least this much (about three letters and the ellipsis). */
+const SLIM_NAME = 32;
+
+/**
+ * What a slim row shows at this sidebar width (logical px) so that nothing runs past the sidebar's
+ * edge and the name keeps SLIM_NAME: chips first (at most two, urgent ones first), then the level
+ * if it still fits (the tooltip and the sheet carry it too). Hovered, the row buttons (sheet, pin)
+ * take the level's place and stay whole; the chips make way for them.
+ * @returns {{chips:number, level:boolean}}
+ */
+export function slimFit(r, width, hovered) {
+  // list px 8×2, row pl 4 / pr 8, stripe 3 + gap 6, face 28 + gap 6, machine tag + gap
+  const room = width - 16 - 12 - 9 - 34 - SLIM_NAME - (r.machine ? 6 + String(r.machine).length * 6 : 0);
+  const chips = (r.chips ?? []).slice(0, 2);
+  const tail = 6 + (hovered ? (r.address ? 36 : 17) : `Lv ${r.level}`.length * 6.3);
+  if (hovered) return { chips: chipsThatFit(chips, room - tail, 6), level: false };
+  const n = chipsThatFit(chips, room, 6);
+  const used = chips.slice(0, n).reduce((a, c) => a + 6 + chipWidth(c), 0);
+  return { chips: n, level: used + tail <= room };
+}
+
 /**
  * A row's chips (at most `max`): the chest claims it, the Forkling count shows the first blocked
- * (else working) sub-agent with agent.focus, as herdr's agents list does for its sub-agent rows.
+ * (else working) sub-agent the way herdr's agents list opens its sub-agent rows: pane.focus when
+ * it has a pane, else terminal.peek (showTerminal). agent.focus would not show a paneless one here.
  */
 function rowChips(r, env, t, max, opts) {
   const list = (r.chips ?? []).slice(0, max);
   return list.map((c) => {
     let onClick = null;
     if (c.kind === "chest") onClick = (_e, cx) => { cx.stop_propagation(); env.act?.("claimChest", { heroId: r.heroId }); };
-    else if (c.kind === "fork" && c.terminal) onClick = (_e, cx) => { cx.stop_propagation(); run("agent.focus", { terminal: String(c.terminal) }); };
+    else if (c.kind === "fork" && c.terminal) onClick = (_e, cx) => { cx.stop_propagation(); showTerminal(c.terminal); };
     return chipEl(c, t, `pc-${c.key}`, onClick ? { ...opts, onClick } : { ...opts });
   });
 }
@@ -429,7 +553,8 @@ function rowChips(r, env, t, max, opts) {
 /**
  * A slim row (RowVM.slim: a crowded party): one 28 px line with the status stripe, the face screen
  * (click: sheet; a pinned agent's dot on its corner), name, machine, up to two chips and the level
- * (hover: the row buttons), and a 2 px XP bar along the bottom. About 10 elements instead of 24, so
+ * (hover: the row buttons; a narrow sidebar keeps what fits, see slimFit), and a 2 px XP bar along
+ * the bottom. About 10 elements instead of 24, so
  * 30 heroes stay well inside the render budget.
  */
 const XP_LEFT = 4 + 3 + 6 + 28 + 6; // row pl, stripe, gap, face screen, gap
@@ -444,6 +569,7 @@ function slimRow(r, g, vm, env, ui, t, width) {
   // the XP line spans the text column: list px 8×2, row pl 4 / pr 8, stripe 3, face 28, gaps 2×6
   const lineW = Math.max(40, Math.round(width - 16 - 12 - 3 - 28 - 12));
   const xpW = Math.round(lineW * clamp01(r.xpFrac));
+  const fit = slimFit(r, width, hovered);
   const screen = div().id(`pp-${r.key}`).flex_none().w(28).h(18).rounded(4).bg(col.screen)
     .border(1.5).border_color(r.focused ? t.accent : col.hoodie)
     .flex().items_center().justify_center()
@@ -466,12 +592,12 @@ function slimRow(r, g, vm, env, ui, t, width) {
     .children(kids([
       shimmer ? div().id(`pl-${r.key}`).absolute().left(0).top(0).size_full().rounded(6).bg(alpha(C.xp, isLight(t) ? 0.3 : 0.2))
         .opacity(r.levelUpAge === 0 ? 1 : 0).transition("opacity", { duration: 800, easing: "ease-out" }) : null,
-      div().w(3).h(18).flex_none().rounded(2).bg(tone(r.stripe, t)),
+      div().w(3).h(18).flex_none().rounded(2).bg(stripeColor(r.stripe, r.status, t)),
       blink ? screen.frames([">_", "> "], 530) : screen.child(face),
       div().flex_1().min_w(0).truncate().text_size(12).font_medium().text_color(dimName ? t.muted : t.fg).child(String(r.name ?? "")),
       r.machine ? div().flex_none().text_size(10).text_color(t.dim).child(String(r.machine)) : null,
-      ...rowChips(r, env, t, 2, { height: 14 }),
-      hovered ? rowButtons(r, t) : levelText(r, t),
+      ...rowChips(r, env, t, fit.chips, { height: 14 }),
+      hovered ? rowButtons(r, t) : fit.level ? levelText(r, t) : null,
       r.pinned ? div().absolute().left(4 + 3 + 6 + 28 - 5).top(3).size(7).rounded_full().bg(t.accent).border(1.5).border_color(t.chrome) : null,
       // the XP bar: a faint track with the fill on top, so it never reads as an underline
       div().absolute().left(XP_LEFT).bottom(2).h(2).w(lineW).rounded(1).bg(track(t))
@@ -481,7 +607,7 @@ function slimRow(r, g, vm, env, ui, t, width) {
 
 function rowButton(id, t, tip, onClick, glyph) {
   return div().id(id).flex_none().p(2).rounded(4).text_color(t.dim).cursor_pointer()
-    .hover((s) => s.bg(t.hover).text_color(t.fg))
+    .hover((s) => s.bg(t.hover)) // background only: an svg keeps its built colour in herdr
     .tooltip(tip)
     .on_click(onClick)
     .child(glyph);
@@ -495,6 +621,14 @@ function pinGlyph(color) {
 }
 
 function railRow(r, g, vm, env, t) {
+  const blocked = r.status === "blocked";
+  const pic = portrait(`pp-${r.key}`, r, 28, t, { calm: vm.calm, pinned: r.pinned && !blocked });
+  // herdr's rail marks a blocked agent with a "!" badge; here it sits on the portrait's corner
+  // (where the pin dot goes: the badge is the more urgent of the two)
+  if (blocked) {
+    pic.child(div().absolute().left(21).top(-3).size(13).rounded(4).bg(tone(C.blocked, t)).border(1.5).border_color(t.chrome)
+      .flex().items_center().justify_center().text_size(9).font_bold().line_height(1).text_color("#1c1d21").child("!"));
+  }
   return h_flex().id(`pr-${r.key}`).relative().h(40).flex_none().mx(2).rounded(8).justify_center()
     .when(r.focused, (el) => el.bg(t.selected))
     .when(g.offDuty, (el) => el.opacity(0.62))
@@ -503,8 +637,8 @@ function railRow(r, g, vm, env, t) {
     .tooltip(String(r.tooltip ?? r.name ?? ""))
     .on_click(clickRow(r, env))
     .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); openSheet(r.heroId); })
-    .child(div().absolute().left(1).top(8).w(3).h(24).rounded(2).bg(tone(r.stripe, t)))
-    .child(portrait(`pp-${r.key}`, r, 28, t, { calm: vm.calm, pinned: r.pinned }));
+    .child(div().absolute().left(1).top(8).w(3).h(24).rounded(2).bg(stripeColor(r.stripe, r.status, t)))
+    .child(pic);
 }
 
 function stat(icon, color, value, t, tip) {
@@ -518,7 +652,8 @@ function herdButton(vm, t, compact) {
   return h_flex().id("party-herd").relative().flex_none().h(24).px(compact ? 0 : 8).gap(5).items_center().justify_center()
     .when(compact, (el) => el.w(32))
     .rounded(6).bg(t.raised).text_color(t.muted).cursor_pointer()
-    .hover((s) => s.bg(t.hover).text_color(t.fg))
+    // a background hover: the icon keeps its built colour in herdr, so the label stays with it
+    .hover((s) => s.bg(lift(t)))
     .tooltip(dot ? "Herd panel: something new in the digest" : "Herd panel: upgrades, stash, bosses, roster")
     .on_click((_e, cx) => { cx.stop_propagation(); openHerd(); })
     .child(svg(art("ui/herd.svg")).w(13).h(13).flex_none())
@@ -557,7 +692,7 @@ function footer(vm, env, t, width) {
         .tooltip("Release Train: the herd's version").child(String(f.release))))
       .child(div().flex_1())
       .child(div().id("party-settings").flex_none().p(4).rounded(6).text_color(t.dim).cursor_pointer()
-        .hover((s) => s.bg(t.hover).text_color(t.fg))
+        .hover((s) => s.bg(t.hover))
         .tooltip("Settings")
         .on_click((_e, cx) => { cx.stop_propagation(); openHerd("settings"); })
         .child(svg(art("ui/gear.svg")).w(13).h(13)))
@@ -567,7 +702,7 @@ function footer(vm, env, t, width) {
       .child(div().flex_none().text_color(t.dim).child("Sprint"))
       .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(sp.label))
       .child(thinBar(44, 4, sp.need > 0 ? sp.have / sp.need : 0, t.accent, track(t)))
-      .child(div().flex_none().font_family(MONO).text_size(10.5).text_color(t.dim).child(`${sp.have}/${sp.need}`))));
+      .child(div().flex_none().font_family(MONO).text_size(10.5).text_color(t.muted).child(`${sp.have}/${sp.need}`))));
 }
 
 function railFooter(vm, env, t) {

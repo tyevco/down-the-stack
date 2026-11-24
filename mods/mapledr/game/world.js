@@ -37,6 +37,7 @@ const HERO_SIDE = { incoming: 1, heal: 1 };
 const AUTO_KEYS = ["equip", "deprecate", "learn", "polish", "buildings", "maps", "boss", "farm", "calls", "career"];
 const NOTIFY_KEYS = ["boss", "lts", "principal"];
 const NAME_MAX = 32;
+const OFFLINE_HOLD_TICKS = 10; // an offline gap waits at most this long for the first agent listing
 
 // ---------------------------------------------------------------------------------------------
 // Creation, load, save
@@ -237,7 +238,8 @@ function bindKey(rt) {
 /**
  * Advances the world to snapshot.nowMs (D§2.11). ticks = elapsed whole seconds since the last tick
  * (rounded), at most 5 per call (the rest of a longer gap is dropped); a gap over 60 s is offline:
- * no combat, Fresh Eyes accrues from wall-clock time (capped at 30 days), Unreviewed chests open.
+ * no combat, Fresh Eyes accrues from wall-clock time (capped at 30 days), Unreviewed chests open
+ * (settled after the snapshot is reconciled, see applyOffline).
  * A clock that went backwards accrues nothing until it passes the last tick time again (a jump of
  * more than an hour resyncs instead). Day rollover (Daily Shift) uses snapshot.tzOffsetMin and
  * keeps the highest local day seen.
@@ -269,6 +271,10 @@ export function tick(world, snap) {
   const ev = makeEmitter(world);
   const versionBefore = rt.version;
   const bindBefore = bindKey(rt);
+  const tick0 = rt.tick; //            effects are aged per call (settleFx)
+  const fxBefore = rt.fx.length;
+  const firstCall = !rt.started; //     the first tick of this VM (an app start or a reload)
+  rt.started = true;
   if (rt.bossSeen == null) rt.bossSeen = (herd.bossKills || []).slice();
   if (rt.zoneSeen == null) rt.zoneSeen = herd.zone || 0;
   // the local time zone, for the views' dates and clock times (game/view/panels.js)
@@ -279,13 +285,28 @@ export function tick(world, snap) {
     if (day > (herd.day || 0)) herd.day = day; // the Daily Shift resets lazily per hero (agents.shiftToday)
     // the herd's first day (herd.herdAgeDays); a save from before herd.born counts from its oldest hero
     if (!(herd.born > 0)) herd.born = (herd.day || day) - H.herdAgeDays(state) + 1;
-    if (offline) applyOffline(world, dt, ev);
     herd.lastMs = offline || steps >= T.maxCatchUpTicks ? now : herd.lastMs + steps * T.tickMs;
   }
   trackWindow(world, s, offline ? dt : 0);
 
   guard(world, "reconcile", () => A.reconcile(world, s, ev));
   ev.flush();
+  // An offline gap is settled after reconcile, so heroes whose agents outlived the app (herdr's
+  // core keeps terminals while the app is closed) are live again: their chests are not
+  // off-duty chests (D§2.4) and a Waiting hero earns no Fresh Eyes (D§2.9). The first listing
+  // after an app start can still be empty (herdr publishes terminals as its window tends them):
+  // then the gap waits for the first snapshot with agents, or OFFLINE_HOLD_TICKS ticks.
+  if (!rt.readOnly && !behind) {
+    if (offline) {
+      if (firstCall && !hasAgents(s)) rt.offlineHold = { dtMs: dt, untilTick: rt.tick + OFFLINE_HOLD_TICKS };
+      else applyOffline(world, dt, ev);
+    } else if (rt.offlineHold && (hasAgents(s) || rt.tick + steps >= rt.offlineHold.untilTick)) {
+      const held = rt.offlineHold;
+      rt.offlineHold = null;
+      applyOffline(world, held.dtMs, ev);
+    }
+    ev.flush();
+  }
   for (let k = 0; k < steps; k++) stepOnce(world, s, ev);
   // chest items wait in herd.inbox and one is offered per callback, however many steps ran
   if (steps > 0 && state.herd.inbox) {
@@ -293,10 +314,13 @@ export function tick(world, snap) {
     ev.flush();
   }
 
+  // the tick-based blocked clocks follow the wall clock (offline gaps, dropped catch-up seconds)
+  if (!rt.readOnly) guard(world, "syncClocks", () => A.syncClocks(world));
+
   // expire effects, notes and the banner (an expiry is a visible change too: on an idle stage a
   // note or banner must not linger until the next minute's version bump)
   const shown = rt.fx.length + rt.notes.length + (rt.banner ? 1 : 0);
-  rt.fx = rt.fx.filter((f) => rt.tick - f.bornTick < 2);
+  settleFx(world, tick0, fxBefore);
   rt.notes = rt.notes.filter((n) => n.showTick + NOTE_TICKS > rt.tick);
   if (rt.banner && rt.tick - rt.banner.bornTick >= BANNER_TICKS) rt.banner = null;
   const expired = rt.fx.length + rt.notes.length + (rt.banner ? 1 : 0) !== shown;
@@ -306,6 +330,64 @@ export function tick(world, snap) {
   if (visible && rt.version === versionBefore) rt.version++;
   if (!rt.readOnly) rt.dirty = true;
   return { advanced: true, ticks: steps };
+}
+
+function hasAgents(snap) {
+  return (Array.isArray(snap.agents) && snap.agents.length > 0) || (Array.isArray(snap.subagents) && snap.subagents.length > 0);
+}
+
+/**
+ * Ages effects per world.tick call, not per step (the views show age 0 = born this frame, 1 = its
+ * fade frame, from rt.tick - bornTick): herdr re-arms a 1 s timer after its callback, so a pump now
+ * and then runs 2 steps, and an effect born in the first of them would first render at age 1
+ * (invisible), while the previous call's effects would vanish without their fade. So this call's
+ * effects are stamped with the final tick, the previous call's with the one before, older ones go.
+ * When several steps ran, this call's numbers keep the D§11.7 per-frame budgets (2 a hero, 6 a room,
+ * 12 a stage; the newest step first).
+ */
+function settleFx(world, tick0, nBefore) {
+  const rt = world.rt;
+  if (rt.tick === tick0) { // no step: nothing ages (effects of a reconcile or a command are age 0)
+    rt.fx = rt.fx.filter((f) => rt.tick - f.bornTick < 2);
+    return;
+  }
+  const prev = [];
+  for (let i = 0; i < nBefore && i < rt.fx.length; i++) {
+    const f = rt.fx[i];
+    if (f.bornTick >= tick0) { f.bornTick = rt.tick - 1; prev.push(f); }
+  }
+  let cur = rt.fx.slice(nBefore);
+  if (rt.tick - tick0 > 1 && cur.length) cur = frameBudget(world, cur);
+  for (const f of cur) f.bornTick = rt.tick;
+  rt.fx = prev.concat(cur);
+}
+
+// D§11.7's number caps over several steps' effects (budget() already capped each step), the newest
+// first; other effects are kept (at most FX_PER_TICK). Keeps the original order.
+function frameBudget(world, list) {
+  const F = T.fx;
+  const roomOf = new Map();
+  for (const r of world.rt.rooms || []) for (const id of r.heroIds || []) roomOf.set(id, r.id);
+  const keep = new Set();
+  const perHero = new Map();
+  const perRoom = new Map();
+  let nums = 0;
+  let other = 0;
+  for (let i = list.length - 1; i >= 0; i--) {
+    const f = list[i];
+    if (!NUM_KINDS[f.kind]) {
+      if (other < FX_PER_TICK) { keep.add(f); other++; }
+      continue;
+    }
+    const h = f.heroId == null ? "_" : f.heroId;
+    const room = f.roomId ?? roomOf.get(f.heroId) ?? "_";
+    if (nums >= F.numbersPerStage || (perHero.get(h) || 0) >= F.numbersPerHero || (perRoom.get(room) || 0) >= F.numbersPerRoom) continue;
+    perHero.set(h, (perHero.get(h) || 0) + 1);
+    perRoom.set(room, (perRoom.get(room) || 0) + 1);
+    nums++;
+    keep.add(f);
+  }
+  return list.filter((f) => keep.has(f));
 }
 
 // One simulated second (D§2.11 "repeat steps").
@@ -322,7 +404,7 @@ function stepOnce(world, snap, ev) {
   for (const hero of state.heroes) {
     if (rt.live.has(hero.id)) continue;
     if (hero.fe < H.freshEyesCapMin(state) && hero.st && hero.st.seals > 0) A.accrueFreshEyes(world, hero, 1 / 60);
-    if (tickNo % 60 === 0 && hero.pend && hero.pend.length) guard(world, "expireChests", () => A.expireChests(world, hero, ev));
+    if (tickNo % 60 === 0 && hero.pend && hero.pend.length && !rt.offlineHold) guard(world, "expireChests", () => A.expireChests(world, hero, ev));
   }
 
   // lanes, fights, rest (combat.js / boss.js)
@@ -467,8 +549,12 @@ function bossKills(world, snap, ev) {
     const first = !(seen[i] > 0);
     const b = BOSSES[i];
     if (i === 7 && snap.weekday === 5) H.awardBadge(world, "read_only_friday", ev);
-    const logged = (herd.log || []).some((e) => e[1] === "boss" && e[0] === rt.nowMs);
-    if (!logged) ev.journal("boss", 0, b.name, i);
+    // boss.js journals "<name> FIXED" / "<name> fixed again" with the kill; credit from elsewhere
+    // (a save, a test, the demo) gets the same line, and the first clear its date (D§10.5)
+    const text = `${b.name} ${first ? "FIXED" : "fixed again"}`;
+    const logged = (herd.log || []).some((e) => e[1] === "boss" && e[0] === rt.nowMs && (e[3] === `${b.name} FIXED` || e[3] === `${b.name} fixed again`));
+    if (!logged) ev.journal("boss", 0, text, i);
+    if (first) H.noteFirstClear(state, i, rt.nowMs);
     if (first && !rt.banner) ev.banner(`The herd reached frame #${Math.min(ZONES.length, i + 2)}`, `${b.name}: FIXED`);
     ev.major();
   }
@@ -489,7 +575,8 @@ function bossKills(world, snap, ev) {
 /**
  * An offline gap (D§2.10): no combat; heroes that were not Waiting accrue Fresh Eyes for the
  * wall-clock time (capped at 30 days); off-duty chests older than 24 h open Unreviewed; a running
- * fight is suspended when boss.js offers it.
+ * fight is suspended when boss.js offers it. Runs after reconcile (world.tick), so "Waiting" and
+ * "off duty" are what the snapshot says now: an agent that outlived the app is live again.
  */
 function applyOffline(world, dtMs, ev) {
   const { state, rt } = world;

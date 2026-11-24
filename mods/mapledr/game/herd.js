@@ -11,10 +11,13 @@ import {
   TUNING as T, BUILDINGS, BUILDING_IDX, BUG_TRACKER, ZONES, MAPS, MAP_BY_ID, BADGES, BADGE_BY_ID, BOSSES,
   CLASSES, TROPHY, BACKLOG, RARITIES, KEEPSAKES,
 } from "./data.js";
-import { buildingCost, releaseOf, releaseSeals, releaseLabel, trackerTier, freshEyesCap } from "./formulas.js";
+import { buildingCost, releaseOf, releaseSeals, releaseLabel, trackerTier, freshEyesCap, LOG_MAX, logMax } from "./formulas.js";
 import { stashPut, itemName } from "./items.js";
 
-const LOG_MAX = 60;
+// The journal length (D§13.3 60 lines; balance: up to 120, docs/BALANCE.md §10) lives in
+// formulas.js so items.js, which writes journal lines too and cannot import this module (herd.js
+// imports items.js), trims to the same length.
+export { LOG_MAX, logMax };
 const CAMPFIRE = BUILDING_IDX.campfire;
 const COFFEE = BUILDING_IDX.coffee_machine;
 const FORGE = BUILDING_IDX.ci_forge;
@@ -45,7 +48,8 @@ export function addSnippets(state, n) {
 }
 
 /**
- * Append a journal line [at, kind, heroId, text, value]; keeps the newest 60 (D§13.3).
+ * Append a journal line [at, kind, heroId, text, value]; keeps the newest logMax(state) (120 up to
+ * 20 heroes, 60 from 30; D§13.3: 60).
  * Kinds used by the engine: ship, level, promo, drop, boss, badge, release, hire, leave, retire,
  * deprecate, zone, map, class.
  */
@@ -54,7 +58,33 @@ export function journal(state, kind, heroId, text, value, nowMs) {
   if (!herd.log) herd.log = [];
   const log = herd.log;
   log.push([nowMs ?? herd.lastMs ?? 0, String(kind), heroId ?? 0, String(text ?? ""), value ?? 0]);
-  if (log.length > LOG_MAX) log.splice(0, log.length - LOG_MAX);
+  const max = logMax(state);
+  if (log.length > max) log.splice(0, log.length - max);
+}
+
+/**
+ * Records a boss's first clear (D§10.5 "Bosses show their first-clear date"): herd.bossAt[idx], in
+ * epoch seconds (0 = never), set once. The journal line rolls out of the log; this never does.
+ */
+export function noteFirstClear(state, idx, nowMs) {
+  const herd = state.herd;
+  if (!(idx >= 0 && idx < BOSSES.length) || !(nowMs > 0)) return false;
+  if (!Array.isArray(herd.bossAt)) herd.bossAt = [];
+  while (herd.bossAt.length < BOSSES.length) herd.bossAt.push(0);
+  if (herd.bossAt[idx] > 0) return false;
+  herd.bossAt[idx] = Math.floor(nowMs / 1000);
+  return true;
+}
+
+/** The first-clear time of a boss in epoch ms, or null (never, or cleared before it was recorded). */
+export function firstClearMs(state, idx) {
+  const at = Array.isArray(state.herd.bossAt) ? state.herd.bossAt[idx] : 0;
+  return at > 0 ? at * 1000 : null;
+}
+
+/** Is a journal line of kind "boss" a kill of BOSSES[idx] ("<name> FIXED", "fixed again", or the bare name of older saves)? */
+function bossLineIdx(text) {
+  return BOSSES.findIndex((b) => text === `${b.name} FIXED` || text === `${b.name} fixed again` || text === b.name);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -591,6 +621,9 @@ export function digestMark(state, nowMs) {
 export function digest(state, sinceMs) {
   const herd = state.herd;
   const since = sinceMs ?? herd.digestAt ?? 0;
+  // lines whose time the journal no longer has: "since the last read", or null before the first
+  // read (the views show "earlier", never the epoch)
+  const unknownAt = since > 0 ? since : null;
   // the snapshot taken when digestAt was set (a save stores both; allow its time rounding)
   let snap = herd.digestSnap && Math.abs((herd.digestSnap.at || 0) - since) < 1000 ? herd.digestSnap : null;
   if (!snap && !(since > 0)) snap = { at: 0, lv: {}, bk: [], seals: 0, drops: 0, badges: [] };
@@ -612,7 +645,7 @@ export function digest(state, sinceMs) {
       if (!lvFirst.has(heroId)) lvFirst.set(heroId, value);
     } else if (kind === "drop") out.drops.push({ heroId, name, text, rar: value, at });
     else if (kind === "boss") {
-      const idx = BOSSES.findIndex((b) => text === `${b.name} FIXED` || text === `${b.name} fixed again`);
+      const idx = bossLineIdx(text);
       if (idx >= 0) (bossLines.get(idx) || bossLines.set(idx, []).get(idx)).push({ text, value, at });
       else postmortems.push({ text, value, at });
     } else if (kind === "ship") out.shipped.push({ heroId, name, text, seals: value, at });
@@ -624,26 +657,37 @@ export function digest(state, sinceMs) {
       const was = snap.lv[h.id] ?? 1;
       if (!((h.L || 1) > was)) continue;
       const j = lvAt.get(h.id);
-      out.levels.push({ heroId: h.id, name: h.name, level: h.L, at: j ? j.at : since, from: was });
+      out.levels.push({ heroId: h.id, name: h.name, level: h.L, at: j ? j.at : unknownAt, from: was });
     }
     // bosses: one line per kill since, journal text where it still has it
     const kills = herd.bossKills || [];
+    // kills whose line rolled out have no time of their own: they sort after the boss's first clear
+    // and before its kills the journal still has, oldest first (never above a later kill)
+    const order = new Map();
     for (let i = 0; i < BOSSES.length; i++) {
       const n = Math.max(0, (kills[i] || 0) - (snap.bk[i] || 0));
       if (!n) continue;
       const lines = bossLines.get(i) || [];
+      const fc = firstClearMs(state, i);
       for (let k = 0; k < n; k++) {
-        if (k < lines.length) out.bosses.push(lines[lines.length - 1 - k]);
-        else {
+        if (k < lines.length) {
+          const l = lines[lines.length - 1 - k];
+          // an older save's line carries the bare boss name
+          out.bosses.push(l.text === BOSSES[i].name ? Object.assign({}, l, { text: `${l.text} ${k === n - 1 && !(snap.bk[i] > 0) ? "FIXED" : "fixed again"}` }) : l);
+        } else {
           const first = k === n - 1 && !(snap.bk[i] > 0);
-          out.bosses.push({ text: `${BOSSES[i].name} ${first ? "FIXED" : "fixed again"}`, value: i, at: since });
+          const dated = first && fc != null && fc > since;
+          const line = { text: `${BOSSES[i].name} ${first ? "FIXED" : "fixed again"}`, value: i, at: dated ? fc : unknownAt };
+          if (!dated) order.set(line, Math.max(since, fc || 0) + (n - k));
+          out.bosses.push(line);
         }
       }
     }
     // the Backlog's boss floors and Postmortems only live in the journal
     for (const [i, lines] of bossLines) if (!(i >= 0 && i < BOSSES.length)) out.bosses.push(...lines);
     out.bosses.push(...postmortems);
-    out.bosses.sort((a, b) => a.at - b.at);
+    const when = (x) => (order.has(x) ? order.get(x) : x.at || 0);
+    out.bosses.sort((a, b) => when(a) - when(b));
     out.dropsMore = Math.max(0, (herd.drops || 0) - (snap.drops || 0) - out.drops.length);
     out.sealsShipped = Math.max(0, (herd.seals || 0) - (snap.seals || 0));
     const listed = out.shipped.reduce((sum, x) => sum + (Number(x.seals) || 0), 0);
@@ -655,14 +699,14 @@ export function digest(state, sinceMs) {
       if (had.has(id)) continue;
       const b = BADGE_BY_ID[id];
       const text = b ? b.name : String(id);
-      if (!fromLog.has(text)) out.badges.push({ text, at: since });
+      if (!fromLog.has(text)) out.badges.push({ text, at: unknownAt });
     }
   } else {
     // no snapshot: the journal alone (one row per hero, the highest level reached since)
     for (const v of lvAt.values()) out.levels.push(Object.assign({ from: Math.max(1, (lvFirst.get(v.heroId) || v.level) - 1) }, v));
     for (const lines of bossLines.values()) out.bosses.push(...lines);
     out.bosses.push(...postmortems);
-    out.bosses.sort((a, b) => a.at - b.at);
+    out.bosses.sort((a, b) => (a.at || 0) - (b.at || 0));
   }
   for (const h of state.heroes || []) {
     for (const p of h.pend || []) {

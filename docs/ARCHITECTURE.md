@@ -15,7 +15,8 @@ herdr's single QuickJS VM; elements are GPUI builders from `gpui-kit` / `gpui-ba
 ## 1. Repository layout and ownership
 
 ```
-layouts/mapledr.json            the layout (herdr "Down the Stack")
+layouts/Down-the-Stack.json     the layout. herdr has no display title, so it lists the layout by its
+                                file name; the file is named after the game, not the codename
 mods/mapledr/                   THE MOD (copied verbatim into ~/.config/herdr-app/mods/mapledr)
   mod.json                      {"place":"none", "palette":[...]}   (place MUST be "none")
   main.js                       View: role dispatcher + lifecycle (timers, nextCommand)
@@ -35,6 +36,8 @@ mods/mapledr/                   THE MOD (copied verbatim into ~/.config/herdr-ap
     save.js                     compact encode/decode, CRC32, migrations
     view.js                     view-model builders for every role (section 5): pure, testable
     demo.js                     deterministic demo worlds + snapshots for tests, previews and screenshots
+                                (ships with the mod but nothing in it imports demo.js: it is never
+                                evaluated in herdr; kept beside the engine it drives on purpose)
   ui/                           GPUI renderers. Consume view models only; never read engine internals.
     kit.js                      shared helpers (palette, fonts, bars, pills, own(), zoom, asset paths)
     termling.js                 the Termling rig (hero sprite built from divs) + Forkling
@@ -53,14 +56,17 @@ tools/
   preview/                      HTML renderer of recorded element trees + Playwright screenshots
   gen-art.mjs                   SVG generator for mods/mapledr/art
   pacing-sim.mjs                headless persona simulator (D§12) using the real engine
+  qjs/                          the mod in QuickJS-ng with herdr's limits and sandbox (`npm run qjs`;
+                                needs `npm install`, see tools/qjs/README.md)
   reference-sim/                the Python model that produced the design's numbers
 test/                           node:test unit tests (`node --test "test/*.test.mjs"`)
 docs/                           DESIGN.md, ARCHITECTURE.md, herdr-notes/
 README.md, RECIPE.md, preview.png
-package.json                    "type": "module"; scripts: test, check, preview, art, pacing
+package.json                    "type": "module"; scripts: test, check, preview, windows, art, pacing,
+                                qjs; devDependencies only for tools/qjs
 ```
 
-Only `layouts/mapledr.json` and `mods/mapledr/` are installed. Nothing under `mods/mapledr/`
+Only `layouts/Down-the-Stack.json` and `mods/mapledr/` are installed. Nothing under `mods/mapledr/`
 may depend on `tools/` or `test/`. Tests and tools import from `mods/mapledr/` freely.
 
 ---
@@ -75,25 +81,59 @@ may depend on `tools/` or `test/`. Tests and tools import from `mods/mapledr/` f
 3. **Hot reload and VM restarts wipe module state** and cancel timers without calling `close()`.
    The game must be able to resume from the save file at any moment. Never store anything only in
    memory that must survive.
+   - A hot reload keeps the VM (and `globalThis`), and herdr evaluates the new code once for all
+     copies (`quickjs/mod.rs:2348-2352`). The host registers itself, inside `load()` and never at
+     top level, at `globalThis[Symbol.for("<mod>.live.v1")]`. The next build's `load()` asks it for
+     its world (`handover(fileText)`); it answers only when its last written text is the file just
+     read, so the new host continues that world (`loadedFrom: "reload"`) instead of rolling back
+     up to 30 s. The old host is retired and never writes again. A new VM has no such host and
+     loads the file.
 4. **Never keep a `cx`.** Every callback gets its own. No `setTimeout`/`setInterval` (they throw):
    use `cx.timer.every(ms, (cx) => …)` / `cx.timer.after`. Timers drift: always measure time with
    `Date.now()` deltas.
-5. **Budgets:** render ≤ 50 ms, event/timer/task callback ≤ 500 ms, module eval ≤ 5 s. The tick must
+5. **Budgets:** render ≤ 50 ms, event/timer/task callback ≤ 500 ms, **module eval ≤ 500 ms**
+   (herdr loads every copy, and `herdr-app check`, inside a Task scope: `plugin.rs:1235-1250`,
+   `scope.rs:221-252`, `sandbox.rs:439-441,513-517`; the 5 s `detached` budget never applies to a
+   mod load). The mock enforces 500 ms and warns above 150 ms; measured ≈ 60-130 ms. The tick must
    be cheap (≤ ~5 ms for 30 heroes). Never do catch-up loops of thousands of ticks.
 6. **`herdr-app check`** runs module eval, constructor, `init(undefined, cx)`, one `render`, with
-   `props()`/`window()`/`placement()` null, empty lists, theme graphite, and **file permissions
-   narrowed to the mod folder**. So: `if (checking()) { …no IO… }` before any read/write; render
-   must work with `props()` null (show a tiny placeholder) and with an empty world.
+   `props()`/`window()`/`placement()` null, empty lists and theme graphite. It runs `init` **with
+   live exec and write capabilities** (herdr `src/mods.rs:41-46`, `herdr.d.ts:23-25`).
+   - herdr's own `readTextFile`, `writeTextFile`, `exec` and `hc` are **not** narrowed during a
+     check. They reach the real app home through plain `std::fs` (`mods.rs:1137-1154`,
+     `mod_files.rs:14,124`), and a write only logs "the write lands for real".
+   - Only the shared store (`install_check_policy`, `mods.rs:1425-1429`) and gpui-shell's own fs
+     capability (`host.rs:603-628,693-711`) are narrowed.
+   - So `if (checking()) { …no IO… }` is mandatory before any read, write or exec: a forgotten
+     guard can overwrite the person's real save.
+   - Render must work with `props()` null (show a tiny placeholder) and with an empty world.
 7. **Element rules:** colors are `#rgb|#rrggbb|#rrggbbaa` strings only (theme token names throw in
    `.bg()`; read hex from `theme()`); `.child(null)` throws and `.child(false)` prints "false"
    (filter children); an element may have only one parent and may not be reused across renders;
    `.id()` takes a string; unknown methods throw. Prefer explicit px numbers (`.p(8)`, `.w(40)`)
    over rem ramps (`p_4`). Use only methods in `tools/api-allowlist.json` (the mock enforces it).
+   - **Build an element completely before attaching it.** Once it has a parent, herdr rejects any
+     further style, child or handler call on it with a TypeError (`spec.rs:1131-1161,1286-1300`;
+     the mock throws `reused-element`). Slot and state-style elements are the exception.
+   - **An `svg()` takes its colour when it is built** (`materialize.rs:812,1489-1490`): a parent's
+     `.hover(s => s.text_color(..))` brightens text children but never the icon. An element that
+     holds an icon hovers with its background (`s.bg(..)`), as herdr's own tabs do, and the svg
+     gets its colour explicitly.
+   - Colours from `theme()` go through `kit.hex()`: herdr accepts `"ff8800"` or `"#ff8800 "` in a
+     theme override and hands it on verbatim, but `.bg()` throws on it. This covers `T()`, the
+     dialogs' `dialogTokens()` and the stage's `mdr_*` tokens.
+   - `ScrollHandle`, the input/editor states and `FocusHandle.focus()` are refused in render and
+     layout (`entity_api.rs:1242,1807-1821`): create them in `init` or a handler.
 8. **No z-index:** later siblings paint on top. Overlapping hitboxes all receive clicks; call
    `cx.stop_propagation()` in handlers that must not fall through.
 9. **Images:** `image(path)` paths are relative to the app home: always
    `` `${ASSETS}/art/...` `` with `ASSETS = "mods/mapledr"` (one constant, in `ui/kit.js`, so
-   `mod.clone` can rewrite it). Always set both `.w()` and `.h()`; fit is always "contain"; no
+   `mod.clone` can rewrite it). The mod's own name is spelled only in forms `clone_mod_at`
+   rewrites (`mods.rs:247-257`): `"mods/mapledr…"` paths and `mod: "mapledr"` keys. `host.js`
+   reads `MOD` from `const SELF = { mod: "mapledr" }`, so a clone broadcasts `<clone>.tick`, opens
+   its own dialogs and saves under `data/<clone>/`. `mod.json`'s palette commands
+   (`mapledr.sheet` …) are not rewritten by herdr; a clone must edit them by hand (herdr's palette
+   drops an entry whose prefix is not the mod's own name). Always set both `.w()` and `.h()`; fit is always "contain"; no
    flip, no tint, no rotation. `svg(path)` is a one-colour mask tinted by `.text_color()` and also
    needs explicit size. SVG files must not use `<text>` (fonts are not guaranteed): draw glyphs as
    paths, or overlay real text with a div.
@@ -117,6 +157,12 @@ may depend on `tools/` or `test/`. Tests and tools import from `mods/mapledr/` f
 14. **QuickJS compatibility:** ES2020-level JS. Don't use private `#fields`, static blocks,
     `structuredClone`, top-level `await`, JSON imports, `eval`/`new Function`, or extend built-in
     prototypes (they're frozen). Relative ESM imports must include `.js`.
+    - Release herdr freezes `Object.prototype` and friends (`sandbox.rs:77-96`). A plain object
+      keyed by an outside id (a herdr tab id, a `herdr.tab` label, a program key, a map id from a
+      command) breaks on ids like `constructor` or `toString`: writing throws, reading finds a
+      builtin. Such maps are `Object.create(null)` (data.js lookup tables, `host.snapshot` tabs) or
+      are read through an own-property check (`chrome.js own()`). `npm run qjs -- --only fuzz`
+      feeds these ids.
 15. **No sound, no OS notifications by default** (D§11.15). `notify()` only for opt-in milestones.
 
 ---
@@ -343,13 +389,22 @@ export function getHost() { if (!HOST) HOST = new GameHost(); return HOST; }
 class GameHost {
   constructor() { /* no herdr calls */ this.world = null; this.loading = null; this.version = 0; ... }
   ensure(cx)      // first call: if checking(): world = createWorld(…) in memory, no IO.
-                  // else cx.spawn(async) → readTextFile(save) (null → createWorld) → loadWorld; on
-                  // parse failure try save.bak, then start fresh and keep text aside as save.broken.
-                  // Until loaded, world is an empty fresh world (renders "loading" states fine).
+                  // else cx.spawn(async) load(): the previous build's world (hot reload, §2.3) →
+                  // save.json → save.bak (also when save.json is missing) → either file re-signed
+                  // when its only fault is the checksum (loadedFrom "unchecked") → a new herd.
+                  // A text that does not load is kept aside create-only: save.broken, then
+                  // save.broken-<ms> (never overwritten; identical texts kept once). A save.json
+                  // that fails to *read* is read again after 1, 3 and 6 s, then on the 30 s beat;
+                  // when it reads again a herd that started fresh comes back and the session's
+                  // world is kept as save.unsaved-<ms>. Until loaded, view() answers null.
   pump(nowMs)     // if now - lastPumpMs < 900 → return false. Build Snapshot from herdr live data
                   // (agents(), terminals(), spaces(), focused(), window()) and call tick(world, snap).
                   // Returns true if the world advanced; then maybeSave(); then broadcast.
-  broadcast()     // run("mapledr.tick")  → every shown copy's nextCommand() loop does cx.notify()
+  broadcast()     // run(`${MOD}.tick`) → every shown copy's nextCommand() loop does cx.notify().
+                  // Skipped when mayBeShown() finds no copy that herdr could show (it walks the
+                  // live layout() like herdr: hidden blocks, the first visible stack child, floats,
+                  // pane headers only with an open tab, open dialogs): herdr delivers <mod>.<cmd>
+                  // to shown copies only and toasts "mapledr.tick failed" otherwise.
   claim(cmd)      // dedupe UI commands that reach every shown copy: first claim within 300 ms wins
   command(name, args)   // world.command(...) then version++ and broadcast
   maybeSave(force)      // single writer; writeTextFile(path, text, lastText) where lastText is
@@ -357,6 +412,18 @@ class GameHost {
                   // Every 30 s while dirty, 2 s after a major event, and in close().
                   // Keep save.bak: before replacing save.json, write the previous text to save.bak
                   // (same expected-text discipline). Never write while checking().
+                  // A save that lands while its promise never settles (its copy closed) is
+                  // recognised as our own (the last 4 texts written), never reloaded as a conflict.
+  flush()         // close(): never awaits a save started earlier (at quit herdr cannot settle it,
+                  // lifecycle.rs:104-114): drops it, reads save.json and writes over it when it
+                  // holds a text of ours. Every write carries a generation; a superseded one stops.
+  saveStatus()    // null, or {readOnly, notSaving, restoredFrom: null|"bak"|"fresh"|"unchecked",
+                  // title, message, detail, since}: save trouble the player must see (D§13.1,
+                  // D§13.4). The stage, party, hud and herd views get it as args.save (not in the
+                  // memo key: a change moves host.version). main.js draws a dismissable chip in the
+                  // stage's sky; the Herd panel shows a band under its header (HerdVM.save).
+  viewError(kind) // a view builder that threw: main.js shows the error chip (the party falls back
+                  // to a plain list of herdr's agents()) instead of an endless "loading".
 }
 // save path: `${appHome()}/data/mapledr/save.json` (writeTextFile creates parent dirs; data/ is not watched)
 ```
@@ -401,8 +468,21 @@ module. A role reads only
 `host.world`-derived view models via `game/view.js` and herdr live data it needs for chrome
 (e.g. the nameplate reads `panes()` for the real terminal title).
 
-Key commands (`keys.json` section `layout:mapledr`, optional): `mapledr.sheet` (focused agent's
-hero), `mapledr.herd`, `mapledr.calm`. `mod.json` adds palette entries for the same.
+Key commands (`keys.json` section `layout:Down-the-Stack`, optional): `mapledr.sheet` (focused agent's
+hero), `mapledr.herd`, `mapledr.calm`. `mod.json` adds palette entries for the same (herdr lists
+every mod's palette entries in every layout: used while another layout shows, they fail with a
+"mapledr.sheet failed" toast, because `<mod>.<command>` reaches shown copies only). There is no
+"switch to layout" entry: herdr's palette already builds `Layout: Down-the-Stack` and drops
+duplicates.
+herdr shows ids, not our title. These places show the layout file name ("Down-the-Stack") or the
+mod folder name ("mapledr"); the game's own UI shows neither id (D§1).
+- Settings layout picker: `LOOKS[name] ?? name` (herdr `defaults/frame/settings/main.js:316`).
+- Palette: `Layout: ${Cap(name)}` (`defaults/frame/palette/main.js:156`).
+- macOS View > Layout menu (`src/macos.rs:66-69`).
+- win98 Start menu (`defaults/mods/win98/taskbar.js:209-210`).
+- Keys overlay: `keys  (layout:Down-the-Stack)` | `mapledr sheet`
+  (`defaults/mods/help/main.js:17-22,83`).
+- Failed-command toast: `mapledr.sheet failed` (`src/window.rs:3076-3078`).
 
 Overlays: `openOverlay({mod:"mapledr", kind:"dialog", width:760, height:500, props:{role:"sheet", heroId}})`
 and `{role:"herd"}` (dialog, 760×520). Dialogs close on Esc / click outside; the mod closes them
@@ -471,7 +551,28 @@ SheetVM / HerdVM typedefs in `ui/sheet.js` / `ui/herdpanel.js` are the full list
   share one sign), `rooms[].stats`, `BossVM.partSprite` / `tooltip` / `stamp.sprite`;
 - `RowVM.slim` (crowded parties), the fork chip's `terminal`;
 - `StashFilter.hover` / `selected` (the sheet's hovered or selected item falls back when it vanishes);
-- `RosterVM.slim`, `fame.more`, `backlog.challenge` (Herd panel).
+- `RosterVM.slim`, `fame.more`, `backlog.challenge` (Herd panel);
+- every view's args may carry `save` (host.saveStatus(), §4) for the stage, party, hud and herd;
+- `HerdVM.save: null | {title, text, tooltip}` (the save band, D§13.4) and
+  `HerdVM.header.waiting` (the blocked part of `header.sub`, drawn in the blocked colour);
+- SheetVM header `tagTip` / `tagTab` (the "provisional" tag explains itself and opens Career), the
+  Career class option `lock` (the current provisional class's chip locks it, free), and the
+  Career boss card's `challenge`, which is Retreat while its zone boss fight runs or is paused;
+- `PlateVM.chip.short` ("!" / "! 2m": the chip below 200 px); the plate and row show BOSS /
+  REVIEW only while the participant is questing or supervising (D§9.5: blocked ones hold,
+  done / idle ones walk out). The stage agrees: its arena draws only participants that are
+  questing, supervising, crashed or blocked (holding); a done or idle one is at home (or in the
+  camp chip) with its chest or campfire (the engine gives combat ticks only to questing,
+  supervising or crashed heroes, `combat.js isActive`);
+- `StageVM.rooms[].pin` (header click: pinMap) and `rooms[].challenge` (the boss door, only when
+  the engine would accept it), `HeroVM.reviewEnd` (Promotion banner / Postmortem card, 3 ticks),
+  `BossVM.retreat` (two-click confirm), `FxVM.sheet` (loot pillar opens the sheet on the item),
+  ChestVM tier `"duck"` (a Duck Chest at a Holo Rubber Duck kill; never claimable);
+- clicks that show a terminal (stage hero, bubble, chest, Forkling; party rows and fork chips;
+  the sheet's Focus) use `ui/party.js showTerminal`: `pane.focus {terminal}` when `panes()` lists
+  it, else `terminal.peek {terminal}`. `agent.focus` shows nothing in this layout (it has no
+  agent block, `window.rs:1489-1495`), and `pane.focus` on a pane-less terminal toasts "no such
+  pane".
 
 `sheetView`/`herdView` shapes are owned jointly by the engine-world author and the sheet/herd
 UI author; their exact fields are defined in `game/view.js` JSDoc, which is the source of truth.
@@ -495,16 +596,21 @@ compare deltas) is produced in `view.js`, not in `ui/`.
 - Ground: solid ground colour band from y=160 to bottom, 2 px accent top line, tiled ground SVG.
 
 ### 6.2 Motion recipes (all native)
+`x`, `y` and amplitudes are script px (zoom 1). Loop `from`/`to` are written as raw px (gpui-shell
+`materialize.rs:3100-3106`), so both ends are multiplied by `zoom` (§2.10). Static `.left()`/`.top()`
+values are zoom-scaled by herdr (gpui-shell `value.rs:25-27`), and so are the transitions between
+them, which animate the scaled value (`materialize.rs:3183-3197`).
+
 | Effect | Recipe |
 |---|---|
-| Idle bob | `.loop("top", {from: y, to: y - 2*zoom, period: 1200 + jitter})` on the hero's sprite wrapper (not when calm/reduced/stillness) |
-| Fighting | hero: `.loop("left", {from: x, to: x + 6*zoom, period: 1000})` while `attacking` (reads as lunges on the 1 Hz beat); engaged mob: opposite small loop |
-| Mob pace | `.loop("left", {from: x - paceAmp*zoom, to: x + paceAmp*zoom, period: 3200 + jitter})` when `pacing` |
+| Idle bob | `.loop("top", {from: y*zoom, to: (y - 2)*zoom, period: 1200 + jitter})` on the hero's sprite wrapper (not when calm/reduced/stillness) |
+| Fighting | hero: `.loop("left", {from: x*zoom, to: (x + 6)*zoom, period: 1000})` while `attacking` (reads as lunges on the 1 Hz beat); engaged mob: opposite small loop |
+| Mob pace | `.loop("left", {from: (x - paceAmp)*zoom, to: (x + paceAmp)*zoom, period: 3200 + jitter})` when `pacing` |
 | Movement | positions change between ticks → `.transition("left", {duration: 900, easing: "ease-out"})` with a stable `.id(key)` |
 | Damage number | `age 0`: render at (x, y), `.opacity(1)`; `age 1`: same `.id`, (x+dx, y−28), `.opacity(0)`, `.transition("top", 900)`, `.transition("opacity", 900)`; dropped at age 2 |
 | Poof / coin / loot | same two-tick pattern (coin/loot: age 1 moves to the hero and fades) |
 | Level-up column | cyan div, `age 0..1`, `.loop("opacity", {from:0.3, to:0.9, period: 400})` |
-| Blocked bubble | `.loop("top", {…3 px…, period: 1400})`; clickable `div` wrapper → `run("agent.focus", {terminal})` |
+| Blocked bubble | `.loop("top", {…3 px…, period: 1400})`; clickable `div` wrapper → `showTerminal(address)` (`ui/party.js`: `pane.focus {terminal}` with a pane, else `terminal.peek`; D§2.7) |
 | Face | `.frames([">_", "> "], 530)` while questing (blinking cursor); static glyph otherwise |
 | Campfire | SVG + flame glyph `.frames(["^", "*", "^", "~"], 200)`… or opacity loop on a glow div |
 | zzz | `.frames(["z", "zz", "zzz", ""], 700)` |
@@ -590,7 +696,27 @@ bot plateau (D§12.2); it is run in CI-like `npm run pacing`.
 ## 8. Art contract (`tools/gen-art.mjs` → `mods/mapledr/art/`)
 
 SVG only, no `<text>`, crisp pixel-art style (`shape-rendering="crispEdges"` on rect art),
-2 px dark outlines on mobs. Exact viewBox = intended display size at zoom 1.
+2 px dark outlines on mobs. Exact viewBox = intended display size at zoom 1 (the sizes below).
+
+`image()` art may carry `width`/`height` = k × viewBox (integer k; the viewBox stays the display
+size) so herdr's raster stays sharp. GPUI rasterises an SVG drawn with `image()` once, at 2× its
+`width`/`height`, and samples that bitmap (linear filter, one mip) into whatever size it is drawn at
+(`gpui-api.md` §3.2). So art that the UI draws larger than its viewBox gets k ≥ its largest
+drawn/viewBox ratio:
+- k = 2 for `mob/*` (elite × full grower = 2.0), `gear/acc-*` (sheet portrait) and `fx/campfire`;
+- k = 2 for `fx/stamp-fixed` (it slams in from 160×56 and shrinks to 80×28 while it fades in);
+- k = 3 for `fx/mug` (the Herd panel's building icon draws it at 26 from 12).
+
+A size that a visible `width`/`height` transition passes through counts as a draw. Everything
+else, including bosses, backgrounds and `fx/banner`, is drawn at or below its viewBox and keeps
+k = 1. A denser raster there would only be minified harder. Masks (`svg()`) are rasterised at the
+painted size and are always k = 1. `intrinsicScale()` in `tools/gen-art.mjs` holds the table, and
+`test/art.test.mjs` checks it against every `image()` draw in the check role matrix and in the
+stage scenarios (`tools/vm-samples/stage.mjs`, plus the stamp's first frame). Every `image()`
+call sets both `w` and `h`: the `width`/`height` attributes are also the image's natural size, so
+an unsized k = 2 sprite would lay out at twice its size. On a 2× display a sprite softens again
+once drawn/viewBox × herdr's zoom exceeds its k (for example, k = 1 art drawn at full size at any
+zoom above 1).
 
 | Path | Size | Notes |
 |---|---|---|

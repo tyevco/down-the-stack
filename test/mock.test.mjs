@@ -122,6 +122,45 @@ test("one element under two parents throws", async () => {
   assert.throws(() => { const a = div(); a.child(a); }, (e) => e.code === "self-parent");
 });
 
+test("no call on an element once it has a parent (herdr: AlreadyParented); a slot's element still takes styles", async () => {
+  M.resetState();
+  const p = div();
+  const a = div();
+  p.child(a);
+  for (const call of [() => a.w(10), () => a.child(div()), () => a.on_click(() => {}), () => a.id("late"), () => a.hover((s) => s.bg("#000"))]) {
+    assert.throws(call, (e) => e.code === "reused-element" && e instanceof TypeError, String(call));
+  }
+  const kids = div();
+  div().children([kids]);
+  assert.throws(() => kids.p(2), (e) => e.code === "reused-element");
+  // the right order is fine, and so is styling an element given to a slot (herdr claims it)
+  const b = div().w(10).child(div());
+  div().child(b);
+  const { Popover } = await import("gpui-base");
+  const content = div();
+  Popover.new("pop").trigger(div()).content(content);
+  content.p(4).bg("#123456");
+  // the mapledr roles never do it: every render tree builds bottom-up
+  const { mod } = await renderWith(() => { const row = div(); const out = div().child(row); row.p(4); return out; });
+  assert.deepEqual(codes(mod), ["reused-element"]);
+});
+
+test("state handles have herdr's surface and are refused while rendering", async () => {
+  M.resetState();
+  const { ScrollHandle, VirtualListScrollHandle, InputState, TextareaState, EditorState, SliderState, OtpState, CalendarState } = await import("gpui-base");
+  const sh = ScrollHandle.new();
+  assert.deepEqual(Object.keys(sh).sort(), ["__handle", "content_size", "offset", "release", "scroll_to_item", "viewport_size"]);
+  assert.deepEqual(Object.keys(VirtualListScrollHandle.new()).sort(), ["__handle", "content_size", "offset", "release", "scroll_to_bottom", "scroll_to_item", "viewport_size"]);
+  assert.deepEqual(sh.content_size(), { width: 0, height: 0 });
+  for (const make of [() => ScrollHandle.new(), () => VirtualListScrollHandle.new(), () => InputState.new({}), () => TextareaState.new({}), () => EditorState.new({}), () => SliderState.new({}), () => OtpState.new(4), () => CalendarState.new()]) {
+    const { mod } = await renderWith(() => { make(); return div(); });
+    assert.deepEqual(codes(mod), ["not-in-render"], String(make));
+  }
+  // FocusHandle.focus() is a mutation herdr refuses in render; fine in init and handlers
+  const { mod } = await renderWith((cx, view) => { view.fh.focus(); return div(); }, { init: (cx, view) => { view.fh = cx.focus_handle(); view.fh.focus(); } });
+  assert.deepEqual(codes(mod), ["not-in-render"]);
+});
+
 test("an element kept from a previous render is expired", async () => {
   const { mod, tree } = await renderWith((cx, view) => {
     if (!view.kept) view.kept = div().child("cached");
@@ -253,6 +292,84 @@ test("run() validates command names and arguments", async () => {
   assert.match(mod.errors[0].message, /agent\.focuss.*unknown command/);
   assert.match(mod.errors[1].message, /`terminal` is missing/);
   assert.equal(M.calls().run.length, 6);
+});
+
+test("<mod>.<command> reaches shown copies only; none shown is herdr's error toast", async () => {
+  M.resetState();
+  const src = tempMod("shown", `
+    import { View, div } from "gpui-kit";
+    import { nextCommand, checking } from "herdr";
+    export default class X extends View {
+      init(p, cx) { this.got = []; if (checking()) return; cx.spawn(async (t) => { for (;;) { this.got.push(await nextCommand()); t.notify(); } }); }
+      render() { return div().child(this.got.join(",")); }
+    }
+  `);
+  const a = await M.mountMod(src, { props: {}, graph: "s", name: "shown" });
+  const b = await M.mountMod(src, { props: {}, graph: "s", name: "shown" });
+  b.hide();
+  herdr.run("shown.tick");
+  await M.flush();
+  assert.deepEqual(a.view.got, ["tick"]);
+  assert.deepEqual(b.view.got, [], "a hidden copy keeps running but gets no command");
+  assert.deepEqual(M.calls().toasts, []);
+  a.hide();
+  herdr.run("shown.tick");
+  await M.flush();
+  assert.deepEqual(M.calls().toasts.map((t) => t.title), ["shown.tick failed"]);
+  assert.ok(M.globalErrors().some((e) => e.code === "no-mod-copy") || a.errors.some((e) => e.code === "no-mod-copy") || b.errors.some((e) => e.code === "no-mod-copy"));
+  // a hidden copy is not drawn by tickAll; shown again, it is
+  b.hide(false);
+  const r = b.copy.renders;
+  await M.tickAll(10);
+  assert.equal(b.copy.renders, r + 1);
+  assert.equal(a.copy.renders, 0);
+});
+
+test("IO trouble hooks: readError rejects a read, hangAfterWrite lands a write that never settles", async () => {
+  M.resetState();
+  const f = `${M.APP_HOME}/data/x/a.txt`;
+  M.setFixture({ readError: (p) => (p === f ? "os error 32" : null), hangAfterWrite: (p) => p === f });
+  const mod = await M.mountView(class extends View { render() { return div(); } }, { props: {} });
+  await mod.flush();
+  await assert.rejects(herdr.readTextFile(f), /os error 32/);
+  let settled = false;
+  herdr.writeTextFile(f, "landed", null).then(() => { settled = true; }, () => { settled = true; });
+  await M.flush();
+  assert.equal(M.memfs.readText(f), "landed");
+  assert.equal(settled, false);
+});
+
+test("timers let go of closed copies; reloadAll gives every copy one new module scope", async () => {
+  M.resetState();
+  const src = tempMod("reloadall", `
+    import { View, div } from "gpui-kit";
+    import { checking } from "herdr";
+    export const SCOPE = {};
+    export default class X extends View {
+      init(p, cx) { if (!checking()) cx.timer.every(1000, () => {}); }
+      render() { return div(); }
+    }
+  `);
+  const mods = [];
+  for (let i = 0; i < 20; i++) mods.push(await M.mountMod(src, { props: {}, graph: "r" }));
+  assert.equal(M.clock.timers.length, 20);
+  for (const m of mods.slice(2)) await m.close();
+  assert.equal(M.clock.timers.length, 2, "closed copies' timers are dropped, not kept as cancelled");
+  const [a, b] = mods;
+  const s0 = (await a.import("./main.js")).SCOPE;
+  await M.reloadAll([a, b]);
+  const sa = (await a.import("./main.js")).SCOPE;
+  const sb = (await b.import("./main.js")).SCOPE;
+  assert.notEqual(sa, s0, "re-evaluated");
+  assert.equal(sa, sb, "one module scope for both copies");
+  assert.equal(M.clock.timers.length, 2, "the old builds' timers are gone, the new ones run");
+  await M.tickAll(3000);
+  assert.deepEqual([...a.errors, ...b.errors], []);
+});
+
+test("module evaluation: herdr's budget is 500 ms (the load runs in a Task scope)", () => {
+  assert.equal(M.BUDGET.module, 500);
+  assert.ok(M.BUDGET.moduleWarn < M.BUDGET.module);
 });
 
 test("writeTextFile uses expected-text semantics; readTextFile reads it back", async () => {
@@ -441,6 +558,21 @@ test("preview maps a recorded tree to HTML", async () => {
   assert.match(html, /data-frames="\[&quot;&gt;_&quot;,&quot;&gt; &quot;\]"/);
   assert.match(html, /preview: unmapped methods: none/);
   assert.deepEqual(unmappedMethods({ type: "div", methods: [["bogus_style", []], ["p", [4]]], children: [] }), ["bogus_style"]);
+});
+
+test("preview: svg() keeps the colour it was built with; SVG images are rasterised at 2× intrinsic size", () => {
+  const tree = {
+    type: "div", methods: [["text_color", ["#ff0000"]]], state: { hover: [["text_color", ["#00ff00"]]] }, slots: {},
+    children: [
+      { type: "svg", src: HERO, methods: [["w", [10]], ["h", [10]]], children: [], state: {}, slots: {} },
+      { type: "image", src: HERO, methods: [["w", [300]], ["h", [300]]], children: [], state: {}, slots: {} },
+    ],
+  };
+  const html = treeToHtml(tree, { width: 320, height: 320 });
+  assert.match(html, /background-color:#ff0000/, "a fixed fill, not currentColor (a parent's :hover must not recolour it)");
+  assert.doesNotMatch(html, /background-color:currentColor/);
+  assert.match(html, /<img [^>]*data-raster="\d+x\d+"/);
+  assert.match(html, /window\.__previewReady=/);
 });
 
 test("preview screenshots with Playwright", async (t) => {

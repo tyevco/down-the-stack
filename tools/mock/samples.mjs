@@ -16,7 +16,7 @@ export const PROGRAMS = {
 export function agent(i, over = {}) {
   const program = over.program ?? PROGRAMS[["claude", "codex", "pi"][i % 3]];
   return {
-    address: `t${i + 1}`, pane: `p${i + 1}`, space: "s1", space_name: "mapledr", tab: "tab1", tab_index: 1, tab_name: "1",
+    address: `t${i + 1}`, pane: `p${i + 1}`, space: "s1", space_name: "webapp", tab: "tab1", tab_index: 1, tab_name: "1",
     status: "working", app: program.key === "claude" ? "claude-code" : program.key, program,
     title: `task ${i + 1}`, pane_name: null, seq: 100 + i, pinned: false, focused: i === 0,
     ...over,
@@ -53,12 +53,12 @@ export function sampleFixture(n = 3, over = {}) {
     terminals.push(terminalFor(agent(90, { address: "t90", title: "sub-agent: tests", status: "working", program: PROGRAMS.claude }), { parent: agents[0].address }));
   }
   const tab = { id: "tab1", index: 1, name: "1", named: false, active: true, status: agents.length ? "blocked" : null, panes: panes.length, zoomed: false, settled: false, settled_at: null, changed_at: null, working_since: agents.length ? 0 : null };
-  const spaces = [{ id: "s1", index: 1, name: "mapledr", named: true, folder: "/mock/user/src/app", machine: null, branch: "main", active: true, status: tab.status, tabs: [tab] }];
+  const spaces = [{ id: "s1", index: 1, name: "webapp", named: true, folder: "/mock/user/src/app", machine: null, branch: "main", active: true, status: tab.status, tabs: [tab] }];
   const focused = agents.length ? { space: "s1", tab: "tab1", pane: agents[0].pane, terminal: agents[0].address, shown: null, agent: null, cwd: "/mock/user/src/app", selection: null } : null;
   return { agents, panes, terminals, spaces, focused, layout: readLayout(), ...over };
 }
 
-/** layouts/mapledr.json if it exists (the shown layout), else null. */
-export function readLayout(file = path.join(REPO, "layouts", "mapledr.json")) {
+/** layouts/Down-the-Stack.json if it exists (the shown layout), else null. */
+export function readLayout(file = path.join(REPO, "layouts", "Down-the-Stack.json")) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; }
 }

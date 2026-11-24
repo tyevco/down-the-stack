@@ -30,7 +30,7 @@ const REPO = M.REPO;
 export const DEFAULT_MAIN = path.join(REPO, "mods", "mapledr", "main.js");
 export const DEFAULT_FIXTURES = path.join(REPO, "tools", "fixtures.mjs");
 export const DEFAULT_NOW = Date.UTC(2026, 10, 24, 9, 30, 0); // a fixed Tuesday morning (UTC)
-// Logical block heights (layouts/mapledr.json: stage 200, header 34, hud 26; overlays per §4).
+// Logical block heights (layouts/Down-the-Stack.json: stage 200, header 34, hud 26; overlays per §4).
 const ROLE_HEIGHT = { stage: 200, party: 520, nameplate: 34, hud: 26, sheet: 500, herd: 520 };
 
 const rel = (p) => path.relative(process.cwd(), p) || p;

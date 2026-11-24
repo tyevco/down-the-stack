@@ -3,3 +3,6 @@ out/
 *.log
 __pycache__/
 .DS_Store
+# written into a mod folder by herdr-app on every load and check (typings.rs write_type_declarations)
+mods/**/gpui-kit.d.ts
+mods/*/jsconfig.json

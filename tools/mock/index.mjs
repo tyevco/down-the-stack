@@ -1,10 +1,10 @@
 // Public API of the mock herdr runtime (for tests, tools/check.mjs and tools/preview).
 // Mods themselves only ever import "gpui-kit" / "gpui-base" / "herdr" (mapped by register.mjs).
 
-export { mountMod, mountView, mounted, tickAll, globalErrors, globalWarnings, walkLive, Mounted, BUDGET, clearAssetCache } from "./harness.mjs";
+export { mountMod, mountView, mounted, tickAll, reloadAll, globalErrors, globalWarnings, walkLive, Mounted, BUDGET, clearAssetCache } from "./harness.mjs";
 export {
   S as state, setFixture, updateFixture, fixture, defaultFixture, checkFixture, setChecking, resetState,
-  setClock, mockNow, flush, report,
+  setClock, mockNow, flush, report, clock,
 } from "./state.mjs";
 export { advanceTimers as advanceTimers, View } from "./view.mjs";
 export { serialize, isElement, nodeOf } from "./elements.mjs";
@@ -20,6 +20,6 @@ import { S, deliver, flush as flushAll } from "./state.mjs";
 export const calls = () => S.calls;
 /** Deliver a command to every mounted copy of a mod (like keys.json "<mod>:<command>"). */
 export async function sendCommand(cmd, { mod = "mapledr" } = {}) {
-  for (const c of S.copies) if (c.alive && c.modName === mod) deliver(c, cmd);
+  for (const c of S.copies) if (c.alive && c.modName === mod && !c.hidden) deliver(c, cmd);
   await flushAll();
 }

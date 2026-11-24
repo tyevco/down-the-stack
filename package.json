@@ -11,7 +11,15 @@
     "preview": "node --import ./tools/mock/register.mjs tools/preview/shoot.mjs",
     "windows": "node --import ./tools/mock/register.mjs tools/preview/windows.mjs",
     "art": "node tools/gen-art.mjs",
-    "pacing": "node tools/pacing-sim.mjs"
+    "pacing": "node tools/pacing-sim.mjs",
+    "qjs": "node tools/qjs/run.mjs"
   },
-  "engines": { "node": ">=22" }
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@jitl/quickjs-ng-wasmfile-release-sync": "^0.32.0",
+    "acorn": "^8.19.0",
+    "quickjs-emscripten": "^0.32.0"
+  }
 }

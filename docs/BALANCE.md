@@ -59,7 +59,7 @@ counts what it pays, a tanky mob more; the pacing model's `KPM × mobXP(mid)` is
 | Change | Design | Now | Why |
 |---|---|---|---|
 | Swing timer start | the engaged mob swings on the tick it is first hit | on the tick after the first hit that *lands* (`T.lane.firstSwingDelay` 1, new) | A 403 (Promise Wisp) or 404 (phaser) started the timer: map 2-2 cost 15–26 crashes/h. Landing is the fix the reviewers asked for; the one-tick delay is the sustain fix: with the D§5.4 swing (3% of max HP after DR) a 3–4-action kill cost two swings against 3.5% regen, so Shellmancer/Forkbinder/Hotfixer drank 5–20 cups an hour on *plain* on-level maps (the reference simulator's 0–4 was right at the edge). With the delay on-level is safe (0 cups), +3 levels costs 0–20 cups/h and +5 levels still runs out of coffee and crashes, the D§5.6 gradient. |
-| thorns (Version Pin Porcupine, 5-3) | reflects 8% of melee damage taken, unmitigated, from every hit | 3%, as one hit per tick through dodge, Stealth Commit, DR (against the mob's level) and damage-taken modifiers, at most 0.4% max HP a tick (`TRAITS.thorns.capPerTick`, new); summons, Forklings and the summoner class (its hits are imps) never trigger it | 8% unmitigated of a hero's whole output was 1.3× the mob's own swing: 46–109 crashes/h. At 3% / 0.4% the melee classes take ~a fifth more than on a plain map; 0 cups. |
+| thorns (Version Pin Porcupine, 5-3) | reflects 8% of melee damage taken, unmitigated, from every hit | 3%, as one hit per tick through dodge, Stealth Commit, DR (against the mob's level) and damage-taken modifiers, at most 0.4% max HP a tick (`TRAITS.thorns.capPerTick`, new); summons, Forklings and the summoner class (its hits are imps) never trigger it. A dodged reflection is no dodged attack: it does not count towards 404 Not Found and Zero Downtime does not heal on it (`combat.hitHero` `reflect`) | 8% unmitigated of a hero's whole output was 1.3× the mob's own swing: 46–109 crashes/h. At 3% / 0.4% the melee classes take ~a fifth more than on a plain map; 0 cups. Through dodge, a dodged reflection healed 1% max HP: at the 30% dodge cap the spikes became a net heal for a Zero Downtime Hotfixer. |
 | pending (Promise Wisp, 2-2) | invulnerable for its first 2 *engaged* ticks | its first 2 ticks *in the lane*, engaged or not | Queued Wisps also swallowed every area hit, so 2-2 ran at 9–11 kills/min whatever the class. The "…" ring still shows on arrival and a Wisp engaged at once still 403s. |
 | Mob ATK multipliers | Typo Sprout 1.0, Semicolon Snail 1.4, Unused Import 0.8, Transitive Vine 1.0, Starved Thread 1.8, Anonymous Author 1.1 | 0.7, 0.8, 0.5, 0.9, 1.55, 1.0 | Interns wear no armour (real Interns have 64–84% of the reference EHP until their first chests), so zone 1 drank 13–20 cups/h with real gear (the snail at 0.9 still cost a bare Lv 6 Intern 6 cups/h; 0.8: 0–2); slow mobs now swing once in a 3–4-action kill (the delay) and were tuned on that; the vine (grower) and the author (ranged) were the last two maps over 3 cups for Forkbinders. |
 | Backlog floor (autopilot) | deepest floor with effective level ≤ PL + 1 | also ≤ 1 + ln(EHP / refEHP(100)) / ln 1.05 | Floor f hits 1.05^f harder; PL alone sent Hotfixers (PL ≈ L + 8, least HP) to floor 10 to crash. |
@@ -101,17 +101,20 @@ LTS, the review weapons), measured on every hero of every persona (`gearRecorder
 
 | Change | Design | Now | Why |
 |---|---|---|---|
-| Drop item levels (`items.dropIlvl`, `T.loot`) | kill/elite m + U{0,1}; chest map top + U{0,1,2}; duck m + 2; boss/review as given | each lowered by `ilvlOffset` −6, fading linearly to 0 between Lv 50 and 100 (`taperFrom` 50) | A chest landed 4–5 levels above iRef(L) = L − 2; with best-of-many selection that is far above the reference kit. Past Lv ~60 R_ref × P_ref outgrows any Beta/Release polish (Release +9 < P_ref(100) = +10), so the offset fades. |
+| Drop item levels (`items.dropIlvl`, `T.loot`) | kill/elite m + U{0,1}; chest map top + U{0,1,2}; duck m + 2; boss/review as given | kill, elite, chest and duck drops lowered by `ilvlOffset` −6, fading linearly to 0 between Lv 50 and 100 (`taperFrom` 50); boss and review rewards keep Lb / L as given (`boss.winFight`, `items.rollReviewReward`; Keepsakes the boss level) | A chest landed 4–5 levels above iRef(L) = L − 2; with best-of-many selection that is far above the reference kit. Past Lv ~60 R_ref × P_ref outgrows any Beta/Release polish (Release +9 < P_ref(100) = +10), so the offset fades. A boss or review reward is a few items a week; at Lb it is the prize of the fight. |
 | Affix ranges (D§8.3) | Memoized 2–4%, Linted 1–2%, Optimized 5–10%, Async 0.5–1%, Recursive 1–2%, Vectorized 3–6%, Blameless 3–6%, Green Build 1–2%, Caching 3–6%, Tab Completion 2–4%, Hot Reload 2–4%, Graceful Degradation 4–8% (× t) | all halved | 3–4 affixes on most worn items: worn damage% ran 0.5–0.9 at Lv 80 against D_ref = 0.24. Defensive affixes (Typed, Robust, Uptime, Idempotence, Rate Limiting) keep the design ranges: with them halved real gear sat at 0.8 of the reference EHP and drank on 5-3 / 8-x. |
 | Autopilot polish (D§8.8) | one item per 60 ticks, up to the rarity's max, whenever gold ≥ 5× cost | the same, but only up to `polishTarget` = ceil(L / 10) (D§5.2's P_ref, p ≈ L/10); manual polish is unchanged | Gold is never short: every worn item sat at +7..+10 by Lv 25. |
 | The Training Stick | grows with its Intern until Lv 10 | grows (iRef(L)) as long as the hero holds it | With drops at iRef a Junior's first class weapon can take a while; a frozen iLvl-8 stick held Lv 13–15 heroes in Lint Meadows. |
 | Map choice weapon lag (ARCHITECTURE §9.9) | a weapon lagging the reference weapon moved the hero up to 2 levels down | no longer: the deepest open map with mid ≤ L + 1 (L after a crash in the last 10 minutes; the crash rule still drops a map) | With drops at iRef a weapon a few levels behind is normal; one-agent herds sat a map low for days and missed the quota on the zone's last map that opens the boss door (Boss 5–7 a week late on some seeds). |
+| Guild convergence (D§2.8, `autopilot.CONVERGE_BELOW`) | a hero moves down to its guild-mates' map if that map is at most one map below its own choice | the same, but only to a map whose mid is at least L − 4 | A hero far above that map farmed at a heavy gap penalty to keep a lagging mate company, and a guild held there stopped feeding the frontier map's quota: a 10-day stall in `tools/pacing-sim.mjs`. |
+| A weapon of another class's type (left in hand by a free provisional switch or a Career Change, D§4.2) | the design does not say; weapons are class-typed (D§8.1) | swung like a Training Stick of its item level (no rarity, polish, affixes or property; `heroes.combine`); autopilot treats the slot as empty (`items.isUpgrade`: any usable class weapon that is no worse goes on) and the switch runs the targeted equip sweep the same tick (`agents.closeTask`) | It counted for nothing: a Lv 12 hero that switched for free fought bare-handed (3 g(L): weapon damage 15.0 → 6.3, Power Level 12 → 7) until a class weapon dropped, possibly on every qualifying task until the class locked. |
 
 ## 5. XP sources the D§12.1 model does not have
 
 | Change | Design | Now | Why |
 |---|---|---|---|
 | Boss XP (D§6.2, `T.boss.xpFirst / xpRepeat`) | 0.5 Need(L) first kill (and per review), 0.1 Need(L) per repeat | 0.1 and 0.02 | pacing4.py has no boss XP; with nine first kills, two reviews and farming every 3 working hours per boss it added 8–29% of a hero's XP from Lv 50 on. |
+| Boss XP and the level gap (`boss.winFight`) | no gap factor | × gap(L − Lb) like kill XP (D§6.1, so out-levelled kills fall to the 0.03 floor); Backlog bosses have no gap (D§9.8) | Farming long-beaten bosses (D§9.5 repeat kills, with Answer-calls helpers far above them) otherwise paid on-level XP for trivial fights. |
 | Gap floor (D§6.1) | 0.1 | 0.03 | The model's bot fights at 15.5 kills/min; an out-levelled engine hero one-shots three mobs a tick (≈ 50/min, a Senior Review weapon does the rest), so at 10% XP per kill the bot was Lv 36 on day 30 (design 28). 0.03 per kill ≈ 10% of the model's XP a minute. Only out-levelled farming feels it. |
 
 ## 6. Fresh Eyes (D§2.9, D§10.2)
@@ -133,7 +136,10 @@ Friday Deploy, Hotfixer ~62; the longest: The Catastrophic Backtracker, Forkbind
 
 | Change | Design | Now | Why |
 |---|---|---|---|
-| Auto-boss threshold (`T.boss.autoAt`) | challenges at estimate E ≥ 1.0 | E ≥ 0.9 (the estimate keeps its 0.85 margin, so ≥ 1.06 of the raw need) | With gear near the reference kit a lone hero's E creeps up ~1% a level once its gear stalls (casual: 0.93 at Lb − 3, 0.98 at Lb) and autopilot never tried, so a Lessons Learned that would win the next attempt (D§9.5) never came: Boss 4–6 a week late on some seeds. Repeat-kill farming keeps E ≥ 1.5. |
+| Auto-boss threshold (`T.boss.autoAt`) | challenges at estimate E ≥ 1.0 (D§9.5); promotion reviews at E ≥ 100% (D§4.5) | E ≥ 0.9 for both, the frontier boss and the Senior / Staff Reviews (`autopilot.autoChallenge`; the estimate keeps its 0.85 margin, so ≥ 1.06 of the raw need) | With gear near the reference kit a lone hero's E creeps up ~1% a level once its gear stalls (casual: 0.93 at Lb − 3, 0.98 at Lb) and autopilot never tried, so a Lessons Learned that would win the next attempt (D§9.5) never came: Boss 4–6 a week late on some seeds. Repeat-kill farming keeps E ≥ 1.5. |
+| The Octopus Merge's tentacles (D§9.6) | "a cut tentacle regrows after 20 ticks (12 once the body is below 40%)": a timer per tentacle | cut tentacles regrow one at a time, one every 20 / 12 ticks (`boss.js` KITS.octopus_merge) | With a timer per tentacle 8 × 5% of the body regrowing every 20 ticks outpaced any solo hero and a trio: the fight could not be won, against D§9.5's 80–140 ticks and mech 0.75. |
+| Bloatodon's installs (D§9.6) | every 12 ticks "+4% max HP and a 4% heal" | +4% of the starting pool as max HP (the raised cap starts empty) and a heal of 4% of the HP it has left; installing stops at 10 deps ("Install complete", the enrage) | A 4%-of-max heal every 12 ticks out-healed a third of an on-level hero's damage and no solo class but the Hotfixer finished in 180 ticks (D§9.5 expects 80–140 and mech 0.8). |
+| A suspended fight (D§9.5) | resumes "until a participant works in the zone again" | a saved participant Questing in the fight's zone resumes it (and one Questing elsewhere drops out of it); a saved Answer-calls helper resumes it from anywhere, as it joined (`boss.resumeFight`) | Any participant Questing anywhere used to resume it and pulled a hero pinned to another zone into the fight; but repeat-kill fights are mostly helpers, and with the zone rule alone they stayed paused for days and blocked every other farm fight. |
 
 ## 8. Simulator (`tools/pacing-sim.mjs`)
 
@@ -160,8 +166,28 @@ Friday Deploy, Hotfixer ~62; the longest: The Catastrophic Backtracker, Forkbind
   already declined an item. A 240-item chest with 30 heroes: claim ~3 ms, ticks median ~0.4 ms, p99
   ~2–3 ms (V8).
 - **The Ignored Warning**'s "+1 warning (n)" stays up for 3 ticks (it was overwritten in the same tick).
+- **herdr's seen flip**: herdr bumps an agent's seq only when the core's status word changes
+  (`src/model.rs` `set_word`); done ↔ idle is its seen flag (`mark_seen`, `set_turn`) and keeps the
+  seq, so `agents.processTops` re-reads that one change at the same seq (`isSeenFlip`). The scripted
+  agents (`demo.js`, the tests' Sim, so `tools/pacing-sim.mjs`) model it: no seq bump on done ↔ idle.
+  Pacing results are unchanged (the sim's done → idle used to bump seq and land in the same place).
+- **Offline gaps settle after reconcile** (`world.tick`): agents that outlived the app are live again,
+  so their chests are not off-duty chests and a Waiting hero earns no Fresh Eyes; a first listing
+  that is empty after an app start holds the gap for up to 10 ticks (`rt.offlineHold`).
+- **The blocked clock is wall-clock time** (`agents.blockedSec`, `syncClocks`): an offline gap or
+  dropped catch-up seconds count towards Unblocked's 10 s and the "! 15m" tag.
+- **Effects age per `world.tick` call** (`settleFx`): a pump that runs 2 steps shows all its effects
+  at age 0 (D§11.7's per-frame number caps applied across the steps) and keeps the last call's fade.
+- A pane closed inside the 8-tick close after working → idle opens its chest as watched.
 
-## 10. Known limits
+## 10. Save contents
+
+| Change | Design | Now | Why |
+|---|---|---|---|
+| Journal length (`logMax`, in `formulas.js`; re-exported by `herd.js`, also used by `items.js`'s own journal lines) | D§13.3: capped at 60 entries (≈ 3 KB) | 120 entries up to 20 heroes, 6 fewer for each hero past 20, so D§13.3's 60 from 30 heroes (`herd.LOG_MAX` 120). A line takes ≈ 38 B in a typical save and up to ≈ 60 B: a save grows by ≈ 2.3–3.6 KB (pacing personas at the end of their run: Casual 10.2 → 13.7 KB, Solo 10.5 → 14.1 KB, Typical 12.7 → 15.9 KB, Heavy 22.3 → 25.9 KB). D§13.3's worst case (30 heroes in full gear, 140 stash items) keeps 60 lines and stays under 30 KB, at ≈ 29 KB; with a flat 120 it would be ≈ 32.5 KB (`test/herd.test.mjs`). | D§11.13 promises a hero's Journal tab "the last 30 events"; 60 lines covered 55–180 minutes of a four-agent herd, 12–17 lines a hero. |
+| First-clear dates (D§10.5) | from the journal | `herd.bossAt` (epoch seconds per boss, set once by `boss.winFight` / `world.tick`, saved on the generic path) | The "FIXED" line rolls out of the journal within hours; the bosses tab lost the date. |
+
+## 11. Known limits
 
 - Real loot is lumpy: one herd's worn gear swings between 0.5× and 2× the reference kit (a Keepsake
   or an LTS weapon, a stretch without a class weapon), so with real gear the kill pace of a given map

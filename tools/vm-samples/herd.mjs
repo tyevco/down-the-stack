@@ -21,11 +21,13 @@ const STRIPE = { working: C.working, blocked: C.blocked, done: C.done, idle: C.i
 const TABS = [["upgrades", "Upgrades"], ["stash", "Stash"], ["tracker", "Tracker"], ["bosses", "Bosses"], ["roster", "Roster"], ["digest", "Digest"], ["settings", "Settings"]];
 
 function header(o = {}) {
+  const sub = o.sub ?? "9 heroes · 2 working · 1 waiting for you";
   return {
     name: o.name ?? "The Herd", release: o.release ?? "v2.3",
     releaseTip: o.releaseTip ?? "Release Train: 562 Seals credited · v2.4 at 584 · +11.5% XP and gold",
     gold: o.gold ?? "212k", snippets: o.snippets ?? "312",
-    sub: o.sub ?? "9 heroes · 2 working · 1 waiting for you",
+    // waiting: the blocked part of sub, drawn in the blocked colour (null when nobody waits)
+    sub, waiting: o.waiting !== undefined ? o.waiting : (/\d+ waiting for you/.exec(sub) ?? [null])[0],
     sprint: o.sprint === undefined ? { label: "The Octopus Merge", have: 45, need: 45, text: "Sprint 45 / 45" } : o.sprint,
   };
 }
@@ -34,6 +36,8 @@ function base(tab, o = {}) {
   return {
     tab, tabs: TABS.map(([id, label]) => ({ id, label, badge: id === "digest" ? (o.digestBadge === undefined ? "4" : o.digestBadge) : null })),
     calm: !!o.calm, header: header(o.header),
+    // save: the save trouble band (D§13.4) from args.save; null while the save is fine
+    save: o.save ?? null,
     upgrades: null, stash: null, tracker: null, bosses: null, roster: null, digest: null, settings: null,
   };
 }
@@ -408,6 +412,18 @@ export const scenarios = {
   digestEmpty: { ...base("digest", { digestBadge: null }), digest: digest(true) },
   /** Settings (herd.cfg). */
   settings: midVm("settings"),
+  /** A save from a newer version, opened read-only (D§13.4): the band under the header. */
+  saveReadOnly: { ...midVm("roster"), save: {
+    title: "Save is read-only",
+    text: "This save is from a newer version of Down the Stack, so it was opened read-only: nothing is saved until that version runs again.",
+    tooltip: "Save is from a newer version (v2); opened read-only",
+  } },
+  /** save.json was damaged and the herd came back from save.bak (D§13.1). */
+  saveRestored: { ...midVm("upgrades"), save: {
+    title: "Save restored from backup",
+    text: "The save file was damaged, so the herd was restored from its backup (save.bak). The damaged file was kept as save.broken.",
+    tooltip: null,
+  } },
 };
 
 /** The role's UI state each scenario is meant to be seen with. */
@@ -428,7 +444,7 @@ export function viewFor(name, args = {}) {
   if (tab === vm.tab && tab !== "stash") return vm;
   if (name === "stashEmpty" && tab === "stash") return { ...vm, stash: herdStash(args.filter ?? {}, { empty: true }) };
   const out = midVm(tab, args.filter ?? {});
-  return { ...out, header: vm.header, calm: vm.calm };
+  return { ...out, header: vm.header, calm: vm.calm, save: vm.save ?? null };
 }
 
 /** The same VM one tick later (gold moved, a bar grew): ids must stay stable. */

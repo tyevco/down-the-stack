@@ -18,8 +18,11 @@
 // runtime-only and never saved. Non-integer numbers are stored with 6 decimals (integers, RNG
 // states and timestamps exactly).
 //
+// herd.inbox (chest items waiting to be offered) uses the stash's item rows under herd.ib.
+//
 // Corrupt input throws an Error with .code "parse" | "shape" | "crc" (the host then tries
-// save.bak, D§13.1). A save from a newer schema version loads read-only (result.readOnly).
+// save.bak, D§13.1); a byte-order mark or whitespace around the JSON is not corruption. A save
+// from a newer schema version loads read-only (result.readOnly).
 
 import {
   GEN, BADGES, BADGE_IDX, MAPS, MAP_BY_ID, BASE_LIST, AFFIXES, LTS_PROPS, KEEPSAKES, CLASSES, SLOTS, ZONES, BUILDINGS,
@@ -419,6 +422,25 @@ const stashCodec = {
   def: () => [],
 };
 
+// herd.inbox (agents.js queueDrop: [finderId, item] pairs waiting for the 1-per-tick drain) can hold
+// thousands of chest items after a burst, so it is stored compact like the stash: {f: [finder ids],
+// i: [item rows]} under "ib". Entries of any other shape keep the whole inbox on the readable
+// extras path ("x"), as before, so nothing is lost if the engine changes the entry format.
+function compactInbox(v) {
+  if (!Array.isArray(v) || !v.length) return null;
+  for (const e of v) {
+    if (!Array.isArray(e) || e.length !== 2 || typeof e[0] !== "number" || !isObj(e[1]) || typeof e[1].base !== "number") return null;
+  }
+  return { f: v.map((e) => q(e[0])), i: encItemList(v.map((e) => e[1])) };
+}
+function expandInbox(c, ctx) {
+  if (!isObj(c) || !Array.isArray(c.f) || !Array.isArray(c.i)) return null;
+  const items = decItemList(c.i, ctx, () => null, "stick");
+  const out = [];
+  for (let k = 0; k < items.length; k++) if (items[k]) out.push([numOr(c.f[k], 0), items[k]]);
+  return out;
+}
+
 const backlogCodec = {
   enc: (v) => [q(numOr(v && v.floor, 0)), q(numOr(v && v.kills, 0))],
   dec: (c) => ({ floor: numOr(Array.isArray(c) ? c[0] : 0, 0), kills: numOr(Array.isArray(c) ? c[1] : 0, 0) }),
@@ -810,6 +832,8 @@ export function encodeState(state) {
   };
   const herdSrc = {};
   for (const k of Object.keys(herd)) if (!HERD_TOP.includes(k)) herdSrc[k] = herd[k];
+  const inbox = compactInbox(herd.inbox);
+  if (inbox) delete herdSrc.inbox;
   const heroes = state.heroes || [];
   // shared strings (seat, space id) used by 2+ heroes go into a table, in order of first use
   const counts = new Map();
@@ -819,6 +843,7 @@ export function encodeState(state) {
   for (const [str, n] of counts) if (n > 1) { strIdx.set(str, table.length); table.push(str); }
   const ctx = { strIdx, base: top.lastMs };
   top.herd = encFields(herdSrc, HERD_FIELDS, ctx);
+  if (inbox) top.herd.ib = inbox;
   top.heroes = heroes.map((h) => encFields(h, HERO_FIELDS, Object.assign({}, ctx, { workSec: heroWorkSec(h.st) })));
   if (table.length) top.str = table;
   const x = {};
@@ -847,6 +872,11 @@ function saveError(code, message) {
  * @throws Error with .code "parse" (not JSON), "shape" (not a save) or "crc" (checksum mismatch)
  */
 export function decodeState(text, opts = {}) {
+  if (typeof text !== "string") throw saveError("parse", "Save is not text");
+  // A byte-order mark or surrounding whitespace (an editor's "insert final newline") is not
+  // corruption: the CRC covers the JSON text itself, which encodeState writes without either.
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+  text = text.trim();
   let obj;
   try {
     obj = JSON.parse(text);
@@ -876,6 +906,9 @@ export function decodeState(text, opts = {}) {
 
   const ctx = { fallbacks: 0, table: Array.isArray(obj.str) ? obj.str : [], base: numOr(obj.lastMs, 0) };
   const herd = decFields(obj.herd, HERD_FIELDS, ctx);
+  delete herd.ib; // (an extras key only if a save put "ib" under herd.x)
+  const inbox = expandInbox(obj.herd.ib, ctx);
+  if (inbox && inbox.length) herd.inbox = inbox;
   herd.lastMs = numOr(obj.lastMs, 0);
   herd.tick = numOr(obj.tick, 0);
   herd.day = numOr(obj.day, 0);

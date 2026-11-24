@@ -174,6 +174,64 @@ describe("the clock (D§2.10, D§2.11)", () => {
     assert.deepEqual(w.rt.errors, []);
   });
 
+  test("reopening the app after more than 24 h: an agent that outlived the app keeps its chest; a Waiting hero earns no Fresh Eyes", () => {
+    // herdr's core keeps terminals while the app is closed (defaults/AGENTS.md): a task ends
+    // "done" (unseen) on Friday, another agent waits for an answer, the laptop closes for 30 h
+    const w = W.createWorld({ nowMs: T0, seed: 3 });
+    let now = run(w, T0, 1200, (i) => [ag("t1", "working"), ag("t2", i < 120 ? "working" : "blocked", i < 120 ? 1 : 2)]);
+    now = run(w, now, 10, () => [ag("t1", "done", 2), ag("t2", "blocked", 2)]);
+    const [h1, h2] = w.state.heroes;
+    assert.equal(h1.pend.length, 1);
+    h2.st.seals = 1; // Fresh Eyes needs a first credited Seal
+    h2.fe = 0;
+    const text = W.serialize(w);
+    const later = now + 30 * 3600000;
+    const kept = [ag("t1", "done", 2), ag("t2", "blocked", 2)];
+    const w2 = W.loadWorld(text, { nowMs: later }).world;
+    W.tick(w2, snap(later, kept));
+    const [k1, k2] = w2.state.heroes;
+    assert.equal(k1.pend.length, 1, "not Unreviewed: its agent is still there, unseen");
+    assert.equal(w2.state.herd.seals, 0);
+    assert.equal(k2.fe, 0, "no Fresh Eyes while Waiting (D§2.9)");
+    // the person looks at it: done -> idle (herdr's seen flip, same seq) pays the full 2 Seals
+    W.tick(w2, snap(later + 1000, [ag("t1", "idle", 2), ag("t2", "blocked", 2)]));
+    assert.equal(k1.pend.length, 0);
+    assert.ok(near(w2.state.herd.seals, 2, 1e-6));
+    // control: a terminal that really ended while the app was closed still opens Unreviewed
+    const w3 = W.loadWorld(text, { nowMs: later }).world;
+    W.tick(w3, snap(later, [ag("t2", "blocked", 2)]));
+    assert.equal(w3.state.heroes[0].pend.length, 0);
+    assert.equal(w3.state.herd.seals, 0);
+    assert.deepEqual(w2.rt.errors, []);
+    assert.deepEqual(w3.rt.errors, []);
+  });
+
+  test("an empty first listing after an app start holds the offline gap until agents appear (or 10 ticks)", () => {
+    const w = W.createWorld({ nowMs: T0, seed: 3 });
+    let now = run(w, T0, 1200, () => [ag("t1", "working")]);
+    now = run(w, now, 10, () => [ag("t1", "done", 2)]);
+    const text = W.serialize(w);
+    const later = now + 30 * 3600000;
+    // herdr has not published its terminals yet on the first pump: nothing expires
+    const w2 = W.loadWorld(text, { nowMs: later }).world;
+    W.tick(w2, snap(later, []));
+    assert.equal(w2.state.heroes[0].pend.length, 1, "held");
+    assert.ok(w2.rt.offlineHold);
+    // the listing arrives a second later: the kept agent is live, its chest stays pending
+    W.tick(w2, snap(later + 1000, [ag("t1", "done", 2)]));
+    assert.equal(w2.rt.offlineHold, null);
+    assert.equal(w2.state.heroes[0].pend.length, 1);
+    // nobody comes back: after 10 ticks the gap is settled as usual (Unreviewed)
+    const w3 = W.loadWorld(text, { nowMs: later }).world;
+    W.tick(w3, snap(later, []));
+    for (let i = 1; i <= 9; i++) W.tick(w3, snap(later + i * 1000, []));
+    assert.equal(w3.state.heroes[0].pend.length, 1, "still held after 9 ticks");
+    W.tick(w3, snap(later + 10000, []));
+    assert.equal(w3.state.heroes[0].pend.length, 0, "settled: Unreviewed");
+    assert.equal(w3.state.herd.seals, 0);
+    assert.deepEqual(w3.rt.errors, []);
+  });
+
   test("a clock that goes backwards accrues nothing until it passes the last tick again", () => {
     const w = W.createWorld({ nowMs: T0, seed: 1 });
     W.tick(w, snap(T0 + 5000));
@@ -308,6 +366,30 @@ describe("the emitter (D§11.7) and runtime flags", () => {
     assert.ok(w.rt.fx.every((f) => w.rt.tick - f.bornTick < 2));
   });
 
+  test("effects age per tick() call: a two-step call shows all its effects at age 0 and keeps the last call's fade frame", () => {
+    // herdr re-arms a 1 s timer after its callback, so now and then one pump runs 2 steps
+    const { w, now, agents } = busyWorld({ heroes: 3, ticks: 40 });
+    const t0 = w.rt.tick;
+    const prev = w.rt.fx.filter((f) => f.bornTick === t0).map((f) => f.key);
+    assert.ok(prev.length > 0, "the last call left age-0 effects");
+    W.tick(w, snap(now + 2000, agents));
+    const t = w.rt.tick;
+    assert.equal(t, t0 + 2);
+    assert.ok(w.rt.fx.every((f) => f.bornTick === t || f.bornTick === t - 1), "every effect is age 0 or 1");
+    for (const k of prev) assert.equal(w.rt.fx.find((f) => f.key === k)?.bornTick, t - 1, `${k} keeps its fade frame`);
+    const firstStep = w.rt.fx.filter((f) => f.key.startsWith(`fx:${t0 + 1}:`));
+    assert.ok(firstStep.length > 0 && firstStep.every((f) => f.bornTick === t), "effects of the first of the two steps show at age 0");
+    // D§11.7 still holds for the frame: at most 2 numbers a hero, 12 a stage
+    const nums = w.rt.fx.filter((f) => f.bornTick === t && ["num", "crit", "heal", "miss", "inv", "abs", "incoming"].includes(f.kind));
+    assert.ok(nums.length <= 12);
+    for (const h of w.state.heroes) assert.ok(nums.filter((f) => f.heroId === h.id).length <= 2);
+    // a one-step call ages exactly as before
+    W.tick(w, snap(now + 3000, agents));
+    assert.ok(w.rt.fx.every((f) => w.rt.tick - f.bornTick < 2));
+    assert.ok(!w.rt.fx.some((f) => f.bornTick < w.rt.tick - 1));
+    assert.deepEqual(w.rt.errors, []);
+  });
+
   test("a note expiring on an idle stage bumps the version (it must not linger)", () => {
     const w = W.createWorld({ nowMs: T0, seed: 1 });
     W.tick(w, snap(T0 + 1000));
@@ -350,7 +432,10 @@ describe("herd trackers in the tick", () => {
     w.state.herd.bossKills[7] = 2;
     W.tick(w, snap(T0 + 3000, [], { weekday: 5 }));
     assert.ok(w.state.herd.badges.includes("read_only_friday"));
-    assert.ok(w.state.herd.log.some((e) => e[1] === "boss" && e[3] === D.BOSSES[7].name));
+    // credit from outside a fight gets boss.js's wording (the digest matches it, D§10.7)
+    assert.ok(w.state.herd.log.some((e) => e[1] === "boss" && e[3] === `${D.BOSSES[7].name} FIXED`));
+    assert.ok(w.state.herd.log.some((e) => e[1] === "boss" && e[3] === `${D.BOSSES[7].name} fixed again`));
+    assert.equal(w.state.herd.bossAt[7], Math.floor((T0 + 2000) / 1000), "the first clear is dated (D§10.5)");
   });
 
   test("a newly opened zone takes the banked Seals; a herd-first kill raises the banner", () => {
@@ -590,6 +675,12 @@ describe("commands (ARCHITECTURE §3.5)", () => {
     assert.equal(W.command(w, "pinMap", { heroId: h1.id, mapId: null }).msg, "Map: auto");
     assert.equal(h1.pinMap, null);
     assert.equal(w.rt.live.get(h1.id).mapId, "1-1");
+    // ids that name Object.prototype members find nothing (null-prototype tables), never a builtin
+    for (const id of ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf"]) {
+      assert.equal(W.command(w, "pinMap", { heroId: h1.id, mapId: id }).error, "No such map", id);
+      assert.equal(W.command(w, "setClass", { heroId: h1.id, cls: id }).error, "Unknown class", id);
+      for (const table of [D.MAP_BY_ID, D.MOB_BY_ID, D.ZONE_BY_ID, D.BOSS_BY_ID, D.SKILL_BY_ID, D.CLASS_IDX, D.MAP_IDX]) assert.equal(table[id], undefined, id);
+    }
   });
 
   test("challenge / retreat", () => {

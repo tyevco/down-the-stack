@@ -259,7 +259,8 @@ Otherwise it runs gpui-shell's checker, `shell/host.rs:453-529`:
    localStorage moves to the gpui-shell per-path store (`host.rs:500`, `604-627`, `693-711`). (A `gpui-shell.json` manifest
    would change this; herdr mods normally have none, `shell/plugin.rs:62`.)
 4. `runtime.check(root)` (`shell/plugin.rs:1357-1393`):
-   `try_load` evaluates the module (5 s budget), runs the constructor, then **`init(undefined, cx)` for real** (500 ms budget).
+   `try_load` evaluates the module (500 ms budget: the load runs in a Task scope, see the budgets note below), runs the
+   constructor, then **`init(undefined, cx)` for real** (500 ms budget).
    Then **one `render(cx)`** (50 ms budget) via `build_snapshot`, then `try_materialize` once for "eager native elements",
    with no layout or paint.
 5. `outcome.exit` → `std::process::exit` immediately (`host.rs:526`, `559-562`). Exit code 0 only if step 4 returned Ok
@@ -302,7 +303,7 @@ processed; `checking()` → `true`; `exec`/`hc`/`writeTextFile` **run for real**
   `setTimeout`/`setInterval`.
 - Stub the herdr module with the values above. Call `new Default()` and then `init(undefined, cx)` for `props()===null`
   **and** for each role's props.
-- Render once per role and time it: under 50 ms (render), 500 ms (init), 5 s (module).
+- Render once per role and time it: under 50 ms (render), 500 ms (init), 500 ms (module).
 - Throw on unknown builder methods, using `gpui-kit.d.ts` method names. Throw on element reuse. Throw on `cx.notify()` during
   render ("not allowed during the `render` phase", `qjs/mod.rs:10037-10055`; `shell/scope.rs:59-61`).
 - Make fs denials synchronous outside the mod folder.
@@ -334,7 +335,10 @@ processed; `checking()` → `true`; `exec`/`hc`/`writeTextFile` **run for real**
   snapshot" (`shell/view.rs:135-162`). Every mod redraw redraws the whole window (AGENTS.md:1084-1086). A stage at 4 re-renders/s
   means 4 window redraws/s, so keep ticks low and lean on native animation.
 - Budgets (interrupt handler, per entry, `qjs/sandbox.rs:423-445`, `493-528`): **render/layout 50 ms**, **event/task/timer
-  500 ms**, **module evaluation 5 s**, and `close` 250 ms shared across copies on quit (`src/window.rs:1429`).
+  500 ms**, and `close` 250 ms shared across copies on quit (`src/window.rs:1429`). **Module evaluation is 500 ms too**:
+  correction (integration audit). The 5 s `detached` budget applies only with no scope at all, but herdr loads every copy
+  (`src/window.rs:1879` `try_load` → `plugin.rs:1235-1250 load_view_with_policy`), `herdr-app check` (`plugin.rs:1360`) and
+  hot reloads (`watch.rs:547-552`) inside `ScopePhase::Task`, which maps to the event budget (`sandbox.rs:513-517`).
 - VM heap: **256 MiB for all mods together** (`sandbox.rs:407-409`). Stack: 1 MiB (`sandbox.rs:417-419`).
 - No hard element-count cap was found. Related limits: 10,000 live entities (focus handles, input states, nested views…)
   (`shell/entities.rs:54`), 4096 retained component states, 1,000,000 virtual items per render, and 10k nodes for component
@@ -561,7 +565,8 @@ Flow:
      network (`shell/host.rs:603-627,693-711`);
    - reads an optional `gpui-shell.json` (`plugin.rs:62`; herdr's `mod.json` is **not** read).
 4. `runtime.check` (`shell/plugin.rs:1357-1393`):
-   - `try_load` evaluates the module (5 s budget), runs the constructor, and calls `init(undefined, cx)` for real (500 ms);
+   - `try_load` evaluates the module (500 ms: Task scope, see the budgets note), runs the constructor, and calls
+     `init(undefined, cx)` for real (500 ms);
    - `build_snapshot` runs **one** `render` (50 ms);
    - `try_materialize` builds the native elements once with `CHECKING` set, so no animation frames are requested
      (`MAT:719-730`). There is no layout and no paint.

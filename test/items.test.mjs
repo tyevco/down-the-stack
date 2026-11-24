@@ -191,6 +191,29 @@ describe("item numbers and names (D§8.3, D§8.7)", () => {
     assert.equal(I.itemName(mkItem(state, "weapon", 3, 0, { type: "stick" })), "Training Stick");
   });
 
+  test("names: a base that already ends in 'of ...' takes no suffix (never 'Treads of Uptime of Caching')", () => {
+    const state = world();
+    const it = (slot, ilvl, rar, aff, extra = {}) => I.itemName(mkItem(state, slot, ilvl, rar, { aff, ...extra }));
+    // the D§14.7 bases with "of": tier-5 hat, hoodie, boots and pipe, the tier-3 duck
+    assert.equal(it("boots", 90, 1, [[A.cache, 5]]), "Treads of Uptime", "an Alpha whose one affix is a suffix: the plain base");
+    assert.equal(it("boots", 90, 2, [[A.typed, 5], [A.cache, 5]]), "Typed Treads of Uptime");
+    assert.equal(it("hoodie", 90, 3, [[A.idem, 5], [A.uptime, 9]]), "Parka of Prod", "suffixes only: the plain base");
+    assert.equal(it("hat", 90, 3, [[A.memo, 10], [A.blame, 90], [A.hot, 40]]), "Blameless Crown of Inbox Zero", "the strongest prefix");
+    assert.equal(it("weapon", 90, 2, [[A.vec, 5], [A.grace, 9]], { type: "pipe" }), "Vectorized Staff of Pure Functions");
+    assert.equal(it("weapon", 50, 1, [[A.grace, 9]], { type: "duck" }), "Duck of Insight");
+    assert.equal(it("weapon", 90, 1, [[A.memo, 9]], { type: "pipe", pol: 3 }), "Memoized Staff of Pure Functions +3");
+    // other bases keep their suffix
+    assert.equal(it("boots", 70, 2, [[A.typed, 5], [A.cache, 5]]), "Typed Commute Boots of Caching");
+    for (const b of D.BASE_LIST) {
+      if (!b || !/ of /.test(b.name)) continue;
+      for (const a of D.AFFIXES) {
+        if (a.kind !== "suffix") continue;
+        const n = I.itemName({ uid: 1, base: b.n, ilvl: 90, rar: 2, pol: 0, aff: [[A[a.id], 50]], flags: 0, prop: -1 });
+        assert.equal((n.match(/ of /g) || []).length, 1, n);
+      }
+    }
+  });
+
   test("canEquip: level, class weapons, stick, armor", () => {
     const state = world([["hotfixer", 20], ["intern", 5]]);
     const [hot, intern] = state.heroes;
@@ -267,6 +290,46 @@ describe("autopilot equip (D§8.7)", () => {
     assert.equal(I.equipItem(state, b, hat).ok, true);
     assert.equal(a.eq[1], null);
     assert.equal(b.eq[1], hat);
+  });
+
+  test("equipItem never replaces a locked item, nor takes a locked one off another hero (D§8.7)", () => {
+    const state = world([["refactorer", 40], ["shellmancer", 40]]);
+    const [a, b] = state.heroes;
+    const locked = mkItem(state, "hat", 30, 2, { flags: I.FLAG_LOCKED });
+    a.eq[1] = locked;
+    const beanie = mkItem(state, "hat", 5, 0);
+    state.herd.stash.push(beanie);
+    const r = I.equipItem(state, a, beanie);
+    assert.equal(r.ok, false);
+    assert.match(r.error, /is locked: unlock it first/);
+    assert.equal(a.eq[1], locked);
+    assert.ok(state.herd.stash.includes(beanie), "nothing moved");
+    const r2 = I.equipItem(state, b, locked);
+    assert.equal(r2.ok, false);
+    assert.match(r2.error, /locked/);
+    assert.equal(a.eq[1], locked);
+    // unlocked, both work
+    locked.flags &= ~I.FLAG_LOCKED;
+    assert.equal(I.equipItem(state, b, locked).ok, true);
+    assert.equal(a.eq[1], null);
+    // a locked item from the stash can be worn (the lock keeps it, it does not pin it to the stash)
+    const pin = mkItem(state, "sticker", 20, 1, { flags: I.FLAG_LOCKED });
+    state.herd.stash.push(pin);
+    assert.equal(I.equipItem(state, a, pin).ok, true);
+  });
+
+  test("repairItem applies the save codec's fallbacks to an item from another content generation", () => {
+    const bad = { uid: 9, base: 4242, ilvl: 0, rar: 9, pol: -2, aff: [[77, 50], [A.memo, 140], [A.memo, 3], "x"], flags: 0, prop: 99 };
+    assert.equal(I.repairItem(bad), true);
+    assert.deepEqual(bad, { uid: 9, base: 0, ilvl: 1, rar: 4, pol: 0, aff: [[0, 50]], flags: 0, prop: 1 });
+    assert.doesNotThrow(() => I.itemName(bad));
+    const lts = { uid: 10, base: 3, ilvl: 20, rar: 4, pol: 0, aff: [], flags: 0, prop: 99 };
+    I.repairItem(lts);
+    assert.equal(lts.prop, 1);
+    const ok = { uid: 11, base: 3, ilvl: 20, rar: 2, pol: 1, aff: [[A.memo, 10]], flags: 2, prop: -1 };
+    const aff = ok.aff;
+    assert.equal(I.repairItem(ok), false);
+    assert.equal(ok.aff, aff, "a valid item is untouched (same aff array)");
   });
 
   test("offerItem: finder first, then the roster, else the stash", () => {

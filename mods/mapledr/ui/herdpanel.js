@@ -31,9 +31,13 @@
  * @property {Array<{id:string, label:string, badge:string|null}>} tabs   digest badge "3" / "•"
  * @property {boolean} calm
  * @property {{name:string, release:string, releaseTip:string, gold:string, snippets:string,
- *            sub:string, sprint:null|{label:string, have:number, need:number, text:string}}} header
+ *            sub:string, waiting:string|null, sprint:null|{label:string, have:number, need:number, text:string}}} header
+ * @property {{title:string, text:string, tooltip:string|null}|null} save   save trouble (D§13.4: a newer
+ *            version opened read-only, not saving, restored from save.bak / a new herd): a band under
+ *            the header for as long as it lasts; null while the save is fine
  *            release "v2.3"; releaseTip "Release Train: 412 Seals · v2.4 at 431 (+0.5% XP and gold each)";
- *            sub "12 heroes · 5 working · 1 waiting for you"; sprint.text "Sprint 18 / 45"
+ *            sub "12 heroes · 5 working · 1 waiting for you"; waiting: the blocked part of sub
+ *            ("1 waiting for you", drawn in the blocked colour) or null; sprint.text "Sprint 18 / 45"
  * @property {UpgradesVM|null} upgrades   only the shown tab's part is filled; the others are null
  * @property {HerdStashVM|null} stash
  * @property {TrackerVM|null} tracker
@@ -217,6 +221,7 @@ export function renderHerd(vm, env) {
   else content = [div().text_color(t.dim).child("Nothing to show here yet.")];
   return root
     .child(header(vm, t, close))
+    .when(Boolean(vm.save), (e) => e.child(saveBand(vm.save, t)))
     .child(tabBar("hd", vm.tabs ?? [], vm.tab, t, TAB_ICONS, (id, cx) => pickTab(ui, id, cx)))
     .child(h_flex().id(`hd-body-${vm.tab}`).flex_1().min_h(0).px(16).pt(10).pb(10).gap(14).items_start().children(content))
     .child(footerBar("hd", ui, t, `1–${(vm.tabs ?? []).length || 7} tabs · Esc closes`));
@@ -264,15 +269,44 @@ function header(vm, t, close) {
         .child(div().min_w(0).truncate().text_size(15).font_semibold().child(h.name))
         .child(div().flex_none().h(18).px(6).rounded(5).bg(t.btn).font_family(MONO).text_size(11).font_semibold()
           .flex().items_center().tooltip(h.releaseTip).child(h.release))
-        .child(div().flex_none().text_size(12).text_color(t.dim).child("Localhost")))
+        .child(div().flex_none().text_size(12).text_color(t.muted).child("Localhost")))
       .child(h_flex().h(16).gap(10).items_center()
-        .child(div().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(h.sub))
+        .child(headerSub(h, t))
         .when(Boolean(sp), (e) => e.child(h_flex().flex_none().gap(6).items_center().tooltip(`Sprint meter: ${sp.label} ${sp.have}/${sp.need}`)
           .child(div().w(56).child(fluidBar(sp.need > 0 ? sp.have / sp.need : 0, 4, t.accent, alpha(t.fg.slice(0, 7), 0.12))))
           .child(div().font_family(MONO).text_size(10.5).text_color(t.muted).whitespace_nowrap().child(sp.text))))))
     .child(money("ui/gold.svg", tone(C.coin, t), h.gold, t, "Gold (shared by the herd)"))
     .child(money("ui/snippet.svg", t.muted, h.snippets, t, "Snippets (from deprecated gear)"))
     .child(close);
+}
+
+/** D§13.4: the save is read-only / not being written / was restored: one line under the header (full text in the tooltip). */
+function saveBand(sv, t) {
+  const col = ink(C.blocked, t);
+  return h_flex().id("hd-save").flex_none().mx(16).mb(8).h(26).px(10).gap(8).items_center().rounded(6)
+    .bg(alpha(C.blocked, t.light ? 0.12 : 0.14)).border(1).border_color(alpha(C.blocked, 0.45))
+    .tooltip(sv.tooltip ? `${sv.text}\n(${sv.tooltip})` : sv.text)
+    .child(div().size(6).flex_none().rounded_full().bg(col))
+    .child(div().flex_none().text_size(11.5).font_semibold().text_color(col).whitespace_nowrap().child(String(sv.title)))
+    .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.fg).child(String(sv.text)));
+}
+
+/**
+ * "9 heroes · 2 working · 1 waiting for you": the counts in muted, the waiting part (header.waiting,
+ * the panel's only blocked signal) in the blocked colour. Falls back to `sub` alone.
+ */
+function headerSub(h, t) {
+  const sub = String(h.sub ?? "");
+  const w = h.waiting ? String(h.waiting) : "";
+  const at = w ? sub.lastIndexOf(w) : -1;
+  if (at < 0) return div().min_w(0).truncate().text_size(11.5).text_color(t.muted).child(sub);
+  // The spaces around the waiting part become the row's gap (a trailing space can be dropped).
+  // When the row is short of room the counts give way (ellipsis), never the waiting part.
+  const before = sub.slice(0, at).trimEnd(), after = sub.slice(at + w.length).trimStart();
+  return h_flex().min_w(0).gap(4).overflow_hidden().text_size(11.5).text_color(t.muted)
+    .when(before.length > 0, (e) => e.child(div().min_w(0).truncate().child(before)))
+    .child(div().flex_none().whitespace_nowrap().font_medium().text_color(ink(C.blocked, t)).child(w))
+    .when(after.length > 0, (e) => e.child(div().min_w(0).truncate().child(after)));
 }
 
 // ── Upgrades ─────────────────────────────────────────────────────────────────────────────────
@@ -283,7 +317,7 @@ function upgradesTab(u, env, ui, t, width) {
     .child(h_flex().flex_wrap().gap(12).children((u.buildings ?? []).map((b) => buildingCard(b, env, ui, t, colW))))
     .child(div().flex_1())
     .child(h_flex().gap(10).items_center()
-      .child(div().flex_1().min_w(0).text_size(11).text_color(t.dim).child(u.note ?? ""))
+      .child(div().flex_1().min_w(0).text_size(11).text_color(t.muted).child(u.note ?? ""))
       .when(Boolean(u.trophies), (e) => e.child(div().flex_none().text_size(11).text_color(t.muted).child(u.trophies))))];
 }
 
@@ -300,7 +334,7 @@ function buildingCard(b, env, ui, t, w) {
         .child(div().flex_none().font_family(MONO).text_size(11).text_color(b.maxed ? t.good : t.muted).child(b.levelText)))
       .child(pips(b.level, b.max, t))
       .child(div().min_w(0).truncate().text_size(11.5).text_color(t.fg).child(b.effect))
-      .child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child(b.next ?? "Maxed out")))
+      .child(div().min_w(0).truncate().text_size(11).text_color(t.muted).child(b.next ?? "Maxed out")))
     .child(b.buy
       ? actionButton(`hd-buy-${b.key}`, b.buy, env, ui, t, { h: 38, px: 8, size: 12, w: 92, stack: true })
       : div().w(92).flex_none().text_center().text_size(11).font_semibold().text_color(t.good).child("MAX"));
@@ -351,7 +385,7 @@ function zoneRow(z, on, ui, t) {
       .when(Boolean(z.tierName), (e) => e.child(tag(z.tierName, tierColor(z.tier, t), t, { h: 15, size: 9.5 }))))
     .child(fluidBar(z.progress.frac, 3, tone(tierColor(z.tier + 1, t), t), alpha(t.fg.slice(0, 7), t.light ? 0.1 : 0.12)))
     .child(h_flex().gap(6).items_center()
-      .child(div().flex_1().min_w(0).truncate().font_family(MONO).text_size(10.5).text_color(t.dim).child(z.progress.text))
+      .child(div().flex_1().min_w(0).truncate().font_family(MONO).text_size(10.5).text_color(t.muted).child(z.progress.text))
       .child(div().flex_none().text_size(10.5).text_color(t.muted).child(z.perk)));
 }
 
@@ -399,9 +433,9 @@ function bossReport(b, t) {
     .child(div().w(70).h(60).flex_none().rounded(8).bg(t.well).flex().items_center().justify_center()
       .child(image(art(b.sprite)).w(62).h(53).opacity(b.known ? 1 : 0.15)))
     .child(v_flex().flex_1().min_w(0).gap(2)
-      .child(div().text_size(10.5).text_color(t.dim).child("Zone boss"))
+      .child(div().text_size(10.5).text_color(t.muted).child("Zone boss"))
       .child(div().min_w(0).truncate().text_size(13).font_semibold().child(b.known ? b.name : "???"))
-      .child(div().text_size(11).text_color(b.cleared ? t.good : t.dim).child(b.cleared ?? "Not fixed yet")))
+      .child(div().text_size(11).text_color(b.cleared ? t.good : t.muted).child(b.cleared ?? "Not fixed yet")))
     .child(div().flex_none().font_family(MONO).text_size(10.5).text_color(t.muted).child(b.kills));
 }
 
@@ -447,7 +481,7 @@ function bossRow(b, env, ui, t) {
     .child(v_flex().flex_1().min_w(0).gap(3)
       .child(h_flex().gap(8).items_center()
         .child(div().min_w(0).truncate().text_size(12.5).font_semibold().text_color(locked ? t.muted : t.fg).child(b.name))
-        .child(div().flex_none().text_size(11).text_color(t.dim).child(b.where)))
+        .child(div().flex_none().text_size(11).text_color(t.muted).child(b.where)))
       .child(h_flex().gap(5).items_center().overflow_hidden()
         .child(tag(b.stateText, col, t, { h: 16, size: 10 }))
         .children((b.chips ?? []).map((c) => div().id(`hd-bc-${b.key}-${c.key}`).flex_none().h(16).px(5).rounded(4).flex().items_center()
@@ -495,7 +529,7 @@ function rosterRow(row, env, ui, t, calm) {
         .child(div().min_w(0).truncate().text_size(12.5).font_medium().text_color(off ? t.muted : t.fg).child(row.name))
         .child(div().flex_none().font_family(MONO).text_size(10.5).text_color(t.muted).child(row.level)))
       .child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child(`${row.title} · ${row.where}`)))
-    .child(div().w(110).flex_none().text_right().text_size(11).text_color(t.dim).child(row.seen))
+    .child(div().w(110).flex_none().text_right().text_size(11).text_color(t.muted).child(row.seen))
     // Retire sits in a fixed-width cell so every row's Sheet button lines up.
     .child(h_flex().w(64).flex_none().justify_end()
       .when(Boolean(row.retire), (e) => e.child(actionButton(`hd-ret-${row.key}`, row.retire, env, ui, t, { h: 24, px: 8, size: 11, cost: false }))))
@@ -526,7 +560,7 @@ function rosterRowSlim(row, env, ui, t) {
     .child(div().w(170).flex_none().truncate().text_size(12).font_medium().text_color(off ? t.muted : t.fg).child(row.name))
     .child(div().w(42).flex_none().font_family(MONO).text_size(10.5).text_color(t.muted).child(row.level))
     .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(`${row.title} · ${row.where}`))
-    .child(div().w(100).flex_none().truncate().text_right().text_size(11).text_color(t.dim).child(row.seen))
+    .child(div().w(100).flex_none().truncate().text_right().text_size(11).text_color(t.muted).child(row.seen))
     .child(retire)
     .child(iconButton(`hd-sheet-${row.key}`, "ui/sheet.svg", t, `Open ${row.name}'s character sheet`, () => openSheet(row.heroId), 12));
 }
@@ -556,7 +590,7 @@ function digestTab(d, env, ui, t) {
       .children(s.lines.map((l) => h_flex().id(`hd-dl-${l.key}`).min_h(24).gap(8).items_center()
         .child(div().size(6).flex_none().rounded_full().bg(tone(l.color, t)))
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(l.tint ? ink(l.color, t) : t.fg).child(l.text))
-        .when(Boolean(l.sub), (e) => e.child(div().flex_none().text_size(11).text_color(t.dim).child(l.sub)))
+        .when(Boolean(l.sub), (e) => e.child(div().flex_none().text_size(11).text_color(t.muted).child(l.sub)))
         .when(Boolean(l.action), (e) => e.child(actionButton(`hd-da-${l.key}`, l.action, env, ui, t, { h: 22, px: 8, size: 11, cost: false }))))));
   }
   return [v_flex().w_full().h_full().gap(8).child(head)

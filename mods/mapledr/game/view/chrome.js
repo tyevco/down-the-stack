@@ -24,6 +24,10 @@
 //    finds its hero through a terminal -> [hero, live] index rebuilt once per version (O(1) per
 //    pane header). hudView also carries `calm`, so a key command can read it without building a
 //    party (ui/party.js chromeCommand).
+//  - A boss participant shows its fight only while it is in it (D§9.5): fighting, holding while
+//    blocked, or rebooting. A done or idle one has walked out (boss.js keeps it in heroIds until it
+//    leaves the roster). The pane header's chip puts the hero's own state first ("! waiting",
+//    "rebooting"); only a fighting hero's reads "BOSS 41%".
 //
 // Pure: no herdr / gpui imports, no Date.now(), no Math.random(); never mutates the world.
 
@@ -51,6 +55,13 @@ const COL = {
 };
 const STATUS_COLOR = { working: COL.working, blocked: COL.blocked, done: COL.done, idle: COL.idle };
 const STATUSES = { working: 1, blocked: 1, done: 1, idle: 1 };
+// Lookups keyed by strings from herdr (status words, program keys) go through own(): a key named
+// like an Object.prototype member ("constructor", "toString", "__proto__") must not hit it.
+const own = (o, k) => typeof k === "string" && Object.prototype.hasOwnProperty.call(o, k);
+// D§9.5: a boss participant that goes idle or done walks out of the fight (it may rejoin); a
+// blocked one holds in the arena and a crashed one rejoins, so those two still show the fight.
+const WALKED_OUT = { shipped: 1, resting: 1, off: 1 };
+const FIGHTING = { questing: 1, supervising: 1 };
 
 // Termling look per hero state (D§11.1 faces; the face ink is the status colour).
 const FACE = { questing: ">_", waiting: "o_o", shipped: "^_^", resting: "-_-", supervising: ">_", crashed: ":(", off: "-_-" };
@@ -100,7 +111,7 @@ function fmtMin(min) {
 
 /** herdr's status word, unknown statuses as idle (D§2.10). */
 export function statusWord(s) {
-  return STATUSES[s] ? s : "idle";
+  return own(STATUSES, s) ? s : "idle";
 }
 
 /** ProgramIcon {path, tint, color} from herdr's Program record, or null. */
@@ -109,11 +120,12 @@ export function programIconOf(program) {
   return { path: program.icon, tint: !!program.tint, color: isHex(program.color) ? program.color : "#ffffff" };
 }
 
-/** Title-bar tint for a program key (D§2.8). */
+/** Title-bar tint for a program key (D§2.8); always one of TITLE_BARS (or the neutral bar). */
 export function titleBarOf(programKey) {
   if (!programKey) return "#33384A";
-  const i = TITLE_BAR_OF[programKey];
-  return TITLE_BARS[i != null ? i : fnv1a32(String(programKey)) % TITLE_BARS.length];
+  const key = String(programKey);
+  const i = own(TITLE_BAR_OF, key) ? TITLE_BAR_OF[key] : fnv1a32(key) % TITLE_BARS.length;
+  return TITLE_BARS[i] || "#33384A";
 }
 
 /** HeroVM.colors for a hero in a state ("questing" ... "crashed", or "off" for off duty). */
@@ -352,7 +364,10 @@ function heroFacts(world, idx, hero, live) {
   const state = live ? live.state || "resting" : "off";
   const career = careerOf(hero);
   const xpFrac = xpFracOf(hero);
-  const fight = idx.fights.get(hero.id) || null;
+  const listed = idx.fights.get(hero.id) || null;
+  // boss.js keeps a participant in heroIds after it walks out; the chrome shows the fight only
+  // while the hero is in it (fighting, holding while blocked, or rebooting)
+  const fight = listed && !WALKED_OUT[state] ? listed : null;
   return {
     state, career, xpFrac, feFrac: feFracOf(hero, xpFrac), fight,
     status: live ? statusWord(live.status) : "idle",
@@ -364,14 +379,39 @@ function heroFacts(world, idx, hero, live) {
   };
 }
 
-function questLine(world, hero, live, f) {
+// What an agent puts before its title: a status glyph or spinner and the separator after it
+// ("✳ Fix flaky auth test", "⠋ - Thinking", Codex's "[ ! ] "). herdr's agents list strips the same
+// (defaults/mods/agents/main.js clean()); its regex, so titles read alike in both.
+const TITLE_MARK = /^(?:\[ [!.] \] |[✋⏳]\uFE0F?(?=\s)|(?!(?:\p{Emoji}\uFE0F|[#*]\u20E3))[^\p{L}\p{N}\p{Ps}\p{Pi}\p{Emoji_Presentation}])+/u;
+
+/** The terminal's task as the tooltips name it: the engine's quest title, else the terminal title. */
+function taskTitle(live) {
+  const task = live.task;
+  const raw = task && task.title ? str(task.title) : str(live.title);
+  return raw.replace(TITLE_MARK, "").trim() || raw.trim();
+}
+
+/** "Waiting for you for 2m on “Bump deps and fix types”". */
+function waitLine(live, f) {
+  const title = taskTitle(live);
+  return `Waiting for you for ${fmtDuration(f.blocked)}${title ? ` on “${title}”` : ""}`;
+}
+
+/** A blocked or crashed participant's fight (it holds, or rejoins after the reboot; D§9.5). */
+function holdLine(f) {
+  if (!f.fight || FIGHTING[f.state]) return "";
+  return `${fightLine(f.fight)} · ${f.state === "waiting" ? "holding until you answer" : "rejoins after the reboot"}`;
+}
+
+/** The quest line; opts.row adds the party row's click hint to the waiting line. */
+function questLine(world, hero, live, f, opts = {}) {
   const rt = world.rt;
   const fight = f.fight;
-  if (fight) return fightLine(fight);
+  if (fight && FIGHTING[f.state]) return fightLine(fight);
   const task = live.task;
-  const title = task && task.title ? task.title : str(live.title).trim();
+  const title = taskTitle(live);
   switch (f.state) {
-    case "waiting": return `Waiting for you for ${fmtDuration(f.blocked)} · click to jump there`;
+    case "waiting": return `${waitLine(live, f)}${opts.row ? " · click to jump there" : ""}`;
     case "crashed": return `Rebooting: back in ${Math.max(1, num(live.crashedUntil) - rt.tick)}s`;
     case "supervising": {
       const n = (live.forklings || []).filter((x) => x.status === "working").length;
@@ -382,7 +422,7 @@ function questLine(world, hero, live, f) {
       return `Shipped${title ? `: ${title}` : ""}`;
     case "resting": return "Resting at the campfire";
     default:
-      if (task && task.title) return `Quest: ${task.title} (${fmtDuration(num(task.workSec))})`;
+      if (task && task.title) return `Quest: ${title} (${fmtDuration(num(task.workSec))})`;
       return `Questing in ${mapLabelOf(world, live) || "the Stack"}`;
   }
 }
@@ -437,11 +477,11 @@ function liveChips(world, idx, hero, live, f) {
   const rest = [];
   if (f.state === "waiting") {
     const t = f.blocked >= CLOCK_AFTER_SEC ? `! ${fmtDuration(f.blocked, { capHour: true })}` : "!";
-    urgent.push(chip(hero.id, "blocked", t, COL.blocked, { tooltip: `Waiting for you for ${fmtDuration(f.blocked)}` }));
+    urgent.push(chip(hero.id, "blocked", t, COL.blocked, { tooltip: waitLine(live, f) }));
   } else if (f.state === "crashed") {
     urgent.push(chip(hero.id, "crashed", "rebooting", COL.hp, { tooltip: "Crashed at 0 HP: back in a few seconds" }));
   }
-  if (f.fight) {
+  if (f.fight) { // fighting, or holding / rebooting in the arena (walked-out heroes have none)
     const review = f.fight.kind === "review";
     urgent.push(chip(hero.id, review ? "review" : "boss", review ? "REVIEW" : `BOSS ${leftPct(f.fight)}%`, COL.hp,
       { tooltip: fightLine(f.fight) }));
@@ -476,7 +516,9 @@ function liveChips(world, idx, hero, live, f) {
 }
 
 function rowTooltip(world, idx, hero, live, f) {
-  const lines = [headLine(hero, f, live), questLine(world, hero, live, f)];
+  const lines = [headLine(hero, f, live), questLine(world, hero, live, f, { row: true })];
+  const hold = holdLine(f);
+  if (hold) lines.push(hold);
   const xp = hero.L >= T.levelCap ? "XP MAX" : `XP ${Math.floor(f.xpFrac * 100)}%`;
   lines.push(`HP ${fmtInt(live.hp)} / ${fmtInt(live.maxHp)} · ${xp}${hero.fe >= 1 ? ` · Fresh Eyes ${fmtMin(hero.fe)}` : ""}`);
   const why = whyLine(f.why);
@@ -617,23 +659,31 @@ export function partyView(world, args = {}) {
 
 let PLATES = { rt: null, version: -1, map: new Map() };
 
+/**
+ * The nameplate's status chip (D§11.12): {text, short, color}. `short` is the form a very narrow
+ * header shows. The hero's own state comes first: a blocked boss participant reads "! waiting" (it
+ * holds in the arena), a crashed one "rebooting"; only a fighting one shows "BOSS 41%".
+ */
 function plateChip(world, hero, live, f) {
-  if (f.fight) {
-    return f.fight.kind === "review" ? { text: "REVIEW", color: COL.hp } : { text: `BOSS ${leftPct(f.fight)}%`, color: COL.hp };
+  if (f.fight && FIGHTING[f.state]) {
+    const text = f.fight.kind === "review" ? "REVIEW" : `BOSS ${leftPct(f.fight)}%`;
+    return { text, short: text, color: COL.hp };
   }
   switch (f.state) {
-    case "waiting":
-      return { text: f.blocked >= CLOCK_AFTER_SEC ? `! waiting ${fmtDuration(f.blocked, { capHour: true })}` : "! waiting", color: COL.blocked };
-    case "shipped": return { text: f.chest ? "shipped · chest ready" : "shipped", color: COL.done };
-    case "resting": return { text: "resting", color: COL.idle };
-    case "crashed": return { text: "rebooting", color: COL.hp };
+    case "waiting": {
+      const clock = f.blocked >= CLOCK_AFTER_SEC ? fmtDuration(f.blocked, { capHour: true }) : "";
+      return { text: clock ? `! waiting ${clock}` : "! waiting", short: clock ? `! ${clock}` : "!", color: COL.blocked };
+    }
+    case "shipped": return { text: f.chest ? "shipped · chest ready" : "shipped", short: "shipped", color: COL.done };
+    case "resting": return { text: "resting", short: "resting", color: COL.idle };
+    case "crashed": return { text: "rebooting", short: "rebooting", color: COL.hp };
     case "supervising": {
       const n = (live.forklings || []).filter((x) => x.status === "working").length;
-      return { text: `supervising ${n} ${plural(n, "Forkling")}`, color: COL.idle };
+      return { text: `supervising ${n} ${plural(n, "Forkling")}`, short: "supervising", color: COL.idle };
     }
     default: {
       const where = shortMap(world, live);
-      return { text: where ? `fighting ${where}` : "fighting", color: COL.idle };
+      return { text: where ? `fighting ${where}` : "fighting", short: where || "fighting", color: COL.idle };
     }
   }
 }
@@ -644,6 +694,8 @@ function plateTooltip(world, hero, live, f) {
   const gear = Math.round(num(st.pl, hero.L)) - hero.L;
   lines.push(`Power Level ${hero.L + gear} = Lv ${hero.L} ${gear < 0 ? "−" : "+"} gear ${Math.abs(gear)}`);
   lines.push(questLine(world, hero, live, f));
+  const hold = holdLine(f);
+  if (hold) lines.push(hold);
   if (f.why) {
     const fe = hero.fe >= 1 ? `Fresh Eyes ${fmtMin(hero.fe)}` : "No Fresh Eyes yet";
     lines.push(`${fe} · Shift ${shiftText(f.why)}`);

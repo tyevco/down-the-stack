@@ -1205,8 +1205,11 @@ export const MOB_GLYPHS = {
 // Derived structures and lookups
 // =============================================================================================
 
+// Lookup tables are null-prototype objects: an id from a save, a command or a herdr label that
+// names an Object.prototype member ("constructor", "toString", "__proto__") finds nothing
+// instead of a builtin (herdr freezes the prototypes; the qjs fuzz phase feeds such ids).
 function byId(list) {
-  const o = {};
+  const o = Object.create(null);
   for (const x of list) o[x.id] = x;
   return o;
 }
@@ -1226,7 +1229,7 @@ for (const cls of Object.keys(SKILLS.byClass)) {
 }
 
 /** Every skill by id (e.g. SKILL_BY_ID.big_rewrite). */
-export const SKILL_BY_ID = {};
+export const SKILL_BY_ID = Object.create(null);
 for (const cls of Object.keys(SKILLS.byClass)) for (const sk of SKILLS.byClass[cls]) SKILL_BY_ID[sk.id] = sk;
 
 // Boss and review adds get the id of the lane entity (and art) they spawn as.
@@ -1292,7 +1295,7 @@ export const CHEST_TIER_BY_ID = byId(CHEST_TIERS);
 
 /** id -> integer index helpers for the tables whose index is the save id. */
 function indexOf(list) {
-  const o = {};
+  const o = Object.create(null);
   list.forEach((x, i) => { o[x.id] = i; });
   return o;
 }

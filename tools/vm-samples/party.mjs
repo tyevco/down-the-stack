@@ -65,7 +65,8 @@ function row(id, o) {
 }
 
 const chip = (id, kind, text, color, extra) => ({ key: `c:${id}:${kind}`, kind, text, color, ...extra });
-// The Forkling count: a click shows the first blocked (else working) sub-agent (agent.focus).
+// The Forkling count: a click shows the first blocked (else working) sub-agent: its pane if it
+// has one (pane.focus), else herdr's peek (terminal.peek), as herdr's agents list opens sub-agents.
 const forkChip = (id, n, terminal) => chip(id, "fork", String(n), C.idle, { terminal, tooltip: `${n} Forklings · click to jump to one` });
 
 const FOOTER = { gold: "48.2k", snippets: "133", release: "v2.3", sprint: { label: "Pyramid of Doom", have: 7, need: 10 }, digestDot: true };
@@ -85,7 +86,7 @@ const rue = row(2, {
   mapLabel: "1-3 Warning Gate", status: "blocked", programIcon: ICON.codex,
   hpFrac: 0.64, xpFrac: 0.71,
   chips: [chip(2, "blocked", "! 2m", C.blocked)],
-  tooltip: "Rue Two-Spaces · Lv 11 Junior Rubberducker\nWaiting for you for 2m · click to jump there",
+  tooltip: "Rue Two-Spaces · Lv 11 Junior Rubberducker\nWaiting for you for 2m on “Waiting for approval: run migrations?” · click to jump there",
 });
 const ada = row(3, {
   name: "Ada Null-Safe", level: 17, careerTitle: "Junior Hotfixer", clsName: "Hotfixer",

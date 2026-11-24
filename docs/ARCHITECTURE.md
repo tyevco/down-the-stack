@@ -378,7 +378,18 @@ export default class Mapledr extends View {
 ```
 
 Role objects are plain classes (`init(props, cx, host)`, `render(cx)`, optional `command(name,cx)`,
-`close(cx)`), like the shipped win98 mod (`patterns.md` §3). A role reads only
+`close(cx)`), like the shipped win98 mod (`patterns.md` §3).
+
+**UI role contract (decided before the UI build).** Each `ui/<role>.js` exports a default class as
+above plus a pure `render<Role>(vm, env)` with `env = { width, height, zoom, theme: T(), host, act }`,
+where `act(name, args) === host.command(name, args)`. A role gets its view model with
+`host.view(kind, args)` (`kind` ∈ `stage|party|nameplate|hud|sheet|herd`; `args` = the second
+parameter of the matching §5 function); it returns `null` while the world loads. Herdr chrome
+commands (focus, overlays, toggles) are called with `run()`/`openOverlay()`/`closeOverlay()` from
+handlers, never during render. Sample view models live in `tools/vm-samples/<role>.mjs`
+(`export const scenarios`) and are both the preview fixtures and the spec `view.js` must match;
+fields a renderer adds beyond §5 are documented in a JSDoc "VM additions" block at the top of its
+module. A role reads only
 `host.world`-derived view models via `game/view.js` and herdr live data it needs for chrome
 (e.g. the nameplate reads `panes()` for the real terminal title).
 
@@ -578,6 +589,14 @@ SVG only, no `<text>`, crisp pixel-art style (`shape-rendering="crispEdges"` on 
 | `art/ui/slot-<weapon|hat|hoodie|mug|boots|sticker>.svg` | 16×16 | MASK icons for the paper doll |
 | `art/ui/<name>.svg` | 16×16 | MASK icons: `split-right, split-down, zoom, unzoom, close, sheet, herd, calm, gold, snippet, chest, boss, star, fork, gear, skills, stats, career, journal, lock` |
 | `preview.svg` | 320×200 | layout preview |
+| `art/fx/chest-duck.svg`, `chest-duck-open.svg` | 28×28 | Duck Chest (D§11.4) |
+| `art/gear/weapon-<clsId>-edge.svg` | 16×16 | MASK of the weapon rim; stacked in cyan over tier-5 weapons so the dark metal stays visible |
+| `art/bg/backlog-*` | as zones | The Backlog's far/prop/ground set |
+
+Notes from the art build: every mob sprite already draws its code joke, so `MobVM.glyph` is
+normally `null` (tooltip text only). Mobs and bosses are bottom-anchored (`top = feetY − h`);
+props stand on y = 160. Boss parts: one tentacle (octopus), one key-less head (hydra), one cube
+(monolith). `senior_reviewer.svg` serves both reviews. `ribbon.svg` is full colour (gold).
 
 Palette per zone from D§9.2; rarity colours D§8.2; reserved colours D§11.1.
 

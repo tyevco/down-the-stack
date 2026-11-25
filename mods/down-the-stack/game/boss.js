@@ -61,7 +61,10 @@ function note(ev, text, color) {
 }
 function jot(world, ev, kind, heroId, text, value) {
   if (ev && typeof ev.journal === "function") ev.journal(kind, heroId, text, value);
-  else Herd.journal(world.state, kind, heroId, text, value, nowMs(world));
+  else {
+    const h = heroId ? findHero(world, heroId) : null; // a Contractor too (journal names, round 4)
+    Herd.journal(world.state, kind, heroId, text, value, nowMs(world), h ? h.name : undefined);
+  }
 }
 function major(ev) {
   if (ev && typeof ev.major === "function") ev.major();

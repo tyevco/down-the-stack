@@ -368,23 +368,35 @@ const MOB_ART = {
     g.rect(10, 22, 2, 1, INK);
     g.outline(OUT);
   },
-  semicolon_snail(g) {
-    const body = "#f0a07b", shell = "#f4e6c1", semi = "#6b4a9e";
-    g.poly([[4, 20], [22, 20], [26, 26], [2, 26]], body);
-    g.oval(2, 14, 10, 12, body);
-    volume(g, body);
-    g.fine(() => { g.line(4, 15, 3, 8, body, 1.6); g.line(8, 15, 9, 8, body, 1.6); });
-    g.oval(10, 2, 17, 20, shell); g.shade(shell, "#d8c08a", 1, 1, 2); g.shade(shell, WHITE, -1, -1, 1);
-    // the shell IS a semicolon: a dot over a comma with a tail
+  // round 4: a sloth, not a snail (a snail as the first slow mob echoed a famous game's starters):
+  // slow on its feet, sleepy-eyed, a ; marked on its back, long pale claws reaching for the ground
+  semicolon_sloth(g) {
+    const fur = "#b59a7a", furD = "#8f7558", face = "#f3e6cc", mask = "#6f5543", claw = "#f2ede2", semi = "#6b4a9e";
+    // back leg and body (low and long), then the reaching front arm
+    g.rect(19, 20, 6, 6, furD);
+    g.oval(8, 9, 19, 15, fur);
+    volume(g, fur);
+    g.poly([[4, 19], [12, 16], [15, 21], [7, 26], [2, 26]], fur);
+    g.shade(fur, furD, 0, 1, 1);
+    // the ; on its back: a dot over a comma with a tail
     g.fine(() => {
-      g.oval(15, 5, 6, 6, semi);
-      g.oval(15, 12, 6, 6, semi); g.poly([[17, 16], [21, 16], [17, 21], [14, 21]], semi);
+      g.oval(17, 9, 5, 5, semi);
+      g.oval(17, 15, 5, 5, semi); g.poly([[19, 19], [22, 18], [18, 23], [16, 23]], semi);
     });
-    g.rect(2, 7, 3, 3, INK); g.rect(8, 7, 3, 3, INK); g.set(2, 7, WHITE); g.set(8, 7, WHITE);
-    g.fine(() => g.rect(3, 19, 3, 1, dk(body, 0.45)));
+    // head: round, a pale face with the dark eye stripes, half-closed (sleepy) eyes
+    g.oval(1, 4, 12, 12, fur);
+    g.oval(2, 6, 10, 9, face);
+    g.fine(() => {
+      g.rect(2, 9, 4, 2, mask); g.rect(7, 9, 4, 2, mask);
+      g.rect(3, 10, 2, 1, INK); g.rect(8, 10, 2, 1, INK);
+      g.rect(5, 12, 2, 1, "#3a2a20");
+      g.rect(5, 14, 2, 1, dk(face, 0.4));
+    });
     g.outline(OUT);
-    // dotted trail
-    for (const x of [22, 25]) g.rect(x, 26, 2, 1, "#c9e7a8");
+    // three long claws on the front paw, over the outline (drawn after it, lightly outlined)
+    g.fine(() => {
+      for (const x of [1, 3, 5]) { g.rect(x, 24, 1, 2, claw); g.set(x, 26, dk(claw, 0.35)); }
+    });
   },
   unused_import(g) {
     const imp = "#9c8fb8", crate = "#b9824b", plank = "#8f5f32", label = "#f3ead2";
@@ -2100,7 +2112,7 @@ function preview() {
   g.rect(210, top, 1, bottom - top, "#1b1726");
   const half = (id, size, x) => { const m = mobGrid(id, size); g.stamp(m, x, ground - m.h / 2, { scale: 0.5 }); };
   miniTermling(g, 90, ground - 13, "#6c8cf5", { hat: "#e86f9c" });
-  half("typo_sprout", "S", 128); half("semicolon_snail", "S", 152); half("unused_import", "M", 178);
+  half("typo_sprout", "S", 128); half("semicolon_sloth", "S", 152); half("unused_import", "M", 178);
   const ch = chest("gold", false); g.stamp(ch, 104, ground - 11, { scale: 0.5 });
   miniTermling(g, 226, ground - 13, "#f07d5c", { face: "blocked" });
   const b = new Grid(18, 20); FX_ART["bubble.svg"][2](b); g.stamp(b, 227, ground - 25, { scale: 0.5 });

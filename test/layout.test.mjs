@@ -1,21 +1,26 @@
-// The layout (layouts/Down-the-Stack.json), the mod manifest (mods/down-the-stack/mod.json) and the suggested
-// keys (keys.example.json), checked against herdr 0.1.17's own rules:
+// The layout (layouts/Down-the-Stack.json), the mod manifest (mods/down-the-stack/mod.json), the optional
+// keys (keys.json: herdr's install flow merges a file of that name, defaults/AGENTS.md "Layouts and
+// mods other people made") and the licence files, checked against herdr 0.1.17's own rules:
 //   - layout schema: src/layout.rs (Node, Content, PaneFrame, Header, Background, Size, Look);
 //     colors: settings.rs (`#rrggbb[aa]` or a theme name; unknown names paint magenta);
 //   - palette entries: defaults/frame/palette/main.js (modEntry);
-//   - keys: src/keys.rs (sections, actions) and defaults/keys*.json (collisions).
-// docs/herdr-notes/layout.md summarises all of it. The herdr source tree is optional: when it is
-// next to the repo (or at $HERDR_SRC) the shipped lists are read from it and the layout is also
-// diffed against the shipped main.json; otherwise the snapshots below are used.
+//   - keys: src/keys.rs (sections, actions, parse()) and defaults/keys*.json (collisions).
+// docs/herdr-notes/layout.md summarises all of it. The herdr source tree is optional: when it is at
+// $HERDR_SRC (tools/mock/config.mjs) the shipped lists are read from it and the layout is also
+// diffed against the shipped main.json; otherwise the snapshots below are used, and each gate that
+// needs the source says so in one line (tools/mock/gates.mjs; STRICT_GATES=1 fails instead).
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { HERDR_SRC, herdrSource, herdrMissing, skipGate } from "../tools/mock/gates.mjs";
+import { COMMANDS as DOC_COMMANDS } from "../tools/mock/herdr-commands.mjs";
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const HERDR = process.env.HERDR_SRC ?? path.resolve(REPO, "..", "herdrdev", "herdr-app");
+const HERDR = HERDR_SRC;
+const KEYS_FILE = path.join(REPO, "keys.json");
 const LAYOUT_FILE = path.join(REPO, "layouts", "Down-the-Stack.json");
 /** The mod folder: herdr shows it to players (Keys overlay, failed-command toasts, "did not load"). */
 const MOD = "down-the-stack";
@@ -89,8 +94,17 @@ const APP_COMMANDS = {
   "mod.open": [{ name: "name", required: true }],
 };
 
-/** The mod's own commands (ARCHITECTURE §4) and the roles a layout node may ask for (§1). */
-const MOD_COMMANDS = new Set(["sheet", "herd", "calm"]);
+/**
+ * The mod's own commands (ARCHITECTURE §4): the key commands main.js hands to host.hotkey (its
+ * HOTKEYS table, read from the source so a new one cannot be missed), and the roles a layout node
+ * may ask for (§1).
+ */
+const MOD_COMMANDS = (() => {
+  const src = fs.readFileSync(path.join(MOD_DIR, "main.js"), "utf8");
+  const m = /^const HOTKEYS = \{([^}]*)\};$/m.exec(src);
+  assert.ok(m, "main.js: const HOTKEYS = { … };");
+  return new Set([...m[1].matchAll(/(?:"([^"]+)"|([A-Za-z_$][\w$]*))\s*:/g)].map((x) => x[1] ?? x[2]));
+})();
 const LAYOUT_ROLES = new Set(["stage", "party", "nameplate", "hud"]);
 
 // ---------------------------------------------------------------------------------------------
@@ -439,7 +453,7 @@ describe("layouts/Down-the-Stack.json", () => {
 
   test("differs from herdr's shipped main.json only by the Down the Stack changes", (t) => {
     const main = readJsonIfAny(path.join(HERDR, "defaults", "layouts", "main.json"));
-    if (!main) return t.skip("herdr source not found (set HERDR_SRC)");
+    if (!main) return skipGate(t, "the layout against herdr's shipped main.json", herdrMissing());
     // Undo exactly the documented changes; what is left must be main, key for key.
     const undone = JSON.parse(JSON.stringify(layout));
     delete undone.preview;
@@ -477,7 +491,7 @@ describe("layouts/Down-the-Stack.json", () => {
 
   test("the preview picture, when generated, is a 320×200 SVG without <text>", (t) => {
     const file = path.join(REPO, layout.preview);
-    if (!fs.existsSync(file)) return t.skip(`${layout.preview} not generated yet (tools/gen-art.mjs)`);
+    if (!fs.existsSync(file)) return skipGate(t, "the layout preview picture", `${layout.preview} not generated yet: npm run art`);
     const svg = fs.readFileSync(file, "utf8");
     assert.match(svg, /viewBox="0 0 320 200"/);
     assert.ok(!/<text[\s>]/.test(svg), "no <text>: fonts are not guaranteed in the SVG renderer");
@@ -563,8 +577,88 @@ function normKey(stroke) {
 }
 const MODIFIERS = new Set(["ctrl", "alt", "shift", "cmd", "super", "win", "fn", "platform"]);
 
-describe("keys.example.json", () => {
-  const keys = readJson(path.join(REPO, "keys.example.json"));
+/**
+ * herdr's app command table: src/commands.rs when the source is there (`cmd("name", &[req("a"),
+ * opt("b")], …)`), else the copy of its generated docs/commands.md the mock uses. name → [{name, required}].
+ */
+const HERDR_COMMANDS = (() => {
+  const out = new Map();
+  let rs = null;
+  try { rs = fs.readFileSync(path.join(HERDR, "src", "commands.rs"), "utf8"); } catch { rs = null; }
+  if (rs) {
+    for (const m of rs.matchAll(/\bcmd\("([^"]+)",\s*&\[([^\]]*)\]/g)) {
+      out.set(m[1], [...m[2].matchAll(/\b(req|opt)\("([^"]+)"\)/g)].map((a) => ({ name: a[2], required: a[1] === "req" })));
+    }
+    return out;
+  }
+  for (const c of DOC_COMMANDS) out.set(c.name, c.args.map((a) => ({ name: a.name, required: a.required })));
+  return out;
+})();
+
+/**
+ * herdr 0.1.17's keys.json reader, src/keys.rs parse() (its first error rejects the whole file and
+ * herdr keeps the defaults): the sections tab() accepts, string actions (gone_mod: a `<mod>.<cmd>`
+ * whose mods/<mod> folder is missing is dropped silently; valid_action), the reserved escape hatch,
+ * and object bindings (CommandBinding::command: only command/args, a real command, args an
+ * object that validate_args accepts). Returns {problems, dropped, bindings: [{section, keys, action}]}.
+ */
+function readKeys(text, { commands = HERDR_COMMANDS, modDirs = new Set([MOD]) } = {}) {
+  let sections;
+  try { sections = JSON.parse(text); } catch (e) { return { problems: [`not JSON: ${e.message}`], dropped: [], bindings: [] }; }
+  // serde: BTreeMap<String, BTreeMap<String, Binding>>, Binding = String | Map (untagged)
+  if (!isObj(sections)) return { problems: ["keys.json must be an object of sections"], dropped: [], bindings: [] };
+  for (const [sec, map] of Object.entries(sections)) {
+    if (!isObj(map)) return { problems: [`${sec}: a section must be an object of key → action`], dropped: [], bindings: [] };
+    for (const [k, a] of Object.entries(map)) if (typeof a !== "string" && !isObj(a)) return { problems: [`${sec}.${k}: an action is a string or an object`], dropped: [], bindings: [] };
+  }
+  const nameOf = (a) => (a.includes(":") ? a.slice(0, a.indexOf(":")) : a);
+  const goneMod = (a) => {
+    const n = nameOf(a);
+    if (commands.has(n) || !n.includes(".")) return false;
+    const m = n.slice(0, n.indexOf("."));
+    // (mods_dir().join("") is mods/ itself, a folder: an empty mod part is never "gone")
+    return m !== "" && !m.startsWith("frame-") && !modDirs.has(m);
+  };
+  const validAction = (a) => {
+    const n = nameOf(a);
+    const at = n.indexOf(".");
+    return commands.has(n) || a === "terminal" || a.startsWith("send:") || (at > 0 && at < n.length - 1);
+  };
+  const problems = [], dropped = [], bindings = [];
+  for (const [section, map] of Object.entries(sections)) {
+    const mod = section.startsWith("mod:") ? section.slice(4) : null;
+    const lay = section.startsWith("layout:") ? section.slice(7) : null;
+    if (!(section === "global" || section === "terminal" || mod || lay)) {
+      problems.push(`unknown section ${JSON.stringify(section)}: use "global", "terminal", "layout:<name>" or "mod:<name>"`);
+      continue;
+    }
+    for (const [keys, action] of Object.entries(map)) {
+      if (typeof action === "string") {
+        if (goneMod(action)) { dropped.push(`${section}.${keys}`); continue; }
+        if (!validAction(action)) { problems.push(`${section}.${keys}: unknown action ${JSON.stringify(action)}`); continue; }
+      }
+      if (keys === "ctrl-alt-shift-escape") { problems.push("ctrl-alt-shift-escape is reserved for resetting Herdr"); continue; }
+      if (isObj(action)) {
+        const extra = Object.keys(action).find((f) => f !== "command" && f !== "args");
+        const spec = typeof action.command === "string" ? commands.get(action.command) : null;
+        const args = action.args ?? {};
+        if (extra) problems.push(`${section}.${keys}: unknown key binding field ${JSON.stringify(extra)}; use command and args`);
+        else if (typeof action.command !== "string") problems.push(`${section}.${keys}: key binding command must be a string`);
+        else if (!spec) problems.push(`${section}.${keys}: unknown key binding command ${JSON.stringify(action.command)}`);
+        else if (!isObj(args)) problems.push(`${section}.${keys}: ${action.command}: key binding args must be an object`);
+        else {
+          const unknown = Object.keys(args).filter((k) => !spec.some((a) => a.name === k));
+          if (unknown.length) problems.push(`${section}.${keys}: ${action.command}: unknown argument(s): ${unknown.join(", ")}`);
+        }
+      }
+      bindings.push({ section, keys, action });
+    }
+  }
+  return { problems, dropped, bindings };
+}
+
+describe("keys.json", () => {
+  const keys = readJson(KEYS_FILE);
   const name = path.basename(LAYOUT_FILE, ".json");
 
   test(`has exactly one section, "layout:${name}" (unknown sections reject the whole keys.json)`, () => {
@@ -606,11 +700,66 @@ describe("keys.example.json", () => {
         assert.ok(byId(value), `${k}: no node "${value}" in the layout`);
         assert.ok(!["sidebar", "panel"].includes(value), `${k}: herdr already binds that toggle`);
       } else {
-        assert.ok(cmd.startsWith(`${MOD}.`), `${k}: unknown action ${action}`);
-        assert.ok(MOD_COMMANDS.has(cmd.slice(MOD.length + 1)), `${k}: ${cmd} is not a ${MOD} command`);
-        assert.equal(value, undefined, `${k}: mod commands take no argument`);
+        // not an app command: herdr hands the mod everything after the first '.' (window.rs run_as),
+        // "stage:show" included, so the whole tail must be a command main.js handles
+        assert.ok(action.startsWith(`${MOD}.`), `${k}: unknown action ${action}`);
+        assert.ok(MOD_COMMANDS.has(action.slice(MOD.length + 1)), `${k}: ${action} is not a ${MOD} command`);
       }
     }
+  });
+
+  test("is the file herdr's install flow merges: keys.json at the repo's root (keys.example.json is gone)", () => {
+    // defaults/AGENTS.md "Layouts and mods other people made": an installing agent merges a
+    // keys.json it finds next to the layouts and mods; a keys.example.json it skips
+    assert.ok(fs.existsSync(KEYS_FILE));
+    assert.ok(!fs.existsSync(path.join(REPO, "keys.example.json")), "one keys file, under the name herdr's install flow reads");
+  });
+
+  test("herdr's keys.rs reads it without a problem and drops no binding; only the layout:Down-the-Stack section", () => {
+    const r = readKeys(fs.readFileSync(KEYS_FILE, "utf8"));
+    assert.deepEqual(r.problems, []);
+    assert.deepEqual(r.dropped, [], "a <mod>.<command> whose mod folder is missing is bound to nothing");
+    assert.deepEqual([...new Set(r.bindings.map((b) => b.section))], [`layout:${name}`]);
+    assert.equal(r.bindings.length, Object.keys(keys[`layout:${name}`]).length);
+  });
+
+  test("every action names a real command: herdr's (with a valid shorthand argument) or one main.js handles", () => {
+    for (const { keys: k, action } of readKeys(fs.readFileSync(KEYS_FILE, "utf8")).bindings) {
+      assert.equal(typeof action, "string", k);
+      const colon = action.indexOf(":");
+      const head = colon < 0 ? action : action.slice(0, colon);
+      const spec = HERDR_COMMANDS.get(head);
+      if (spec) {
+        // commands::shorthand: the value fills the first argument; run_as refuses one for a
+        // command without arguments, and commands::missing a required one left empty
+        assert.ok(spec.length > 0, `${k}: ${head} takes no shorthand argument`);
+        const args = colon < 0 ? {} : { [spec[0].name]: action.slice(colon + 1) };
+        for (const a of spec) if (a.required) assert.ok(typeof args[a.name] === "string" && args[a.name].trim(), `${k}: ${head} needs ${a.name}`);
+        if (head.startsWith("layout.") && args.id) assert.ok(byId(args.id), `${k}: no node "${args.id}" in the layout`);
+      } else {
+        // `<mod>.<command>`: herdr hands the mod everything after the first '.' (mods::send_command)
+        const at = action.indexOf(".");
+        assert.equal(action.slice(0, at), MOD, `${k}: ${action}`);
+        assert.ok(MOD_COMMANDS.has(action.slice(at + 1)), `${k}: main.js handles no "${action.slice(at + 1)}" (HOTKEYS)`);
+      }
+    }
+  });
+
+  test("the keys.rs reader catches the mistakes herdr rejects or drops", () => {
+    const one = (section, action) => readKeys(JSON.stringify({ [section]: { "ctrl-shift-g": action } }));
+    assert.deepEqual(one(`layout:${name}`, "layout.toggle:stage").problems, []);
+    assert.match(one("layout:", "layout.toggle:stage").problems.join(), /unknown section/);
+    assert.match(one("layouts:x", "layout.toggle:stage").problems.join(), /unknown section/);
+    assert.match(one(`layout:${name}`, "toggle-stage").problems.join(), /unknown action/);
+    assert.match(one(`layout:${name}`, ".sheet").problems.join(), /unknown action/);
+    assert.deepEqual(one(`layout:${name}`, "not-installed.sheet").dropped, [`layout:${name}.ctrl-shift-g`]);
+    assert.deepEqual(one(`layout:${name}`, `${MOD}.stage:show`).problems, []);
+    assert.match(readKeys(JSON.stringify({ global: { "ctrl-alt-shift-escape": "app.help" } })).problems.join(), /reserved/);
+    assert.match(one("global", { command: "layout.resize", args: { typo: 1 } }).problems.join(), /unknown argument/);
+    assert.match(one("global", { command: "layout.nope" }).problems.join(), /unknown key binding command/);
+    assert.match(one("global", { command: "layout.resize", why: 1 }).problems.join(), /unknown key binding field/);
+    assert.match(readKeys(JSON.stringify({ global: { k: 3 } })).problems.join(), /string or an object/);
+    assert.match(readKeys("{").problems.join(), /not JSON/);
   });
 
   test("binds the stage toggle and the character sheet", () => {
@@ -624,7 +773,7 @@ describe("keys.example.json", () => {
 
 describe("the mod folder name (herdr shows it to players)", () => {
   const manifest = readJson(path.join(MOD_DIR, "mod.json"));
-  const keys = readJson(path.join(REPO, "keys.example.json"));
+  const keys = readJson(KEYS_FILE);
   const ids = [
     ...manifest.palette.map((p) => p.command).filter((c) => !APP_COMMANDS[c]),
     ...Object.values(Object.values(keys)[0]).filter((a) => !APP_COMMANDS[a.split(/:(.*)/s)[0]]),
@@ -646,9 +795,10 @@ describe("the mod folder name (herdr shows it to players)", () => {
     // and the palette's mod.open names this folder (palette/main.js modPalettes drops one that does not)
     for (const p of manifest.palette.filter((e) => e.command === "mod.open")) assert.equal(p.args.name, MOD);
     for (const id of ids) {
-      // window.rs run_as: `name:value` shorthand first (split_once(':')), then a mod's
-      // `<mod>.<command>` (split_once('.')) → mods::send_command(m, c)
-      assert.ok(!id.includes(":"), `${id}: a colon would be read as name:value`);
+      // window.rs run_as: `name:value` shorthand only when the part before ':' is an app command
+      // (commands::find), then a mod's `<mod>.<command>` (split_once('.')) → mods::send_command(m, c)
+      const colon = id.indexOf(":");
+      assert.ok(colon < 0 || !APP_COMMANDS[id.slice(0, colon)], `${id}: would be read as an app command's name:value`);
       const at = id.indexOf(".");
       const [m, c] = [id.slice(0, at), id.slice(at + 1)];
       assert.equal(m, MOD, id);
@@ -687,8 +837,79 @@ describe("the mod folder name (herdr shows it to players)", () => {
     assert.ok(layout.preview.startsWith(`mods/${MOD}/`), layout.preview);
     const ours = V.mods.filter((m) => m.name === MOD);
     assert.equal(ours.length, 4, "stage, party, nameplate, hud");
-    for (const file of [LAYOUT_FILE, path.join(MOD_DIR, "mod.json"), path.join(REPO, "keys.example.json")]) {
+    for (const file of [LAYOUT_FILE, path.join(MOD_DIR, "mod.json"), KEYS_FILE]) {
       assert.doesNotMatch(fs.readFileSync(file, "utf8"), /maple/i, path.relative(REPO, file));
     }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Licences (round 4, L5) and the repository's name (L4)
+
+describe("licences and names", () => {
+  const read = (...rel) => fs.readFileSync(path.join(REPO, ...rel), "utf8");
+  const MIT_START = "MIT License\n\nCopyright (c) 2026 Tyler Coles\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\n";
+
+  test("the repository and the mod folder (what people install) carry the MIT licence", () => {
+    for (const rel of [["LICENSE"], ["mods", MOD, "LICENSE"]]) {
+      const text = read(...rel);
+      assert.ok(text.startsWith(MIT_START), `${rel.join("/")}: the standard MIT text with its copyright line`);
+      assert.match(text, /THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND/);
+    }
+    assert.equal(read("mods", MOD, "LICENSE"), read("LICENSE"), "the same text in both");
+    assert.equal(readJson(path.join(REPO, "package.json")).license, "MIT");
+  });
+
+  test("the mod folder credits what it adapts from herdr-app under Apache-2.0, with the licence beside it", () => {
+    const apache = read("mods", MOD, "LICENSE-APACHE-2.0");
+    assert.equal(apache, read("tools", "mock", "LICENSE-APACHE-2.0"));
+    assert.match(apache, /Apache License\s+Version 2\.0, January 2004/);
+    const notice = read("mods", MOD, "NOTICE");
+    assert.match(notice, /herdr-app 0\.1\.17/);
+    assert.match(notice, /LICENSE-APACHE-2\.0 in this\s+folder/);
+    // every adapted part, under the file that holds it (and that file exists)
+    for (const [file, origin] of [
+      ["game/agents.js", "defaults/mods/agents/main.js"], ["ui/party.js", "defaults/mods/agents/main.js"],
+      ["ui/nameplate.js", "defaults/mods/pane/main.js"], ["ui/nameplate.js", "defaults/mods/peek/main.js"],
+      ["host.js", "defaults/mods/agents/main.js"],
+      ["game/view/chrome.js", "defaults/programs.json"], ["layouts/Down-the-Stack.json", "defaults/layouts/main.json"],
+    ]) {
+      const at = notice.indexOf(`\n${file}\n`);
+      assert.ok(at >= 0, `NOTICE names ${file}`);
+      const block = notice.slice(at, notice.indexOf("\n\n", at + 1));
+      assert.ok(block.includes(origin), `${file}: from ${origin}`);
+      assert.ok(fs.existsSync(file.startsWith("layouts/") ? path.join(REPO, file) : path.join(MOD_DIR, file)), file);
+    }
+    // tools/mock no longer claims the whole repository is the project's own work
+    const mockNotice = read("tools", "mock", "NOTICE");
+    assert.doesNotMatch(mockNotice, /Everything else in this repository is the project's own work/);
+    assert.match(mockNotice, /mods\/down-the-stack\/NOTICE/);
+  });
+
+  test("the NOTICE's verbatim parts are herdr's: TITLE_MARK is the clean() regex of the agents list", (t) => {
+    const agents = fs.readFileSync(path.join(MOD_DIR, "game", "agents.js"), "utf8");
+    const mark = /^const TITLE_MARK = (\/.+\/u);$/m.exec(agents);
+    assert.ok(mark, "game/agents.js TITLE_MARK");
+    const file = path.join(HERDR, "defaults", "mods", "agents", "main.js");
+    if (!herdrSource() || !fs.existsSync(file)) return skipGate(t, "TITLE_MARK against herdr's defaults/mods/agents/main.js", herdrMissing());
+    assert.ok(fs.readFileSync(file, "utf8").includes(`.replace(${mark[1]}, "")`), "herdr's clean() regex, unchanged");
+  });
+
+  test("package.json and its lock carry the repository's name (tyevco/down-the-stack)", () => {
+    const pkg = readJson(path.join(REPO, "package.json"));
+    const lock = readJson(path.join(REPO, "package-lock.json"));
+    assert.equal(pkg.name, "down-the-stack");
+    assert.equal(lock.name, pkg.name);
+    assert.equal(lock.packages[""].name, pkg.name);
+  });
+
+  test("herdr's source tree is there for the gates that read it (else the shipped lists above are 0.1.17 snapshots)", (t) => {
+    if (!herdrSource()) return skipGate(t, "layout, keys and palette checks against herdr's own source", herdrMissing());
+    assert.ok(fs.existsSync(path.join(HERDR, "src", "keys.rs")));
+    assert.ok(fs.existsSync(path.join(HERDR, "src", "commands.rs")));
+    // the docs copy the mock and the snapshots use is the source's command table
+    const rs = [...fs.readFileSync(path.join(HERDR, "src", "commands.rs"), "utf8").matchAll(/\bcmd\("([^"]+)"/g)].map((m) => m[1]).sort();
+    assert.deepEqual(DOC_COMMANDS.map((c) => c.name).sort(), rs, "tools/mock/herdr-commands.md is herdr's command table");
+    for (const m of SHIPPED_MODS_SNAPSHOT) assert.ok(SHIPPED_MODS.has(m), `${m}: in the snapshot, not in herdr's defaults/mods`);
   });
 });

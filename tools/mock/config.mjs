@@ -13,8 +13,13 @@ export const TOOLS_DIR = path.dirname(MOCK_DIR);
 export const REPO = path.dirname(TOOLS_DIR);
 export const MODS_DIR = path.join(REPO, "mods");
 export const OUT_DIR = path.join(REPO, "out");
-/** Read-only herdr source checkout (for the shipped program icons). */
-export const HERDR_SRC = "/home/user/herdrdev/herdr-app";
+/**
+ * Read-only herdr-app 0.1.17 source checkout (the shipped program icons; the tests' herdr gates
+ * read its defaults and src): $HERDR_SRC, else a `herdrdev/herdr-app` checkout next to this repo.
+ * tools/mock/gates.mjs says when a test cannot read it.
+ */
+export const HERDR_SRC_DEFAULT = path.resolve(REPO, "..", "herdrdev", "herdr-app");
+export const HERDR_SRC = process.env.HERDR_SRC || HERDR_SRC_DEFAULT;
 
 /** herdr's appHome() and home() in the mock. Both are virtual (in-memory FS). */
 export const APP_HOME = "/mock/home";

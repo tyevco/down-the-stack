@@ -85,7 +85,7 @@ const NULLABLE = new Set([
   "heroes[].programIcon", "heroes[].hat", "heroes[].bubble", "heroes[].campfire", "heroes[].tag",
   "heroes[].rebootFrac", "mobs[].glyph", "chests[].address", "boss.banner", "boss.stamp",
   "boss.partSprite", "boss.mechText", "boss.phaseLabel", "fx[].color", "fx[].size",
-  "rooms[].pin", "rooms[].challenge", "boss.retreat", "heroes[].reviewEnd",
+  "rooms[].pin", "rooms[].challenge", "boss.retreat", "heroes[].reviewEnd", "mobs[].heroId",
 ]);
 
 function conform(v, node, path, errs) {
@@ -524,6 +524,59 @@ test("overflow: protected heroes stay, the chip counts the rest, refolds wait up
   assert.ok(vm1.overflow && vm1.overflow.x + vm1.overflow.w <= 1200.5, "the camp chip still fits");
 });
 
+test("overflow: the camp chip's tooltip names at most 12 heroes, most relevant first (waiting, chest, working, resting), then 'and N more'", async () => {
+  const G = {
+    Demo: await import("../mods/down-the-stack/game/demo.js"), W: await import("../mods/down-the-stack/game/world.js"),
+    liveHeroes: (await import("../mods/down-the-stack/game/agents.js")).liveHeroes, ...(await import("../mods/down-the-stack/game/herd.js")),
+  };
+  const { findHero } = await import("../mods/down-the-stack/game/combat.js");
+  const { world: w } = stressWorld(G, NOW, 60);
+  // 20 waiting (more than squeezed slots hold at 1600 px, so some wait at camp), 10 with a chest,
+  // the rest resting or questing in turn
+  let i = 0;
+  const kind = new Map();
+  for (const [id, live] of w.rt.live) {
+    const k = i++;
+    live.focused = false; live.pinned = false;
+    findHero(w, id).pend = [];
+    if (k % 3 === 0 && k < 60) { live.state = "waiting"; live.bubbleShown = true; live.blockedSince = w.rt.tick - 300; kind.set(id, 0); } else if (k % 6 === 1) {
+      live.state = "resting"; findHero(w, id).pend = [{ min: 30, fmin: 0, title: "Bump deps", at: NOW - 60000, sealFactor: 1 }]; kind.set(id, 1);
+    } else if (k % 2) { live.state = "questing"; kind.set(id, 2); } else { live.state = "resting"; kind.set(id, 3); }
+  }
+  w.rt.version++;
+  const vm = stageView(w, { width: 1600, height: 200, nowMs: NOW });
+  const folded = [...w.rt.live.keys()].filter((id) => !vm.heroes.some((h) => h.heroId === id));
+  assert.equal(vm.overflow.count, folded.length);
+  assert.ok(folded.length > 20, `${folded.length} at camp`);
+  assert.ok(folded.some((id) => kind.get(id) === 0), "some waiting heroes are at camp");
+  const lines = vm.overflow.tooltip.split("\n");
+  assert.equal(lines[0], `At camp (${folded.length}):`);
+  assert.equal(lines.length, 1 + 12 + 1, vm.overflow.tooltip);
+  // the twelve named: most relevant first
+  const byName = new Map(folded.map((id) => [findHero(w, id).name, id]));
+  const ranks = lines.slice(1, 13).map((l) => kind.get(byName.get(l.split(" · ")[0])));
+  assert.deepEqual(ranks, ranks.slice().sort((a, b) => a - b), `ranks ${ranks}`);
+  const waitingAtCamp = folded.filter((id) => kind.get(id) === 0).length;
+  assert.equal(ranks.filter((r) => r === 0).length, Math.min(12, waitingAtCamp), "every waiting hero at camp is named first");
+  for (const l of lines.slice(1, 13)) {
+    const r = kind.get(byName.get(l.split(" · ")[0]));
+    assert.match(l, r === 0 ? / · waiting for you$/ : r === 1 ? / · chest waiting$/ : r === 2 ? / · questing$/ : / · resting$/, l);
+  }
+  // the rest, counted by kind
+  const rest = folded.filter((id) => !lines.slice(1, 13).some((l) => byName.get(l.split(" · ")[0]) === id));
+  const count = (r) => rest.filter((id) => kind.get(id) === r).length;
+  const parts = [[0, "waiting"], [1, "with a chest"], [2, "working"], [3, "resting"]].filter(([r]) => count(r)).map(([r, word]) => `${count(r)} ${word}`);
+  assert.equal(lines[13], `…and ${folded.length - 12} more (${parts.join(", ")})`);
+  // the dots follow the same order: a waiting hero's amber comes first (the chip draws ten)
+  assert.equal(vm.overflow.dots.length, folded.length);
+  assert.equal(vm.overflow.dots[0], "#F2A93B");
+  // a small camp lists everyone, and no "more" line
+  const late = stageView(world("late"), { width: 1200, height: 200, nowMs: NOW });
+  const ll = late.overflow.tooltip.split("\n");
+  assert.equal(ll.length, 1 + late.overflow.count);
+  assert.ok(!ll.some((l) => l.startsWith("…and")));
+});
+
 test("cues: bubbles, crates, tags, zzz, campfires, chests and why tooltips come from the engine", () => {
   const vm = stageView(world("blocked"), { width: 1200, height: 200, nowMs: NOW });
   const waiting = vm.heroes.filter((h) => h.state === "waiting");
@@ -760,7 +813,11 @@ test("a map pin shows wherever the map is named (header, hero tooltip, party row
   const part = `1-1 is ${Math.round(echo.L - MAP_BY_ID["1-1"].mid)} levels below: ×${mult}`;
   assert.ok(hv.tooltip.includes(part), hv.tooltip);
   const row = partyView(w, { width: 268, nowMs: ref.now }).groups.flatMap((g) => g.rows).find((r) => r.heroId === 1);
-  assert.equal(row.mapLabel, "1-1 Squiggle Path (pinned)");
+  // the party row: the map stays plain on line 2 (a "(pinned)" there was cut off at the default
+  // sidebar width); the pin is RowVM.mapPin, a glyph beside the level with its reason as tooltip
+  assert.equal(row.mapLabel, "1-1 Squiggle Path");
+  assert.deepEqual(row.mapPin, { tooltip: "Pinned to 1-1 Squiggle Path: the autopilot keeps it on this map (Auto on the Career tab's Map card unpins it)" });
+  assert.ok(row.tooltip.split("\n").includes(row.mapPin.tooltip), row.tooltip);
   assert.ok(row.tooltip.includes(part), row.tooltip);
   const filter = { slot: "all", minRar: 0, usable: false, sort: "score", focus: null, squash: [] };
   const gp = sheetView(w, { heroId: 1, tab: "stats", filter }).stats.why.parts.find((p) => p.key === "gap");
@@ -775,6 +832,7 @@ test("a map pin shows wherever the map is named (header, hero tooltip, party row
   vm = stageView(w, { width: 1600, height: 200, nowMs: ref.now });
   assert.ok(vm.rooms.every((r) => !r.pin || r.pin.pinned === false));
   assert.doesNotMatch(vm.heroes.find((h) => h.heroId === 1).tooltip, /\(pinned/);
+  assert.equal(partyView(w, { width: 268, nowMs: ref.now }).groups.flatMap((g) => g.rows).find((r) => r.heroId === 1).mapPin, null);
 });
 
 test("a pinned hero in a mixed room is told the sheet's Map card unpins it (the header's click would pin the whole room)", () => {
@@ -1146,6 +1204,58 @@ test("budget: most of 60 heroes blocked or holding chests: 30 slots at most, eve
   assert.ok(vw.overflow.x + vw.overflow.w <= 6000.5);
 });
 
+/** A lane mob's drawn box (ui/stage.js mob(): px × 1.25 elite × growScale), widened by its pacing swing. */
+function mobReach(m) {
+  const size = Math.round(m.px * (m.elite ? 1.25 : 1) * (m.growScale || 1));
+  const swing = m.pacing ? m.paceAmp : 0;
+  return [m.x - size / 2 - swing, m.x + size / 2 + swing];
+}
+
+/** The mob's body and swing stay inside its own hero's slot. */
+function assertInSlot(m, h, where) {
+  const [lo, hi] = mobReach(m);
+  assert.ok(lo >= h.slot.x - 0.01 && hi <= h.slot.x + h.slot.w + 0.01,
+    `${where}: ${m.key} (${m.px} px${m.elite ? " elite" : ""} × ${m.growScale}${m.pacing ? `, pacing ±${m.paceAmp}` : ""}) spans ${lo.toFixed(1)}..${hi.toFixed(1)}, outside its slot ${h.slot.x}..${h.slot.x + h.slot.w}`);
+}
+
+test("layout: every lane mob names its hero (MobVM.heroId) and stays inside that hero's slot, body and pacing swing, at every width", async () => {
+  const G = {
+    Demo: await import("../mods/down-the-stack/game/demo.js"), W: await import("../mods/down-the-stack/game/world.js"),
+    liveHeroes: (await import("../mods/down-the-stack/game/agents.js")).liveHeroes, ...(await import("../mods/down-the-stack/game/herd.js")),
+  };
+  const { findHero } = await import("../mods/down-the-stack/game/combat.js");
+  const worlds = DEMO_KINDS.map((k) => [k, world(k)]);
+  // a stressed herd: chests (the hero steps right), large and elite mobs at the back of the lane
+  const { world: sw } = stressWorld(G, NOW, 30);
+  let i = 0;
+  for (const [id, live] of sw.rt.live) {
+    if (i % 3 === 0) findHero(sw, id).pend = [{ min: 30, fmin: 0, title: "Bump deps", at: NOW - 60000, sealFactor: 1 }];
+    for (const m of live.lane || []) if (i % 2) m.elite = true;
+    i++;
+  }
+  sw.rt.version++;
+  worlds.push(["stress", sw]);
+  let checked = 0;
+  for (const [kind, w] of worlds) {
+    for (const width of [360, 960, 1600, 2400, 2700, 3600, 4500]) {
+      const vm = stageView(w, { width, height: 200, nowMs: NOW });
+      for (const m of vm.mobs) {
+        const where = `${kind} @${width}`;
+        if (m.heroId == null) {
+          // only a boss fight's adds stand outside any slot (in the arena)
+          assert.ok(vm.boss && m.x >= vm.boss.arena.x && m.x <= vm.boss.arena.x + vm.boss.arena.w, `${where}: ${m.key} names no hero`);
+          continue;
+        }
+        const h = vm.heroes.find((x) => x.heroId === m.heroId);
+        assert.ok(h, `${where}: ${m.key} names hero ${m.heroId}, not on stage`);
+        assertInSlot(m, h, where);
+        checked++;
+      }
+    }
+  }
+  assert.ok(checked > 300, `checked ${checked}`);
+});
+
 test("layout: in a squeezed slot a working hero's chest stays clear of its body, and the front mob of the hero", async () => {
   const G = {
     Demo: await import("../mods/down-the-stack/game/demo.js"), W: await import("../mods/down-the-stack/game/world.js"),
@@ -1161,6 +1271,7 @@ test("layout: in a squeezed slot a working hero's chest stays clear of its body,
   }
   w.rt.version++;
   let checked = 0;
+  let mobsChecked = 0;
   for (const width of [2700, 3600, 4500, 6000]) {
     const vm = stageView(w, { width, height: 200, nowMs: NOW });
     for (const h of vm.heroes) {
@@ -1171,19 +1282,21 @@ test("layout: in a squeezed slot a working hero's chest stays clear of its body,
       const body = [h.x - 20 * h.scale, h.x + 20 * h.scale];
       assert.ok(c.x - 14 >= h.slot.x - 0.5, `${where}: chest inside the slot`);
       assert.ok(c.x + 14 <= body[0] + 4 + 0.01, `${where}: chest ${c.x - 14}..${c.x + 14} under the body ${body[0]}..${body[1]}`);
-      const front = vm.mobs.filter((m) => m.lane === 0 && m.x > h.slot.x && m.x < h.slot.x + h.slot.w)[0];
+      // each mob names the hero whose lane it stands in (MobVM.heroId): judged against its own
+      // slot, a mob pushed into a neighbouring slot cannot pass as that slot's
+      const own = vm.mobs.filter((m) => m.heroId === h.heroId);
+      const front = own.find((m) => m.lane === 0);
       // (a mob that grows, D§7 traits, may still reach in: its base size at the slot's scale clears)
       if (front) assert.ok(front.x - (front.px * h.scale) / 2 >= body[1] - 0.01, `${where}: front mob at ${front.x} (${front.px} px × ${front.growScale}, ${front.size}) over the body ..${body[1]} (hero at ${h.x}, scale ${h.scale}, slot ${h.slot.x})`);
-      // the hero stepping right never pushes a mob of its lanes out of its slot (a lane that would
-      // leave the slot is dropped): every mob standing in the slot keeps its centre inside it, and
-      // its body reaches at most 12 px past the slot's end (the last lane's spacing: 10 px measured)
-      for (const m of vm.mobs) {
-        if (m.x > h.slot.x && m.x < h.slot.x + h.slot.w) assert.ok(m.x + (m.px * h.scale) / 2 <= h.slot.x + h.slot.w + 12, `${where}: mob at ${m.x} (${m.px} px) runs past the slot's end ${h.slot.x + h.slot.w}`);
-      }
+      // the hero stepping right never pushes a mob of its lanes out of its slot: every one of its
+      // mobs keeps its whole drawn body, and its pacing swing, inside the slot (the true bound)
+      for (const m of own) assertInSlot(m, h, where);
+      mobsChecked += own.length;
       checked++;
     }
   }
   assert.ok(checked >= 40, `checked ${checked}`);
+  assert.ok(mobsChecked >= 60, `${mobsChecked} mobs checked against their own slots`);
 });
 
 test("budget: 31-40 heroes, all protected, past 4650 px (where 31+ slots of 150 px fit): the 30-slot cap holds, within budget", async (t) => {

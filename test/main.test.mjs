@@ -192,7 +192,11 @@ test("other commands go to the role's own handler", async () => {
   await mod.command("focus");
   await mod.command("tick");
   await mod.command("sheet");
-  assert.deepEqual(seen, ["focus"], "tick re-renders only; sheet/herd/calm are central");
+  await mod.command("stage:show");
+  // a command named like an Object.prototype member is no hotkey (HOTKEYS is read as own keys)
+  await mod.command("constructor");
+  await mod.command("toString");
+  assert.deepEqual(seen, ["focus", "constructor", "toString"], "tick re-renders only; sheet/herd/calm/stage are central");
 });
 
 test("a throwing role render shows the error chip, keeps herdr's chrome alive, and is logged once", async () => {

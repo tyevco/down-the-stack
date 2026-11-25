@@ -7,9 +7,10 @@
 //    bottom one, read from the layout's pane frame); the focus ring itself is the frame's.
 // For an agent pane with a hero (host.view("nameplate", {terminal, pane}) returns a PlateVM) it
 // shows the hero's nameplate: program icon, the Termling's screen with its live face, name, level,
-// career title, a contractor tag, then herdr's own terminal title and folder (unchanged: real
-// information always wins), 48 px HP and 64 px XP bars (with the Fresh Eyes segment) and the
-// status chip. Clicking the hero part focuses the pane and opens the character sheet. Narrow
+// career title, a contractor tag, then herdr's own terminal title and folder (its text unchanged;
+// it truncates, its whole text in its tooltip), 48 px HP and 64 px XP bars (with the Fresh Eyes
+// segment; 28 / 36 px in a split, down to about 420 px) and the status chip. Clicking the hero part
+// focuses the pane and opens the character sheet. Narrow
 // panes drop optional parts (see plan()); below 360 px the hero's name goes and the terminal title
 // stays next to the program icon and the face ("Lv 14" only while the title keeps its room), so
 // the header still says which task the pane is, as herdr's own header does at any width; below
@@ -30,7 +31,8 @@
  *
  * env (renderNameplate): { width, height, zoom, theme: T(), host, act, pane: PaneInfo|null,
  *   bottom: boolean (header under the terminal), home: string|null (to shorten the folder),
- *   ui?: { hovered:boolean, size:{w,h}|null } } — ui is mutated by handlers, then cx.notify().
+ *   ui?: { hovered:boolean, size:{w,h}|null, bars?:false|"full"|"compact" } } — ui is mutated by
+ *   handlers (bars: the last plan's, for its hysteresis), then cx.notify().
  */
 
 import { div, svg, image } from "gpui-kit";
@@ -40,19 +42,30 @@ import { T, MONO, art, zoom, alpha, kids } from "./kit.js";
 import { ink, track, tone, thinBar, programGlyph, openSheet, chromeCommand } from "./party.js";
 
 /**
- * Width tiers (logical px): bars need `bars` at least; below `name` the hero's name, career and
+ * Width tiers (logical px): the compact HP/XP bars from `bars` (a split pane), the full ones from
+ * `fullBars` when the whole title fits beside them too; below `name` the hero's name, career and
  * folder go (icon, face, terminal title, chip; "Lv N" while the title has room); below `micro`
  * only the face and the short chip.
  */
-export const TIERS = { bars: 480, name: 360, micro: 200 };
+export const TIERS = { bars: 420, fullBars: 480, name: 360, micro: 200 };
 /** The terminal title keeps at least this much room before optional parts show (see plan()). */
 const MIN_TITLE = 100;
 const TITLE_WANT = 220;
 const NAME_MAX = 170;
-/** The bars test reserves this for the status chip (its common widest forms, "! waiting 59m"). */
+/** A name truncates no further than this (hovered, to 40, so the pane buttons stay inside). */
+const NAME_FLOOR = 72;
+/** The full bars' test reserves this for the status chip (its common widest forms, "! waiting 59m"). */
 const CHIP_RESERVE = 100;
+/** The compact bars' test reserves this for the chip's short form ("! 59m", "BOSS 41%", "2-2"). */
+const CHIP_SHORT_RESERVE = 64;
+/** Beside the compact bars the terminal title keeps at least this (it truncates; its tooltip has it all). */
+const TITLE_FLOOR = 40;
 /** Bars already shown stay until the title's room falls this far under what it wants. */
 const BARS_HYSTERESIS = 24;
+/** The bars' widths: full, and compact (a split pane, owner decision round 4). */
+export const BAR_PX = { full: { hp: 48, xp: 64 }, compact: { hp: 28, xp: 36 } };
+// label "HP" 11 + gap 3 + bar, gap 6, label "XP" 11 + gap 3 + bar, gap before them 8
+const barsCost = (b) => 11 + 3 + b.hp + 6 + 11 + 3 + b.xp + 8;
 /** Width estimates per character: the bold / medium hero name, the chip, the terminal title. */
 const NAME_PX = 7.2;
 
@@ -153,17 +166,23 @@ function faceScreen(vm, t) {
 }
 
 /**
- * What fits in a hero header of width W (logical px). Real information wins (D§11.12: herdr's
- * own terminal title stays as it is): the HP/XP bars show only when the whole title (its
- * estimated width, up to TITLE_WANT) fits beside them, judged with the name at NAME_MAX and the
- * chip at CHIP_RESERVE whatever they are now, so equal panes with equal titles match and a status
- * change never moves the title; bars already shown (`prevBars`) stay until the title's room falls
- * BARS_HYSTERESIS under that, so a retitle does not flicker them. Then career title and contractor
- * tag drop while the title has less room than it wants; then the name truncates. The folder shows
+ * What fits in a hero header of width W (logical px). herdr's own terminal title keeps its text
+ * (D§11.12) and truncates, its whole text in its tooltip; the HP/XP bars come in two sizes:
+ *  - full (48 / 64 px): from TIERS.fullBars when the whole title (its estimated width, up to
+ *    TITLE_WANT) fits beside them, judged with the name at NAME_MAX and the chip at CHIP_RESERVE;
+ *  - compact (28 / 36 px), otherwise (a split, owner decision round 4): from about TIERS.bars,
+ *    where the title still keeps TITLE_FLOOR with the name at NAME_FLOOR and the chip in its short
+ *    form (CHIP_SHORT_RESERVE). The title truncates sooner instead.
+ * Both are judged on the pane's width and title alone, whatever the name and the status chip are
+ * now, so equal panes with equal titles match and a status change never moves the title; a hover
+ * never toggles them. Bars already shown (`prevBars`: true or "full", or "compact") stay until the
+ * title's room falls BARS_HYSTERESIS under what they need, so a retitle (or a drag across the
+ * threshold) does not flicker them. Beside compact bars the chip takes its short form when its
+ * full text would leave the title under MIN_TITLE. Then career title and contractor tag drop while
+ * the title has less room than it wants; then the name truncates (to NAME_FLOOR). The folder shows
  * when there is room left after the whole title. Text widths are estimated per character (Geist /
  * JetBrains Mono at these sizes). Below TIERS.name see tinyPlan(). Hovered, the chip makes way for
- * the pane buttons when they would not fit otherwise (the bars test leaves the buttons out: a
- * hover never toggles the bars).
+ * the pane buttons when they would not fit otherwise, and then the name (down to 40 px).
  */
 export function plan(vm, W, hovered, title = "", folderText = "", prevBars = false) {
   const est = (s, px) => String(s ?? "").length * px;
@@ -171,32 +190,47 @@ export function plan(vm, W, hovered, title = "", folderText = "", prevBars = fal
   const buttonsW = hovered ? 4 * 20 + 4 * 8 : 0;
   const nameW = Math.min(est(vm.name, NAME_PX), NAME_MAX);
   // padding 20, program icon 14, face 28, "Lv 88" 32, the hero's gaps 24, gap to the centre 8,
-  // divider + its gap 9 (optional parts carry their own gap in `cost`); estimates err low: the
-  // title truncates gracefully when they are short of the real widths.
-  const base = 20 + 14 + 28 + 32 + 24 + 8 + 9 - 5;
-  // Hovered, herdr's pane buttons must stay reachable (they come last, so overflow clips them
-  // first): the chip gives them its room when the hero (name at its shortest, 72), the chip and
-  // the buttons would not fit.
-  let chipW = vm.chip ? est(vm.chip.text, 5.4) + 12 + 8 : 0;
-  if (hovered && chipW && W - (base + Math.min(nameW, 72) + chipW + buttonsW) < 0) chipW = 0;
+  // divider + its gap 9, the gap before the centre's spacer 8 (optional parts carry their own gap
+  // in `cost`); estimates err low: the title truncates gracefully when they are short of the real
+  // widths (measured in Chromium at 420 px: the title gets about 6 px less than planned).
+  const base = 20 + 14 + 28 + 32 + 24 + 8 + 9 + 8 - 5;
+  const want = Math.max(MIN_TITLE, Math.min(est(title, 6.2), TITLE_WANT));
+  // the bars: the pane's width and the title's only (not the name, the chip or the hover)
+  const wasFull = prevBars === true || prevBars === "full";
+  const full = W >= TIERS.fullBars && W - (base + NAME_MAX + CHIP_RESERVE + barsCost(BAR_PX.full)) >= want - (wasFull ? BARS_HYSTERESIS : 0);
+  const compact = !full && W - (base + NAME_FLOOR + CHIP_SHORT_RESERVE + barsCost(BAR_PX.compact)) >= TITLE_FLOOR - (prevBars ? BARS_HYSTERESIS : 0);
+  const barsW = full ? barsCost(BAR_PX.full) : compact ? barsCost(BAR_PX.compact) : 0;
+  // the chip: its full text; beside compact bars its short form when the full one would cost the
+  // title its MIN_TITLE (with the name at its floor). Hovered, herdr's pane buttons must stay
+  // reachable (they come last, so overflow clips them first): the chip gives them its room when
+  // the hero (name at its floor), the bars, the chip and the buttons would not fit.
+  const chipText = (shortForm) => (shortForm ? vm.chip.short ?? vm.chip.text : vm.chip.text);
+  let short = false;
+  let chipW = vm.chip ? est(chipText(false), 5.4) + 12 + 8 : 0;
+  if (compact && chipW && W - (base + Math.min(nameW, NAME_FLOOR) + chipW + barsW) < MIN_TITLE) {
+    short = true;
+    chipW = est(chipText(true), 5.4) + 12 + 8;
+  }
+  if (hovered && chipW && W - (base + Math.min(nameW, NAME_FLOOR) + chipW + buttonsW + barsW) < 0) chipW = 0;
   const cost = {
     career: vm.careerTitle ? est(vm.careerTitle, 5.6) + 6 : 0,
     contractor: vm.contractor ? 78 : 0,
-    bars: 146 + 8,
   };
-  const want = Math.max(MIN_TITLE, Math.min(est(title, 6.2), TITLE_WANT));
-  // the bars: the pane's width and the title's only (not the name, the chip or the hover)
-  const barsRoom = W - (base + NAME_MAX + CHIP_RESERVE + cost.bars);
-  const bars = W >= TIERS.bars && barsRoom >= want - (prevBars ? BARS_HYSTERESIS : 0);
-  const on = { career: !!vm.careerTitle, contractor: !!vm.contractor, bars };
-  const used = () => base + nameW + chipW + buttonsW + Object.keys(on).reduce((a, k) => a + (on[k] ? cost[k] : 0), 0);
+  const on = { career: !!vm.careerTitle, contractor: !!vm.contractor };
+  const used = () => base + nameW + chipW + buttonsW + barsW + Object.keys(on).reduce((a, k) => a + (on[k] ? cost[k] : 0), 0);
   for (const k of ["career", "contractor"]) if (on[k] && W - used() < want) on[k] = false;
   const spare = W - used();
-  const nameMax = spare >= MIN_TITLE ? NAME_MAX : Math.max(72, nameW - (MIN_TITLE - spare));
+  let nameMax = spare >= MIN_TITLE ? NAME_MAX : Math.max(NAME_FLOOR, nameW - (MIN_TITLE - spare));
+  // beside compact bars a chip wider than its reserve ("supervising") would eat the title's
+  // floor: the name gives way first (to 48 px); hovered and still short of room (the buttons
+  // beside the bars in a split), it gives way to 40 px
+  const titleRoom = () => W - (used() - nameW + Math.min(nameW, nameMax));
+  if (compact && titleRoom() < TITLE_FLOOR) nameMax = Math.max(48, Math.min(nameW, nameMax) - (TITLE_FLOOR - titleRoom()));
+  if (hovered && titleRoom() < 0) nameMax = Math.max(40, Math.min(nameW, nameMax) + titleRoom());
   const folder = !!folderText && spare - est(title, 6.2) >= Math.min(est(folderText, 6.2), 220) + 8;
   return {
-    tiny: false, micro: false, icon: true, name: true, level: true, title: true, short: false,
-    career: on.career, contractor: on.contractor, bars: on.bars, nameMax, folder, chip: chipW > 0,
+    tiny: false, micro: false, icon: true, name: true, level: true, title: true, short: short && chipW > 0,
+    career: on.career, contractor: on.contractor, bars: full || compact, compact, nameMax, folder, chip: chipW > 0,
   };
 }
 
@@ -221,7 +255,7 @@ function tinyPlan(vm, W, hovered, title) {
   const level = !micro && spare - levelW >= want;
   return {
     tiny: true, micro, icon: !micro, name: false, level, title: !!title && (!micro || spare >= 48), short: micro,
-    career: false, contractor: false, bars: false, nameMax: 0, folder: false, chip: chipW > 0,
+    career: false, contractor: false, bars: false, compact: false, nameMax: 0, folder: false, chip: chipW > 0,
   };
 }
 
@@ -230,8 +264,10 @@ function heroHeader(vm, env, t, ui) {
   const W = ui.size?.w ?? env.width ?? 600;
   const hovered = !!ui.hovered;
   const title = p.name || p.title || "";
-  const fit = plan(vm, W, hovered, title, folder(p.cwd, env.home), !!ui.bars);
-  ui.bars = fit.bars;
+  const fit = plan(vm, W, hovered, title, folder(p.cwd, env.home), ui.bars ?? false);
+  // the hysteresis remembers measured headers only: a first render at the 600 px default would
+  // otherwise keep the bars in a 400 px pane
+  if (ui.size) ui.bars = fit.bars ? (fit.compact ? "compact" : "full") : false;
   const pic = vm.programIcon ? programGlyph(vm.programIcon, 14, t.dim) : herdrIcon(p.program, 14, t.dim);
 
   const hero = h_flex().id(`np-hero-${p.pane}`).flex_none().h(26).px(4).ml(-4).gap(6).items_center().rounded(6).cursor_pointer()
@@ -254,8 +290,9 @@ function heroHeader(vm, env, t, ui) {
     ]));
 
   const centre = fit.tiny
-    // a narrow header keeps the terminal title (which task this is), truncating
-    ? div().flex_1().min_w(0).truncate().text_color(t.muted).child(fit.title ? title : "")
+    // a narrow header keeps the terminal title (which task this is), truncating; the whole of it
+    // is its tooltip
+    ? div().flex_1().min_w(0).truncate().text_color(t.muted).when(fit.title && Boolean(title), (el) => el.tooltip(title)).child(fit.title ? title : "")
     // overflow_hidden: until on_size_change reports the real width the plan may be for a wider
     // header; the centre then clips its title and folder instead of painting over the chip
     : h_flex().flex_1().min_w(0).gap(8).items_center().overflow_hidden()
@@ -264,14 +301,15 @@ function heroHeader(vm, env, t, ui) {
       .when(fit.folder, (el) => el.child(div().flex_none().max_w(220).truncate().text_color(t.dim).child(folder(p.cwd, env.home))))
       .child(div().flex_1());
 
+  const bw = fit.compact ? BAR_PX.compact : BAR_PX.full;
   const bars = fit.bars
-    ? h_flex().flex_none().gap(6).items_center()
+    ? h_flex().id(`np-bars-${p.pane}`).flex_none().gap(6).items_center()
       .child(h_flex().flex_none().gap(3).items_center()
         .child(div().text_size(9).font_family(MONO).text_color(t.muted).child("HP"))
-        .child(thinBar(48, 4, vm.hpFrac, tone("#FF5A5F", t), track(t))))
+        .child(thinBar(bw.hp, 4, vm.hpFrac, tone("#FF5A5F", t), track(t))))
       .child(h_flex().flex_none().gap(3).items_center()
         .child(div().text_size(9).font_family(MONO).text_color(t.muted).child("XP"))
-        .child(thinBar(64, 4, vm.xpFrac, tone("#7FE9F5", t), track(t), { frac: vm.feFrac, color: tone("#A9B8FF", t) })))
+        .child(thinBar(bw.xp, 4, vm.xpFrac, tone("#7FE9F5", t), track(t), { frac: vm.feFrac, color: tone("#A9B8FF", t) })))
     : null;
 
   const chip = fit.chip

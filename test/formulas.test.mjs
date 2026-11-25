@@ -23,7 +23,29 @@ function designBlocks() {
   const re = /### (14\.\d)[^\n]*\n[\s\S]*?```json\n([\s\S]*?)```/g;
   let m;
   while ((m = re.exec(sec))) out[m[1]] = JSON.parse(m[2]);
-  return out;
+  return renamed(out);
+}
+
+// Round 4 (originality, docs/BALANCE.md §12): the Semicolon Snail became the Semicolon Sloth, a
+// new creature with the same numbers and a new id. A D§14 that still lists the snail is read as
+// the sloth (its name, sprite note and flavour are data.js's; every number is still compared).
+const RENAMED_MOBS = { semicolon_snail: "semicolon_sloth" };
+function renamed(B) {
+  for (const mob of (B["14.4"] && B["14.4"].mobs) || []) {
+    const to = RENAMED_MOBS[mob.id];
+    if (!to) continue;
+    const now = D.MOB_BY_ID[to];
+    Object.assign(mob, { id: to, name: now.name, sprite: now.sprite, flavor: now.flavor });
+  }
+  for (const z of Array.isArray(B["14.3"]) ? B["14.3"] : []) {
+    for (const map of z.maps || []) {
+      if (!map.spawn) continue;
+      const spawn = {};
+      for (const [id, w] of Object.entries(map.spawn)) spawn[RENAMED_MOBS[id] || id] = w;
+      map.spawn = spawn;
+    }
+  }
+  return B;
 }
 
 // docs/BALANCE.md: every D§14 value data.js deliberately changes, as path -> [design value, data
@@ -352,7 +374,7 @@ describe("formulas: bosses and reviews (D§9.6, D§4.5)", () => {
 describe("formulas: mobs per zone (D§5.9)", () => {
   // [mobId, home level, HP, swing, XP]
   const ROWS = [
-    ["typo_sprout", 2, 17, 3, 6], ["semicolon_snail", 6, 38, 6, 16], ["unused_import", 10, 80, 5, 34],
+    ["typo_sprout", 2, 17, 3, 6], ["semicolon_sloth", 6, 38, 6, 16], ["unused_import", 10, 80, 5, 34],
     ["callback_bat", 14, 66, 5, 34], ["promise_wisp", 18, 143, 13, 65], ["null_pointer_frog", 21, 182, 19, 88],
     ["capture_group_goblins", 24, 152, 15, 64], ["backslash_bandit", 28, 349, 33, 154], ["greedy_glob", 32, 767, 42, 285],
     ["diff_leech", 36, 800, 59, 276], ["rebase_wraith", 40, 1330, 100, 512], ["merge_conflict_golem", 43, 2869, 96, 869],

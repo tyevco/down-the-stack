@@ -1,6 +1,6 @@
 # herdr-app layouts: schema, `main`, packaging, and the Down the Stack draft
 
-Source: `/home/user/herdrdev/herdr-app` (master, ~0.1.17). Paths below are relative to it.
+Source: `<herdr-app source>` (master, ~0.1.17). Paths below are relative to it.
 Read only: nothing was built or run. "UNCONFIRMED" marks things I could not confirm from source.
 
 Files written next to these notes during the research (not kept in the repo; they became
@@ -536,8 +536,10 @@ The file is in this folder. It is `main.json` with these changes:
 }
 ```
 
-(The research draft. The shipped section is `keys.example.json`: `layout.toggle:stage` and
-`down-the-stack.sheet` / `.herd` / `.calm`.)
+(The research draft. The shipped section is the repository's `keys.json` (the file herdr's install
+flow merges, AGENTS.md "Layouts and mods other people made" step 4): `layout.toggle:stage` and
+`down-the-stack.sheet` / `.herd` / `.calm`. main.js also answers `down-the-stack.stage[:show|:hide]`,
+bound to no key.)
 
 - Section `layout:<name>` applies while `layouts/<name>.json` shows. The Keys overlay prints the
   section name next to each key, and the action as words (`down-the-stack.sheet` → "down-the-stack sheet"). It maps to the GPUI context
@@ -581,7 +583,11 @@ The file is in this folder. It is `main.json` with these changes:
   to `mods/`, leaving out RECIPE.md and preview.png; never overwrite: on a name clash, rename the file
   or folder, the `mod` names in the layout, and the mod's own `mods/<name>/` paths; merge keys.json
   sections and ask before replacing a key the person already uses; run `herdr-app check` on each mod,
-  then `layout.switch {name}`.
+  then `layout.switch {name}` (AGENTS.md:478-504). As built (round 4) this repository is that
+  folder (github.com/tyevco/down-the-stack, root `keys.json`), and the mod imports neither `exec`
+  nor `hc` and reads only its save folder, so the step-1 warning has nothing to report; the README
+  starts its install with "Add the layout at https://github.com/tyevco/down-the-stack". The flow
+  never overwrites, so an update is by hand (remove the old mod folder, then copy).
   Make renames easy. Spell asset paths as the literal `"mods/down-the-stack/..."` and overlay names
   as `mod: "down-the-stack"`; `mod.clone` rewrites exactly these patterns (`mods.rs:247-257`). Our
   `down-the-stack.<cmd>` actions and the layout's `preview` path also contain the mod name; the

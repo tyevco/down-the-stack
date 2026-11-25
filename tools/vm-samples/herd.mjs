@@ -33,8 +33,10 @@ function header(o = {}) {
 }
 
 function base(tab, o = {}) {
+  const badge = o.digestBadge === undefined ? "4" : o.digestBadge;
   return {
-    tab, tabs: TABS.map(([id, label]) => ({ id, label, badge: id === "digest" ? (o.digestBadge === undefined ? "4" : o.digestBadge) : null })),
+    // tip: what the badge counts, for the tab's tooltip ("Digest · 4 new since you last looked · key 6")
+    tab, tabs: TABS.map(([id, label]) => ({ id, label, badge: id === "digest" ? badge : null, tip: id === "digest" && badge ? `${badge} new since you last looked` : null })),
     calm: !!o.calm, header: header(o.header),
     // save: the save trouble band (D§13.4) from args.save; null while the save is fine
     save: o.save ?? null,
@@ -258,10 +260,15 @@ function rr(id, o) {
   return {
     key: `r:${id}`, heroId: id, name: o.name, level: `Lv ${o.level}`, title: o.title, status, stripe: STRIPE[status],
     where: o.where, seen: o.seen,
-    portrait: { colors: { hoodie: TINT[(id - 1) % TINT.length], titleBar: "#3B2A24", screen: "#17161F", faceInk: STRIPE[status] }, face: FACE[status], programIcon: o.icon ?? ICON.claude },
+    portrait: { colors: { hoodie: TINT[(((id - 1) % TINT.length) + TINT.length) % TINT.length], titleBar: "#3B2A24", screen: "#17161F", faceInk: STRIPE[status] }, face: FACE[status], programIcon: o.icon ?? ICON.claude },
     retire: o.retire ? action(`retire:${id}`, "Retire", "retire", { heroId: id }, { tone: "danger", confirm: `Retire ${o.name.split(" ")[0]}?`, tooltip: "Joins the Hall of Fame (+0.5% herd XP); gear goes to vendor/" }) : null,
+    // space: set on rows of a space with one hero (their block has no header); hire: a Contractor's
+    space: o.space ?? null,
+    hire: o.hire ?? null,
   };
 }
+
+const HIRE_KEEPS = "When hired it keeps its name, level, XP and class, and its kit becomes saved Alpha gear.";
 
 function roster(empty = false) {
   if (empty) {
@@ -272,19 +279,25 @@ function roster(empty = false) {
     };
   }
   return {
-    count: "9 / 30 heroes · 1 hired today (6 a day)", slim: false,
+    count: "9 / 30 heroes · 1 hired today (6 a day) · 1 contractor, the next hired tomorrow at 04:00", slim: false,
     emptyText: "No heroes yet. Start an agent to hire one: every coding agent becomes a Termling.",
     groups: [
-      { key: "g:herdr-app", name: "herdr-app", rows: [
+      // spaces with one hero each: no header, the row names its space (round 4)
+      { key: "one-each", name: "One hero per space", inline: true, rows: [
+        rr(9, { name: "Sol the Memoized", level: 22, title: "Junior Refactorer", where: "2-3 Promise Falls", seen: "working 8m", space: "docs-site" }),
+        rr(-1, { name: "Wren Monorepo-Raised (contractor)", level: 6, title: "Intern", where: "1-2 Whitespace Fields", seen: "working 22m", space: "ref-client",
+          hire: { text: "Hired tomorrow 04:00", color: C.xp, tooltip: `Hired at the next 04:00 game day (today: 0 of 6 hires left). ${HIRE_KEEPS}` } }),
+      ] },
+      { key: "g:herdr-app", name: "herdr-app", inline: false, rows: [
         rr(1, { name: "Kip the Idempotent", level: 34, title: "Senior Refactorer", where: "4-1 Fast-Forward Ford", seen: "working 12m" }),
         rr(2, { name: "Rue Two-Spaces", level: 31, title: "Junior Hotfixer", status: "blocked", where: "3-3 The Unparsed Gate", seen: "waiting 2m", icon: ICON.codex }),
         rr(5, { name: "Pip Tabs-Not-Spaces", level: 12, title: "Junior Shellmancer", status: "done", where: "2-1 Mouth of the Stack", seen: "shipped 4m ago" }),
       ] },
-      { key: "g:billing-service", name: "billing-service", rows: [
+      { key: "g:billing-service", name: "billing-service", inline: false, rows: [
         rr(14, { name: "Fen of Clean Diffs", level: 44, title: "Senior Hotfixer", where: "4-3 Octopus Delta", seen: "working 41m", icon: ICON.gemini }),
         rr(15, { name: "Mira the Deterministic", level: 40, title: "Senior Shellmancer", status: "idle", where: "4-2 Stash Bog", seen: "resting 25m", icon: ICON.codex }),
       ] },
-      { key: "g:off", name: "Off duty", rows: [
+      { key: "g:off", name: "Off duty", inline: false, rows: [
         rr(7, { name: "Juno of the Green Build", level: 47, title: "Senior Rubberducker", status: "off", where: "off duty", seen: "seen Nov 21", retire: true }),
         rr(18, { name: "Ode to Tabs", level: 18, title: "Junior Forkbinder", status: "off", where: "off duty", seen: "seen 5d ago" }),
         rr(21, { name: "Nib the Linted", level: 3, title: "Intern", status: "off", where: "off duty", seen: "seen 2d ago" }),
@@ -311,6 +324,10 @@ function digest(empty = false) {
   return {
     since: empty ? "Since you last looked · 6m ago" : "Since you last looked · 2h 14m ago",
     sections: empty ? [] : [
+      // losses before gains (round 4): chests that opened Unreviewed lead, each with its time
+      { key: "unreviewed", title: "Opened Unreviewed", icon: "ui/chest.svg", lines: [
+        line("u:1", "Ode's chest opened Unreviewed: “Bump the lockfile”", "half value, no Seals · 07:12", C.idle),
+      ] },
       { key: "levels", title: "Levels", icon: "ui/star.svg", lines: [
         line("lv:1", "Kip the Idempotent reached Lv 34", "Lv 32 → 34", C.xp),
         line("lv:14", "Fen of Clean Diffs reached Lv 44", "Lv 43 → 44", C.xp),
@@ -334,6 +351,9 @@ function digest(empty = false) {
     ],
     emptyText: "Nothing new since you last looked.",
     ack: empty ? null : action("digest:ack", "Mark as read", "digestSeen", {}, { tooltip: "Clears the dot on the Herd button" }),
+    // unseen losses (the Herd dot): the role runs `seen` (lossesSeen) once the tab is on screen
+    unseen: empty ? 0 : 1,
+    seen: empty ? null : action("digest:seen", "Seen", "lossesSeen", {}, { tooltip: "1 Unreviewed chest seen" }),
   };
 }
 
@@ -358,6 +378,7 @@ function settings(cfg = {}) {
           options: RARITY_OPTIONS, setting: "glow", chrome: null, wide: true },
         { key: "stageH", label: "Stage height", hint: "At 64 px: nameplates, chests, bubbles and HP lines only", kind: "choice", value: cfg.stageH ?? 200,
           options: [{ id: 64, label: "64" }, { id: 120, label: "120" }, { id: 200, label: "200" }], setting: "stageH", chrome: { resize: "stage" } },
+        { key: "stage", label: "Stage strip", hint: "The game under the terminals; hidden, the herd plays on", kind: "toggle", value: null, options: null, setting: null, chrome: { toggle: "stage" } },
         { key: "hud", label: "HUD strip", hint: "A thin strip under the stage: gold, Sprint, who's working", kind: "toggle", value: null, options: null, setting: null, chrome: { toggle: "hud" } },
         tog("collapse", "Collapse the stage when nothing works", "Hides it a minute after the last hero stops; it comes back when one works", "collapse", !!cfg.collapse),
       ] },

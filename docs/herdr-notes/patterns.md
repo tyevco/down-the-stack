@@ -1,7 +1,7 @@
 # Shipped-mod patterns for the herdr idle-RPG mod
 
 Source-only digest of the mods shipped in herdr-app master (~0.1.17).
-All paths below are relative to `/home/user/herdrdev/herdr-app/defaults/`
+All paths below are relative to `<herdr-app source>/defaults/`
 unless they start with `src/` (herdr-app Rust) or `vendor/` (herdr-app/vendor).
 Runtime JS lives in `vendor/gpui-kit/crates/shell/src/engine/quickjs/mod.rs` (cited as `quickjs/mod.rs`); `materialize.rs` = `vendor/gpui-kit/crates/shell/src/materialize.rs`; `scheduler.rs` = `vendor/gpui-kit/crates/shell/src/engine/quickjs/scheduler.rs`.
 "SNIPPET (ours)" = code written for our game from the shipped patterns, not shipped code.

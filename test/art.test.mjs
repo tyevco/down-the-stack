@@ -324,6 +324,30 @@ test("mobs and bosses are outlined and stand on their bottom edge", () => {
   }
 });
 
+test("originality: the first zones' mobs echo no famous game's starter monsters (round 4)", async () => {
+  // a snail, mushroom, slime or pig as the first thing a hero fights reads as a copy of a
+  // well-known game's starters: none in the first two zones (names, ids, sprite notes, flavour)
+  const early = MOBS.filter((m) => m.zone <= 1);
+  assert.equal(early.length, 6);
+  for (const m of early) {
+    for (const text of [m.id, m.name, m.sprite, m.flavor]) {
+      assert.doesNotMatch(String(text), /snail|mushroom|shroom|slime|\bpigs?\b|piglet|boar|blob/i, `${m.id}: ${text}`);
+    }
+  }
+  // the slow mob of Whitespace Fields is the Semicolon Sloth: same numbers as the snail it replaced
+  const { MOB_BY_ID, MOB_GLYPHS, MAP_BY_ID } = await import("../mods/down-the-stack/game/data.js");
+  const sloth = MOB_BY_ID.semicolon_sloth;
+  assert.equal(sloth.name, "Semicolon Sloth");
+  assert.deepEqual([sloth.zone, sloth.map, sloth.size, sloth.traits.join(), sloth.hp, sloth.atk, sloth.xp, sloth.gold], [0, 2, "S", "slow", 1.3, 0.8, 0.86, 1]);
+  assert.equal(MOB_GLYPHS.semicolon_sloth, ";");
+  assert.deepEqual(MAP_BY_ID["1-2"].spawn, { semicolon_sloth: 0.75, typo_sprout: 0.25 });
+  assert.deepEqual(MAP_BY_ID["1-3"].spawn, { unused_import: 0.75, semicolon_sloth: 0.25 });
+  // the old id still resolves (a stale reference), but is never listed or spawned
+  assert.equal(MOB_BY_ID.semicolon_snail, sloth);
+  assert.ok(!Object.keys(MOB_BY_ID).includes("semicolon_snail"));
+  assert.ok(!fs.existsSync(path.join(MOD, "art/mob/semicolon_snail.svg")));
+});
+
 test("the files on disk are exactly the generator's output (deterministic, nothing stale)", () => {
   const a = generateAll(), b = generateAll();
   assert.deepEqual([...a.keys()], [...b.keys()]);
@@ -379,13 +403,14 @@ test("RECIPE.md follows herdr's recipe order and README.md gives the install tar
   assert.match(recipe, /!\[Down the Stack\]\(preview\.png\)/);
   assert.ok(fs.existsSync(path.join(ROOT, "preview.png")), "preview.png is missing");
   // the install targets are the files that really ship: every layout file, the mod folder, and
-  // every keys section of keys.example.json (named after the layout, so a rename shows up here)
+  // every keys section of keys.json (named after the layout, so a rename shows up here; round 4:
+  // keys.json at the repo's root is the file herdr's install flow merges, keys.example.json is gone)
   const layouts = fs.readdirSync(path.join(ROOT, "layouts")).filter((f) => f.endsWith(".json"));
   assert.ok(layouts.length >= 1, "no layout file");
-  const sections = Object.keys(JSON.parse(fs.readFileSync(path.join(ROOT, "keys.example.json"), "utf8")));
+  const sections = Object.keys(JSON.parse(fs.readFileSync(path.join(ROOT, "keys.json"), "utf8")));
   const readme = fs.readFileSync(path.join(ROOT, "README.md"), "utf8");
   for (const s of [...layouts.map((f) => `layouts/${f}`), "mods/down-the-stack", "HERDR_APP_HOME", "XDG_CONFIG_HOME",
-    "~/.config/herdr-app", "herdr-app check", "layout.switch", "keys.example.json", ...sections])
+    "~/.config/herdr-app", "herdr-app check", "layout.switch", "keys.json", ...sections])
     assert.ok(readme.includes(s), `README.md does not mention ${s}`);
   for (const f of layouts) {
     const name = f.slice(0, -".json".length);
@@ -448,7 +473,7 @@ test("README.md and RECIPE.md name the herdr functions, commands, keys, save fil
   assert.ok(files.get("host.js").includes("run(`${MOD}.tick`)") && cmds.includes("`down-the-stack.tick`"), "the host's own tick broadcast");
 
   // keys: README's table row per key with its action; RECIPE names every key
-  const keys = JSON.parse(fs.readFileSync(path.join(ROOT, "keys.example.json"), "utf8"));
+  const keys = JSON.parse(fs.readFileSync(path.join(ROOT, "keys.json"), "utf8"));
   for (const [section, map] of Object.entries(keys)) {
     for (const [key, action] of Object.entries(map)) {
       assert.ok(readme.split("\n").some((l) => l.trim().startsWith("|") && l.includes(`\`${key}\``) && l.includes(`\`${action}\``)),

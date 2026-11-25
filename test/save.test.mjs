@@ -352,6 +352,26 @@ describe("size budget (D§13.3)", () => {
     assert.equal(encodeState(back), text);
   });
 
+  test("a journal line's hero name (row[5], round 4) goes through the string table; an inline one still loads", () => {
+    const s = populated(2);
+    const name = "Contractor Quokka-7";
+    s.herd.log.push([1795000100000, "hired", 3, "Hired", 0, name], [1795000200000, "level", 3, "", 12, name],
+      [1795000300000, "ship", 3, "Fix the build", 1, name], [1795000400000, "note", 0, "", 0]);
+    const text = encodeState(s);
+    assert.equal(text.split(JSON.stringify(name)).length - 1, 1, "written once");
+    const rows = JSON.parse(text).herd.log.d.slice(-4);
+    assert.ok(rows.slice(0, 3).every((r) => typeof r[5] === "number"), JSON.stringify(rows));
+    assert.equal(rows[3].length, 5, "a line without a name stays five long");
+    const back = decodeState(text).state;
+    assert.deepEqual(back.herd.log.slice(-4).map((e) => e[5]), [name, name, name, undefined]);
+    assert.equal(encodeState(back), text, "byte-identical");
+    // written inline (a build that kept row[5] as it was): read back the same
+    const obj = JSON.parse(text);
+    for (const r of obj.herd.log.d) if (typeof r[5] === "number") r[5] = obj.str[r[5]];
+    const inline = decodeState(resign(obj)).state;
+    assert.deepEqual(inline.herd.log.slice(-4).map((e) => e[5]), [name, name, name, undefined]);
+  });
+
   test("the D§11.15 settings: defaults are left out of the save; changes round-trip", () => {
     const s = populated(1);
     const plain = JSON.parse(encodeState(s)).herd.cfg;
@@ -394,12 +414,14 @@ describe("size budget (D§13.3)", () => {
 describe("every save this branch has written loads (SAVE_VERSION stays 1)", () => {
   // test/fixtures/saves: texts written by the engine of each commit that changed the save format
   // (990aa93 the first save.js; 4f9a1a0 = 4082db1's save.js; 2d2583c before the string table held
-  // pending-chest titles and journal strings), demo worlds of the time, one with shared titles.
+  // pending-chest titles and journal strings; a4ea9ab the D§11.15 settings, the build the owner ran
+  // in herdr; c041909 round 3: the collapse countdown, "unrev" journal lines), demo worlds of the
+  // time, one with shared titles.
   const DIR = new URL("./fixtures/saves/", import.meta.url);
   const files = fs.readdirSync(DIR).filter((f) => f.endsWith(".json")).sort();
 
   test("the fixtures cover every format", () => {
-    assert.deepEqual(files.map((f) => f.split("-")[0]).filter((c, i, a) => a.indexOf(c) === i), ["2d2583c", "4082db1", "4f9a1a0", "990aa93"]);
+    assert.deepEqual(files.map((f) => f.split("-")[0]).filter((c, i, a) => a.indexOf(c) === i), ["2d2583c", "4082db1", "4f9a1a0", "990aa93", "a4ea9ab", "c041909"]);
   });
 
   for (const f of files) {
@@ -411,13 +433,14 @@ describe("every save this branch has written loads (SAVE_VERSION stays 1)", () =
       assert.equal(readOnly, false);
       assert.equal(warning, null, String(warning));
       assert.equal(state.heroes.length, raw.heroes.length);
-      // inline strings (the old form) read back as they were
+      // inline strings (the old form) and string-table indices (from 2d2583c on) read back as written
+      const str = (v) => (typeof v === "number" && Array.isArray(raw.str) ? raw.str[v] : Array.isArray(v) ? v[0] : v);
       raw.heroes.forEach((h, i) => {
         assert.equal(state.heroes[i].name, h.n);
-        assert.deepEqual(state.heroes[i].pend.map((p) => p.title), (h.pd ?? []).map((r) => r[1]));
+        assert.deepEqual(state.heroes[i].pend.map((p) => p.title), (h.pd ?? []).map((r) => str(r[1])));
       });
       const rawLog = Array.isArray(raw.herd.log) ? raw.herd.log : raw.herd.log?.d ?? [];
-      assert.deepEqual(state.herd.log.map((e) => [e[1], e[3]]), rawLog.map((r) => [r[1], r[3]]));
+      assert.deepEqual(state.herd.log.map((e) => [e[1], e[3]]), rawLog.map((r) => [str(r[1]), str(r[3])]));
       // the world runs on it, and the new form round-trips byte for byte
       const { world } = W.loadWorld(text, { nowMs: state.herd.lastMs });
       for (let k = 1; k <= 5; k++) W.tick(world, { nowMs: state.herd.lastMs + k * 1000, tzOffsetMin: 0, weekday: 2, windowActive: true, focusedTerminal: null, agents: [], subagents: [], tabs: {}, spaces: [] });

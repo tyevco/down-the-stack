@@ -108,7 +108,7 @@ const typeOf = (v) => (v === null ? "null" : Array.isArray(v) ? "array" : typeof
 // keys the samples (or the ui JSDoc) allow to be null, with the type they have otherwise
 const NULLABLE = {
   address: "string", pane: "string", programIcon: "object", levelUpAge: "number", machine: "string", sprint: "object",
-  terminal: "string",
+  terminal: "string", mapPin: "object", digestTip: "string",
 };
 // keys only some items carry (the fork chip's terminal, chip tooltips): checked when present
 const OPTIONAL = new Set(["terminal", "tooltip"]);
@@ -453,6 +453,51 @@ test("party: an off-duty hero's pending chest shows on the folded group and its 
   assert.equal(V.partyView(world, { width: 268, nowMs: now + DAY }).groups.at(-1).chests, 0);
 });
 
+test("the Herd dot stays lit after chests opened Unreviewed until the Digest is viewed (party footer and HUD), its tooltip says why", async () => {
+  const A = await import("../mods/down-the-stack/game/agents.js");
+  const world = D.demoWorld("mid", NOW).world;
+  closeTerminals(world, ["t6"]);
+  const hero = world.state.heroes.find((h) => h.id === 6);
+  const now = world.state.herd.lastMs;
+  world.rt.digestDot = false; // nothing "since you last looked" from the demo's own history
+  hero.pend = [{ min: 10, fmin: 0, title: "Bump deps", at: now - 25 * 3600e3, sealFactor: 1 }, { min: 5, fmin: 0, title: "Fix it", at: now - 24.5 * 3600e3, sealFactor: 1 }];
+  world.rt.version++;
+  // due: the chests open Unreviewed (half value, no Seals): gone from the party, logged as a loss
+  const ev = W.makeEmitter(world, { live: true });
+  A.expireChests(world, hero, ev);
+  world.rt.version++;
+  assert.equal(hero.pend.length, 0);
+  assert.ok((world.state.herd.log || []).some((e) => e[1] === "unrev" && e[2] === 6));
+  assert.equal(Chrome.unseenUnreviewed(world), 2);
+  const tip = "Herd panel: 2 chests opened Unreviewed (half value, no Seals): the Digest lists them";
+  let vm = V.partyView(world, { width: 268, nowMs: now + 60000 });
+  assert.equal(vm.footer.digestDot, true, "lit although no chest waits any more");
+  assert.equal(vm.footer.digestTip, tip);
+  let hud = V.hudView(world, { nowMs: now + 60000 });
+  assert.equal(hud.digestDot, true);
+  assert.equal(hud.digestTip, tip);
+  // rendered: the party's Herd button and the HUD's say it
+  const { m } = await mount("party", world);
+  assert.equal(m.node("party-herd").methods.find((x) => x[0] === "tooltip")[1][0], tip);
+  const h = await mount("hud", world, { width: 1200, height: 26 });
+  assert.equal(h.m.node("hud-herd").methods.find((x) => x[0] === "tooltip")[1][0], tip);
+  // still lit an hour later; the Digest viewed (digestSeen): off
+  vm = V.partyView(world, { width: 268, nowMs: now + 3600e3 });
+  assert.equal(vm.footer.digestDot, true);
+  assert.equal(W.command(world, "digestSeen", {}, now + 3600e3).ok, true);
+  vm = V.partyView(world, { width: 268, nowMs: now + 3600e3 });
+  assert.equal(vm.footer.digestDot, false);
+  assert.equal(vm.footer.digestTip, null);
+  hud = V.hudView(world, { nowMs: now + 3600e3 });
+  assert.equal(hud.digestDot, false);
+  assert.equal(Chrome.unseenUnreviewed(world), 0);
+  // a saved count, when the engine keeps one (round 4 E4), wins over the journal
+  world.state.herd.unseenUnrev = 3;
+  world.rt.version++;
+  assert.equal(Chrome.unseenUnreviewed(world), 3);
+  assert.match(V.hudView(world, { nowMs: now + 3600e3 }).digestTip, /^Herd panel: 3 chests opened Unreviewed/);
+});
+
 test("party: groups by space in herdr's order, off duty last; agentOrder = live rows top to bottom; a pin never moves a row", () => {
   const world = D.demoWorld("mid", NOW).world;
   const vm = V.partyView(world, { width: 268, nowMs: NOW });
@@ -529,6 +574,43 @@ test("party: status stripes, faces and chips follow the engine (blocked clock, F
   const withChest = day.groups[0].rows.filter((r) => r.chestPending);
   assert.ok(withChest.length > 0);
   for (const r of withChest) assert.ok(r.chips.some((c) => c.kind === "chest" && c.color === "#FFD447"));
+});
+
+test("party: a sub-agent waiting for you (a blocked Forkling) counts in 'N need you' and marks its group; a click peeks it", async () => {
+  const world = D.demoWorld("mid", NOW).world;
+  const id = world.rt.bind.get("t5");
+  const live = world.rt.live.get(id);
+  const hero = world.state.heroes.find((h) => h.id === id);
+  assert.equal(live.status, "working", "the parent itself does not wait");
+  const sub = live.forklings.find((x) => x.status === "blocked");
+  assert.ok(sub, "the mid demo's t5 has a blocked sub-agent");
+  const vm = V.partyView(world, { width: 268, nowMs: NOW });
+  const row = vm.groups.flatMap((g) => g.rows).find((r) => r.heroId === id);
+  assert.deepEqual(row.waitingForks, [{
+    key: `wf:${sub.address}`, address: sub.address, name: `${hero.name}'s sub-agent`,
+    tooltip: `A sub-agent of ${hero.name} waits for you on “Ask about the schema” · click to show it`,
+  }]);
+  // only waiting ones: a working sub-agent is not listed; off-duty rows have none
+  assert.ok(vm.groups.flatMap((g) => g.rows).every((r) => Array.isArray(r.waitingForks)));
+  assert.equal(row.waitingForks.length, live.forklings.filter((x) => x.status === "blocked").length);
+  // rendered: "N need you" counts the blocked rows plus the waiting sub-agent; its group has the "!"
+  const blockedRows = vm.groups.flatMap((g) => g.rows).filter((r) => !r.address ? false : r.status === "blocked").length;
+  const { m, host } = await mount("party", world);
+  assertClean(m, "mid");
+  const chip = m.node("party-needyou");
+  const text = (n) => [n.type === "text" ? n.text : "", ...n.children.map(text)].join("");
+  assert.equal(text(chip), `${blockedRows + 1} ${blockedRows + 1 === 1 ? "needs" : "need"} you`);
+  assert.ok(chip.methods.find((x) => x[0] === "tooltip")[1][0].includes(`${hero.name}'s sub-agent`));
+  const group = vm.groups.find((g) => g.rows.includes(row));
+  assert.ok(text(m.node(`pg-${group.key}`)).includes("!"));
+  // the fork chip (amber) peeks it: no pane (D§2.7)
+  m.fire(`pc-c:${id}:fork`);
+  assert.deepEqual(M.calls().run.filter((c) => c.name === "terminal.peek").map((c) => c.args), [{ terminal: sub.address }]);
+  assert.deepEqual(host.commands, []);
+  // when it stops waiting, it no longer counts
+  sub.status = "working";
+  world.rt.version++;
+  assert.deepEqual(V.partyView(world, { width: 268, nowMs: NOW }).groups.flatMap((g) => g.rows).find((r) => r.heroId === id).waitingForks, []);
 });
 
 test("party / nameplate: a promotion review shows REVIEW with the review named in the tooltip", () => {
@@ -762,7 +844,7 @@ test("party: tooltips carry the D§2.9 why line, quest and HP; footer strings ar
   // gold and Snippets depend on the balance tables and the loot rolls; check their format only
   assert.match(vm.footer.gold, /^\d{2,3}k$/);
   assert.match(vm.footer.snippets, /^\d{3}$/);
-  assert.deepEqual({ ...vm.footer, gold: "*", snippets: "*" }, { gold: "*", snippets: "*", release: "v0.4", sprint: { label: "The Catastrophic Backtracker", have: 11, need: 25 }, digestDot: false });
+  assert.deepEqual({ ...vm.footer, gold: "*", snippets: "*" }, { gold: "*", snippets: "*", release: "v0.4", sprint: { label: "The Catastrophic Backtracker", have: 11, need: 25 }, digestDot: false, digestTip: null });
   // the Backlog: floor progress replaces the Sprint meter
   const late = V.hudView(demo("late"), { nowMs: NOW });
   assert.match(late.sprint.label, /^The Backlog, floor \d+$/);
@@ -774,8 +856,18 @@ test("party: tooltips carry the D§2.9 why line, quest and HP; footer strings ar
   assert.equal(empty.footer.gold, "0");
 });
 
+/**
+ * bigWorld(6) (hired yesterday) plus six agents hired today and a seventh today, "vps/t9": it plays
+ * as a Contractor until the next 04:00 game day (round 4: a Contractor still playing is promoted
+ * when hiring reopens, so one started yesterday is a roster hero by now).
+ */
+function contractorWorld() {
+  const today = (k) => ({ address: `n${k + 1}`, program: "codex", space: "spc_1", spaceName: "herdr-app", plan: [["working", 1e9]], from: NOW - 30 * 60000 });
+  return bigWorld(6, { extra: [...[0, 1, 2, 3, 4, 5].map(today), { address: "vps/t9", program: "claude", space: "spc_1", spaceName: "herdr-app", plan: [["working", 1e9]], from: NOW - 20 * 60000 }] });
+}
+
 test("party: a remote agent names its machine; a Contractor is tagged; names are always strings", () => {
-  const c = bigWorld(6, { extra: [{ address: "vps/t9", program: "claude", space: "spc_1", spaceName: "herdr-app", plan: [["working", 1e9]] }] });
+  const c = contractorWorld();
   const vm = V.partyView(c, { width: 268, nowMs: NOW });
   const rows = vm.groups.flatMap((g) => g.rows);
   const remote = rows.find((r) => r.address === "vps/t9");
@@ -793,6 +885,34 @@ test("party: a remote agent names its machine; a Contractor is tagged; names are
   assert.equal(plate.contractor, true);
   assert.equal(plate.heroId, remote.heroId);
   assert.ok(vm.agentOrder.includes("vps/t9"));
+});
+
+test("a Contractor's party row, pane header and stage tooltip say when it will be hired (agents.hireOutlook)", () => {
+  const c = contractorWorld();
+  const id = c.rt.bind.get("vps/t9");
+  assert.ok(id < 0, "a Contractor");
+  const hire = "Hired at the next 04:00 game day (today: 0 of 6 hires left)";
+  const row = V.partyView(c, { width: 268, nowMs: NOW }).groups.flatMap((g) => g.rows).find((r) => r.heroId === id);
+  assert.deepEqual(row.tooltip.split("\n").slice(-2), ["Contractors don't get equity.", hire]);
+  const plate = V.nameplateView(c, { terminal: "vps/t9" });
+  assert.ok(plate.tooltip.split("\n").includes(hire), plate.tooltip);
+  const hero = V.stageView(c, { width: 3200, height: 200, nowMs: NOW }).heroes.find((h) => h.heroId === id);
+  assert.ok(hero, "the Contractor is on stage");
+  assert.equal(hero.tooltip.split("\n").at(-1), hire);
+  // a roster hero says nothing of the kind
+  const other = V.partyView(c, { width: 268, nowMs: NOW }).groups.flatMap((g) => g.rows).find((r) => r.heroId > 0);
+  assert.doesNotMatch(other.tooltip, /Hired|hires left/);
+  // second in line, with the day's hires used: it says how many are ahead
+  const c2 = contractorWorld();
+  const first = [...c2.rt.contractors.values()][0];
+  first.since -= 1; // longer-running: first in line
+  const fake = { address: "vps/t10", program: "claude", space: "spc_1", spaceName: "herdr-app", plan: [["working", 1e9]], from: NOW - 60000 };
+  c2.rt.demo.cast.agents.push(D.makeAgent(fake));
+  advance(c2, 1);
+  const second = c2.rt.bind.get("vps/t10");
+  assert.ok(second < 0);
+  const tip = V.partyView(c2, { width: 268, nowMs: NOW + 1000 }).groups.flatMap((g) => g.rows).find((r) => r.heroId === second).tooltip;
+  assert.match(tip, /Hired at the next 04:00 game day · 1 ahead in line \(today: 0 of 6 hires left\)$/);
 });
 
 test("party: the level-up shimmer age and the LTS star come from this tick's effects and journal", () => {

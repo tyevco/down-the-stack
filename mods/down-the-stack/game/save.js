@@ -528,8 +528,9 @@ const cfgCodec = {
   def: defaultCfg,
 };
 
-// Journal [[at, kind, heroId, text, value], ...]: timestamps stored as deltas {"d": rows}; kind
-// and text go through the string table (encText).
+// Journal [[at, kind, heroId, text, value, name?], ...]: timestamps stored as deltas {"d": rows};
+// kind, text and the hero's name (row[5], round 4: herd.journal) go through the string table
+// (encText); a row written with its name inline reads back the same.
 const logRowsOk = (list) => list.every((e) => Array.isArray(e) && typeof e[0] === "number" && Number.isFinite(e[0]));
 const logCodec = {
   enc(v, ctx) {
@@ -543,6 +544,7 @@ const logCodec = {
         prev = e[0];
         if (row.length > 1) row[1] = encText(e[1], ctx);
         if (row.length > 3) row[3] = encText(e[3], ctx);
+        if (row.length > 5) row[5] = encText(e[5], ctx);
         return row;
       }),
     };
@@ -557,6 +559,7 @@ const logCodec = {
       e[0] = at;
       if (e.length > 1) e[1] = decText(e[1], ctx);
       if (e.length > 3) e[3] = decText(e[3], ctx);
+      if (e.length > 5) e[5] = decText(e[5], ctx);
       return e;
     });
   },
@@ -885,7 +888,7 @@ export function encodeState(state) {
   for (const h of heroes) for (const v of [h.seat, h.sid, h.lastPane, h.lastTab]) use(v);
   for (const h of heroes) for (const p of Array.isArray(h.pend) ? h.pend : []) if (isObj(p) && p.title != null) use(String(p.title));
   const log = Array.isArray(herd.log) ? herd.log : [];
-  if (logRowsOk(log)) for (const e of log) { use(e[1]); use(e[3]); }
+  if (logRowsOk(log)) for (const e of log) { use(e[1]); use(e[3]); use(e[5]); }
   const table = [];
   const strIdx = new Map();
   for (const [str, n] of counts) if (n > 1) { strIdx.set(str, table.length); table.push(str); }

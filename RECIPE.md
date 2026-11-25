@@ -23,13 +23,16 @@ Left to right, top to bottom (`layouts/Down-the-Stack.json`):
     - the name, then "Lv N";
     - the career title, class and map;
     - thin HP (red `#FF5A5F`), XP (cyan `#7FE9F5`) and Fresh Eyes bars;
-    - chips, such as a `!` on a blocked hero or a Forkling count.
+    - chips, such as a `!` on a blocked hero or a Forkling count, and a hollow map-pin glyph
+      beside the level of a hero pinned to its map.
 
-    Heroes whose terminal closed sit in a dimmed, collapsed off-duty group. The footer shows gold,
+    The header shows "N need you" while an agent, or a sub-agent without a pane, is blocked, and
+    that group's header carries a `!`. Heroes whose terminal closed sit in a dimmed, collapsed
+    off-duty group. The footer shows gold,
     Snippets, the release number, a settings gear, a **Herd** button, and the zone's Sprint meter.
     While the save is in trouble (read-only, not saving, restored) an amber cue sits above it and
     opens the Herd panel. Below 160 px the list becomes a rail of portraits (the cue: a dot above
-    the Herd button).
+    the Herd button; a `!` badge on a portrait whose agent or sub-agent waits).
   - Footer, 69 px (herdr's `workspace-chrome` footer).
 - **Work column**:
   - Tabs, 42 px (herdr's `tabs`).
@@ -39,7 +42,8 @@ Left to right, top to bottom (`layouts/Down-the-Stack.json`):
     - the Termling's screen with its live face;
     - the hero name and level;
     - herdr's own terminal title and folder;
-    - 48 px HP and 64 px XP bars;
+    - 48 px HP and 64 px XP bars when herdr's whole title fits beside them, else 28 px and 36 px
+      bars from a pane of about 420 px (herdr's title is cut sooner; its tooltip has all of it);
     - a status chip on the right (for example "fighting 3-3" in grey, or "! waiting" in amber).
 
     Narrow panes drop parts. A non-agent pane gets herdr's plain header.
@@ -73,16 +77,21 @@ something.
   `^_^`. The chest opens with a loot fountain when you look at that terminal. Only results you have
   seen fill the Sprint meter that summons the zone boss.
 - **idle**: the hero rests at a campfire with face `-_-`, and shows `z` after 10 minutes.
+- **New agents**: up to 6 new heroes a game day (it turns at 04:00 local), the first day too. A
+  7th new agent plays as a **Contractor**, "(contractor)", not saved; its tooltips say when it will
+  be hired, and it becomes a saved hero, keeping its level and kit, at the next 04:00 or when a
+  roster slot frees.
 - **Terminal gone**: the hero steps into a portal and goes off duty. Its pending chests wait.
 - **Clicks**:
   - a Termling or its `!` focuses that agent; a double click opens its character sheet;
   - a sidebar row focuses the agent's pane, and a paneless sub-agent opens in herdr's peek;
+  - "N need you" shows the next one waiting, row or sub-agent, each click the next;
   - a row's portrait, or a right click on the row, opens the character sheet (a 760×500 dialog);
   - the Herd button opens the Herd panel (760×520: upgrades, stash, bug tracker, bosses, roster,
     digest, settings);
   - the nameplate's hero part focuses the pane and opens the sheet. On hover the nameplate shows
     split, zoom and close buttons.
-- **Keys** (optional, `keys.example.json`, section `layout:Down-the-Stack`): `ctrl-shift-g` toggles the
+- **Keys** (optional, `keys.json`, section `layout:Down-the-Stack`): `ctrl-shift-g` toggles the
   stage, `ctrl-shift-s` opens the focused hero's sheet, `ctrl-shift-a` the Herd panel and
   `ctrl-shift-d` calm mode. The palette has one entry, "Down the Stack: Herd panel", which opens
   the panel on its Digest tab in any layout (`mod.open`); herdr's own "Layout: Down-the-Stack" row
@@ -91,13 +100,17 @@ something.
   mobs and two-tick damage numbers. Calm mode removes damage numbers, banners and loops and dims
   the stage. The view models only change once per second.
 - **Settings** (Herd panel): calm mode, damage numbers, the loot glow minimum rarity (drops below it
-  draw no glow or pillar), stage height, the HUD strip, collapse the stage when nothing works (a
+  draw no glow or pillar), stage height, the Stage strip switch (shows or hides the stage whoever
+  hid it; disabled in a layout without one), the HUD strip, collapse the stage when nothing works (a
   minute after the last hero stops; back when one works; transitions only, so a stage shown or
   hidden by hand stays so, and a start while nothing works collapses nothing; a restart inside
   the minute continues the countdown), three opt-in notifications, and the autopilot master switch
   above the ten per-system switches (off: they show inactive and keep their values; auto-learn's
   re-spends after a respec or class change wait too). "Promotion reviews" starts the Senior and
   Staff Reviews at a 90% win estimate.
+- **Digest** (Herd panel): "Opened Unreviewed" first (chests that waited 24 h off duty, at half
+  value), then levels, drops, bosses, shipped tasks and chests waiting. The Herd button's dot stays
+  lit for an Unreviewed chest until the Digest is viewed.
 - **Notifications** (opt-in, at most 3 a game day that turns at 04:00 local, never a sound):
   `notify()` toasts for a herd-first boss kill, an LTS or Keepsake drop (a boss's Keepsake too; a
   herd-first kill's Keepsake is named in the kill's toast) and a hero reaching
@@ -139,9 +152,11 @@ something.
 - **Commands run**: `pane.focus`, `pane.split`, `pane.zoom`, `pane.close` (the nameplate's hover
   buttons), `terminal.peek`, `terminal.pin`, `layout.toggle`, `layout.resize`, `layout.hide`,
   `layout.show`, and its own `down-the-stack.tick`. The keys run `down-the-stack.sheet` /
-  `.herd` / `.calm`; the palette entry and a notification's click run
+  `.herd` / `.calm`; main.js also answers `down-the-stack.stage`, `.stage:show` and `.stage:hide`
+  (no key by default); the palette entry and a notification's click run
   `mod.open {name: "down-the-stack"}`.
-- **Programs and network**: none.
+- **Programs and network**: none (no `exec`, no `hc`). Files: only its save folder,
+  `<app home>/data/down-the-stack/`.
 - **Art**: 167 SVGs generated by `tools/gen-art.mjs` into `mods/down-the-stack/art/`, plus
   `preview.svg`:
   - mobs, bosses, zone backgrounds, most effects and the class accessories are full-colour
@@ -158,7 +173,7 @@ something.
     `ui/herdpanel.js`, and the dialogs' `openOverlay({ mod: "down-the-stack", … })` in
     `ui/stage.js` and `ui/party.js`;
   - the palette entry of `mod.json`, `mod.open {"name": "down-the-stack"}`;
-  - the `down-the-stack.*` keys of `keys.example.json`.
+  - the `down-the-stack.*` keys of `keys.json`.
 
   `mod.clone` rewrites only `mods/<name>` paths and `mod: "<name>"` keys in the copied files
   (herdr `mods.rs` `clone_mod_at`). Here those are all in the mod's code, so a clone draws its own
@@ -177,12 +192,20 @@ something.
   not load"), which is why the folder is named after the game too. Folder names are letters,
   digits, `-` and `_` (herdr `mods.rs` `valid_name`), lower case like herdr's own mods, and never
   contain `.`: herdr splits `<mod>.<command>` at the first dot.
+- **What it touches**: no network, no programs, no file outside its own folders. It writes only
+  herdr's data folder for the mod, and the save there holds task titles and pane, tab and space
+  names in plain text. herdr's install flow asks an agent to warn about a mod that reaches the
+  network, runs programs or reads outside its folder, so keep it that way.
 - **Save**: `<app home>/data/down-the-stack/save.json`, outside the mod folder. Next to it:
   - `save.bak`, the previous good save;
-  - `save.broken` (then `save.broken-<ms>`), a save that failed to load, kept aside and never
-    overwritten;
-  - `save.unsaved` (then `save.unsaved-<ms>`), a session that ran on a new herd while `save.json`
-    could not be read (or one whose `save.json` turns out to be a newer version's, opened read-only).
+  - `save.broken`, the first save that failed to load, kept aside and never overwritten, then
+    `save.broken-1` to `-3`, the newest three;
+  - `save.unsaved` (then `-1` to `-3`), a session that ran on a new herd while `save.json` could
+    not be read (or one whose `save.json` turns out to be a newer version's, opened read-only).
+
+  herdr's mod API cannot list or delete files without `exec`, so the kept copies are bounded by
+  their names: once `-1` to `-3` are taken, `-1` takes `-2`'s text, `-2` takes `-3`'s and the new
+  one goes to `-3`, each write expecting the text just read (`writeTextFile` replaces atomically).
 
   Save trouble shows as a notice on the stage, a cue in the party footer and the HUD, and a band
   in the Herd panel. Hot reload and VM restarts wipe module state and cancel timers without
@@ -204,7 +227,14 @@ something.
   (`layouts/.state/<layout>.json`) across restarts, and deleting the layout file leaves that file
   behind. A mod that hides its own block must remember that it did (here `herd.cfg.collapsed`,
   plus a per-window note) to show it again, and must not show one hidden by hand. Uninstalling
-  should delete the `.state` file too, or a reinstall brings the block back hidden.
+  should delete the `.state` file too, or a reinstall brings the block back hidden. So the person
+  also needs a way back in the game itself: the Settings tab's Stage strip switch runs
+  `layout.show` / `layout.hide` on the block found by content, whoever hid it. A stage shown or
+  hidden with it is the person's: the collapse drops its note, calls off a running countdown, and
+  never shows a stage hidden that way.
+- **Contractors are never saved** (only promoted heroes are). After a restart the hiring line
+  re-forms in snapshot order, and a Contractor waiting across a restart at 04:00 comes back as a
+  new terminal.
 - **`herdr-app check`** runs `init` with real file writes and exec. Every read and write is
   guarded by `checking()`; a forgotten guard can overwrite the real save.
 - **Paneless sub-agents** (most Forklings): `agent.focus` only picks what an `agent` block shows,
@@ -228,7 +258,10 @@ something.
   about 0.1 s of a file change (it batches app-home events for 80 ms) and can briefly load a mix
   of old and new modules. `cp -r mods/down-the-stack <home>/mods/down-the-stack` over an installed
   copy nests the new build inside the old folder (herdr keeps loading the old one): remove the old
-  folder, then copy onto `<home>/mods/`.
+  folder, then copy onto `<home>/mods/`. herdr's own install flow (an agent asked to "Add the layout
+  at https://github.com/tyevco/down-the-stack", `defaults/AGENTS.md`) copies `layouts/` and
+  `mods/` from this repository, merges its `keys.json`, runs `herdr-app check` and switches; it
+  never overwrites, so an update stays a by-hand step.
 
 ## Done when
 
@@ -244,7 +277,13 @@ something.
   Clicking it focuses that terminal.
 - An agent that finishes while you look elsewhere leaves a pending chest. Looking at its terminal
   opens it.
-- `ctrl-shift-g` (once the keys are merged) hides and shows the stage.
+- `ctrl-shift-g` (once the keys are merged) hides and shows the stage, and so does the Herd panel's
+  Settings tab's Stage strip switch, also for a stage the collapse hid.
+- A blocked sub-agent without a pane counts in "N need you"; clicking it opens herdr's peek.
+- An agent pane about 420 px wide shows the hero's HP and XP bars, with herdr's title cut short
+  and whole in its tooltip.
+- The seventh new agent of a game day is a Contractor whose tooltip says when it is hired; after
+  04:00 it is a saved hero with the same name and level.
 - With "Collapse the stage when nothing works" on, the stage hides a minute after the last agent
   stops working and shows again when one starts.
 - With a notification turned on, its milestone posts one toast and no sound. Clicking the toast

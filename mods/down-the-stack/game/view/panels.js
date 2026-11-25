@@ -32,6 +32,13 @@
 //    args.nowMs, else world.rt.nowMs (the last tick's clock).
 //  - VMs are memoised per (world version, args, minute): every redraw of the window within a tick
 //    reuses them.
+//  - Round 4 (the owner's screenshots): a Contractor's banner, tag and roster row say when it joins
+//    the roster (agents.hireOutlook; "promote only"), and its sheet follows it there by terminal
+//    (args.address); tabs carry `tip` (what a badge counts) for tooltips that name the tab's key;
+//    the Roster draws spaces with one hero without a header (rows name their space, `inline`);
+//    the Digest leads with "Opened Unreviewed", timed, and names the lossesSeen command the Herd
+//    panel runs once it is on screen (`seen`); Settings has a "Stage strip" switch; no string
+//    promises a visual the stage does not draw (DRAWN_CUES, LADDER_NOTE).
 //
 // Pure: no herdr / gpui imports, no Date.now(), no Math.random(); never mutates the world.
 
@@ -47,6 +54,8 @@ import {
 } from "../items.js";
 import { stats, computeStats, careerOf, classSignature, skillDefs, skillValue, canLearn, slotUnlocked } from "../heroes.js";
 import { liveHeroes, heroById, chestInfo, unblockedActive, unblockedLeft, hiredToday } from "../agents.js";
+// the namespace too, for engine helpers a view reads only when the engine has them (hireOutlook)
+import * as Agents from "../agents.js";
 import * as Herd from "../herd.js";
 import { bossApi } from "../autopilot.js";
 import { heroCtx } from "../combat.js";
@@ -208,6 +217,15 @@ function fmtWhen(ms, clock) {
 /** fmtWhen for a digest line that may have no date (at null or 0): "earlier", never "Jan 1". */
 function whenOrEarlier(ms, clock) {
   return num(ms) > 0 ? fmtWhen(ms, clock) : "earlier";
+}
+
+/** A moment ahead: "today at 04:00", "tomorrow at 04:00", "Nov 27 at 04:00" (short: no "at"). */
+function aheadText(ms, clock, short = false) {
+  const p = local(ms, clock.tz);
+  const today = local(clock.now, clock.tz).day;
+  const hm = `${String(p.hh).padStart(2, "0")}:${String(p.mm).padStart(2, "0")}`;
+  const day = p.day <= today ? "today" : p.day === today + 1 ? "tomorrow" : `${MONTHS[p.m]} ${p.d}`;
+  return short ? `${day} ${hm}` : `${day} at ${hm}`;
 }
 
 /** "3d 02h ago" / "12m ago" / "just now". */
@@ -1034,6 +1052,36 @@ function powerVM(st, hero) {
   };
 }
 
+/**
+ * When a Contractor joins the roster (owner decision, round 4, "promote only": the longest-running
+ * Contractor first, within the day's hires and the roster's room), from the engine's
+ * agents.hireOutlook: {when, long ("hired tomorrow at 04:00"), short ("Hired tomorrow 04:00"),
+ * tooltip (the engine's sentence and what a hire keeps), color}. null for a roster hero, or with
+ * an engine that has no hireOutlook.
+ */
+function hireOf(world, hero, clock) {
+  if (!hero || !hero.contractor || typeof Agents.hireOutlook !== "function") return null;
+  const o = Agents.hireOutlook(world, hero);
+  if (!o) return null;
+  const keeps = "When hired it keeps its name, level, XP and class, and its kit becomes saved Alpha gear.";
+  const at = Number.isFinite(o.atMs) ? o.atMs : null;
+  let long, short, color;
+  switch (o.when) {
+    case "soon": long = "joins the roster now"; short = "Joining now"; color = COL.working; break;
+    case "day":
+      long = at != null ? `hired ${aheadText(at, clock)}` : "hired at a coming 04:00 game day";
+      short = at != null ? `Hired ${aheadText(at, clock, true)}` : "Hired at 04:00";
+      color = COL.xp;
+      break;
+    case "never": long = "never hired here: this save is read-only"; short = "Not hired (read-only)"; color = COL.idle; break;
+    default: long = "hired when a roster slot frees"; short = "Hired when a slot frees"; color = COL.idle; break;
+  }
+  // the engine's sentence ends with a period here: the banner's tooltip appends another sentence
+  const said = str(o.text).trim() || cap1(long);
+  const first = /[.!?]$/.test(said) ? said : `${said}.`;
+  return { when: str(o.when), long, short, color, tooltip: o.when === "never" ? first : `${first} ${keeps}` };
+}
+
 function headerVM(world, idx, hero, live, st, clock) {
   const rt = world.rt;
   const state = heroState(live);
@@ -1044,14 +1092,19 @@ function headerVM(world, idx, hero, live, st, clock) {
   const prog = programName(programKey, live && live.program);
   const where = live ? activityOf(world, idx, hero, live) : `last seen ${fmtWhen(num(hero.seenAt, clock.now), clock)}`;
   const sub = [space || "no space", prog, where].join(" · ");
-  // the label the party and pane header use (chrome.taskLabel): never a bare program or shell title
-  const quest = live ? taskLabel(live) || null : null;
+  // the label the party and pane header use (chrome.taskLabel): never a bare program or shell title,
+  // and never a quoted repeat of the space the line already names (a tab named after its space)
+  let quest = live ? taskLabel(live) || null : null;
+  if (quest && space && quest.trim().toLowerCase() === space.trim().toLowerCase()) quest = null;
   const maxHp = live && num(live.maxHp) > 0 ? live.maxHp : num(st.maxHp, 1);
   const hp = live && num(live.maxHp) > 0 ? num(live.hp) : maxHp * clamp01(num(hero.hpFrac, 1));
   const xpFrac = xpFracOf(hero);
   let tag = null, tagTip = null, tagTab = null;
-  if (hero.contractor) tag = "contractor";
-  else if (!live) tag = "off duty";
+  if (hero.contractor) {
+    tag = "contractor";
+    const hire = hireOf(world, hero, clock);
+    tagTip = hire ? `Contractor: ${hire.tooltip}` : null;
+  } else if (!live) tag = "off duty";
   else if (hero.cls > 0 && hero.prov) {
     // D§4.2: behaviour may still switch the class until it locks; the person can lock it now (the
     // Career tab's class chip; the tag links there).
@@ -1077,7 +1130,17 @@ function headerVM(world, idx, hero, live, st, clock) {
 }
 
 function noteVM(world, idx, hero, live, clock) {
-  if (hero.contractor) return { text: "Contractor: not saved · its kills and chests still pay the herd · Contractors don't get equity.", color: COL.idle };
+  if (hero.contractor) {
+    // owner decision (round 4): the banner says when this Contractor joins the roster
+    const hire = hireOf(world, hero, clock);
+    if (!hire) return { text: "Contractor: not saved · its kills and chests still pay the herd · Contractors don't get equity.", color: COL.idle, tooltip: null };
+    const pays = "its kills and chests still pay the herd";
+    return {
+      text: hire.when === "never" ? `Contractor: ${hire.long} · ${pays}` : `Contractor: ${hire.long} · not saved until then; ${pays}`,
+      // D§3.4's line stays with the whole story (the banner itself needs the room)
+      color: hire.when === "soon" ? COL.working : COL.idle, tooltip: `${hire.tooltip} Contractors don't get equity.`,
+    };
+  }
   const fight = idx.fights.get(hero.id);
   if (fight) return { text: fightLine(fight), color: COL.hp };
   if (!live) {
@@ -1220,6 +1283,13 @@ function valueAt(hero, si, rank, st) {
   return skillValue(Object.assign({}, hero, { sp }), si, st);
 }
 
+/**
+ * The skills whose data.js cue the stage really draws, so a tooltip may name it: every dodge
+ * shows "404" (combat.js FX.miss). The other cues (halos, trims, crowns, auras, opacity) are art
+ * direction the stage does not draw, and a tooltip must not promise them.
+ */
+const DRAWN_CUES = { works_on_my_machine: true };
+
 function skillVM(world, hero, d, st, roster) {
   const si = d.slotIdx;
   const rank = num(hero.sp[si]);
@@ -1252,7 +1322,8 @@ function skillVM(world, hero, d, st, roster) {
     glyph: GLYPH[d.id] || d.name.slice(0, 2), rank, max: d.max, rankText: `${rank}/${d.max}`,
     locked: !unlocked, lockText: unlocked ? null : lockText,
     effect: skillEffect(v), next, cd, learn,
-    tooltip: `${d.name}: ${skillEffect(v)}${d.cue && d.cue !== "none" ? ` · ${d.cue}` : ""}`,
+    // a skill's cue (data.js) is art direction, mostly not drawn: only one the stage really shows
+    tooltip: `${d.name}: ${skillEffect(v)}${DRAWN_CUES[d.id] ? ` · ${d.cue}` : ""}`,
   };
 }
 
@@ -1291,6 +1362,8 @@ function skillsVM(world, hero, live, st, clock) {
   // points are spent only while auto-learn is on for the herd too (Settings, and the autopilot
   // master switch): the hero's own switch alone spends nothing (world.js autoLearn)
   const spends = on && autoOn(world.state, "learn");
+  // why points wait: the autopilot master switch (every system), else the herd's auto-learn switch
+  const herdOff = world.state.herd.cfg && world.state.herd.cfg.autopilot === false ? "the Autopilot is off in Settings" : "auto-learn is off in Settings";
   const autoKey = "autolearn";
   const autoAct = roster
     ? action(autoKey, "Auto-learn", "autoLearn", { heroId: hero.id, on: !on }, { tooltip: on ? "Turn auto-learn off" : "Turn auto-learn on" })
@@ -1301,9 +1374,9 @@ function skillsVM(world, hero, live, st, clock) {
   return {
     sp: {
       count: sp, text: `skill ${plural(sp, "point")} to spend`,
-      tooltip: `1 point per level from Lv 2, +1 per review won.${spends ? " Auto-learn spends them within a minute." : on ? " Auto-learn is off in Settings, so they wait." : ""}`,
+      tooltip: `1 point per level from Lv 2, +1 per review won.${spends ? " Auto-learn spends them within a minute." : on ? ` ${cap1(herdOff)}, so they wait.` : ""}`,
     },
-    autoLearn: { on, action: autoAct, hint: spends ? "Spends points on the lowest-ranked skill" : on ? "Waits: auto-learn is off in Settings" : "Off: you spend points yourself" },
+    autoLearn: { on, action: autoAct, hint: spends ? "Spends points on the lowest-ranked skill" : on ? `Waits: ${herdOff}` : "Off: you spend points yourself" },
     respec: respecAction(world, hero, live, clock, roster),
     rules: `Free once a day while resting; otherwise ${T.skills.respecSnippetsPerLevel} × level Snippets.`,
     ladder: ladderOf(hero),
@@ -1416,7 +1489,9 @@ function whyVM(world, hero, live) {
 // The sheet: career tab
 // ---------------------------------------------------------------------------------------------
 
-const LADDER_NOTE = ["Hello, World · printf()", "Main · Area · Passive · Buff", "Signature skill, +1 SP", "Ultimate, +1 SP", "Capstone, silver trim"];
+// what each tier unlocks (D§4.1). DESIGN's tier visuals (a lanyard, a cape, Principal's silver
+// title-bar trim) are not drawn, so no note promises one
+const LADDER_NOTE = ["Hello, World · printf()", "Main · Area · Passive · Buff", "Signature skill, +1 SP", "Ultimate, +1 SP", "Capstone passive"];
 
 function estimateVM(E) {
   const e = num(E);
@@ -1745,6 +1820,8 @@ function journalLine(e, clock) {
       break;
     case "retire": icon = "ui/star.svg"; color = COL.coin; line = `Retired to the Hall of Fame at Lv ${num(value)}`; break;
     case "hire": icon = "ui/herd.svg"; color = COL.working; line = "Joined the herd as a Lv 1 Intern"; break;
+    // a Contractor promoted to the roster (agents.promote): "Hired: <name> (was a contractor)"
+    case "hired": icon = "ui/herd.svg"; color = COL.working; line = text || "Hired (was a contractor)"; val = num(value) > 0 ? `Lv ${num(value)}` : null; break;
     case "leave": icon = "ui/herd.svg"; color = COL.idle; line = `Left the roster at Lv ${num(value)}`; break;
     case "class": icon = "ui/career.svg"; color = COL.xp; line = `Provisional class: ${text}`; break;
     case "unrev": icon = "ui/chest.svg"; color = COL.idle; line = unrevLine(text, value); break;
@@ -1785,7 +1862,12 @@ function sheetTabs(world, idx, hero, live) {
     const r = REVIEWS[ri];
     if (!rev[ri] && hero.cls > 0 && hero.L >= r.level && (ri === 0 || rev[0])) career = "!";
   }
-  return SHEET_TABS.map(([id, label]) => ({ id, label, badge: id === "skills" && sp > 0 ? String(sp) : id === "career" ? career : null }));
+  return SHEET_TABS.map(([id, label]) => {
+    const badge = id === "skills" && sp > 0 ? String(sp) : id === "career" ? career : null;
+    // what the badge counts, for the tab's tooltip (beside the tab's key: "Skills · 2 skill points to spend · key 2")
+    const tip = !badge ? null : id === "skills" ? `${sp} skill ${plural(sp, "point")} to spend` : "a promotion review is ready";
+    return { id, label, badge, tip };
+  });
 }
 
 let SHEET_MEMO = null;
@@ -1793,7 +1875,12 @@ let SHEET_MEMO = null;
 /**
  * The character sheet (D§11.13).
  * @param {object} world
- * @param {{heroId:number, tab?:string, filter?:object, nowMs?:number, tzOffsetMin?:number}} args
+ * @param {{heroId:number, tab?:string, filter?:object, address?:string, name?:string, nowMs?:number, tzOffsetMin?:number}} args
+ *   address, name: the terminal a Contractor's sheet was opened on, and its name. A Contractor
+ *   promoted to the roster (round 4) takes a new hero id; with its address the sheet finds it there
+ *   (the VM's heroId is the new id) instead of saying the hero left. With `name`, only a hero of
+ *   that name is followed: a Contractor that left frees its terminal, and another agent started
+ *   there plays some other hero, whose sheet this is not.
  * @returns {object|null} SheetVM (ui/sheet.js typedefs); null while the world loads
  */
 export function sheetView(world, args = {}) {
@@ -1804,22 +1891,36 @@ export function sheetView(world, args = {}) {
   const tabIds = SHEET_TABS.map((t) => t[0]);
   const tab = tabIds.includes(a.tab) ? a.tab : "gear";
   const f = normFilter(a.filter);
+  const address = heroId < 0 && typeof a.address === "string" && a.address ? a.address : null;
+  const name = address && typeof a.name === "string" && a.name ? a.name : null;
   const rt = world.rt;
-  const key = JSON.stringify([heroId, tab, f, Math.floor(clock.now / 60000), clock.tz]);
+  const key = JSON.stringify([heroId, tab, f, Math.floor(clock.now / 60000), clock.tz, address, name]);
   const m = SHEET_MEMO;
   if (m && m.rt === rt && m.state === world.state && m.version === rt.version && m.key === key) return m.vm;
 
-  const vm = buildSheet(world, heroId, tab, f, clock);
+  const vm = buildSheet(world, heroId, tab, f, clock, address, name);
   SHEET_MEMO = { rt, state: world.state, version: rt.version, key, vm };
   return vm;
 }
 
-function buildSheet(world, heroId, tab, f, clock) {
-  const calm = !!(world.state.herd.cfg && world.state.herd.cfg.calm);
+/**
+ * The hero a sheet shows: by id, else (a Contractor's sheet) the roster hero now bound to its
+ * terminal, when it has the Contractor's name (the promoted Contractor keeps it).
+ */
+function sheetHero(world, heroId, address, name) {
   const hero = Number.isInteger(heroId) ? heroById(world, heroId) : null;
+  if (hero || !address || !world.rt.bind || typeof world.rt.bind.get !== "function") return hero;
+  const id = world.rt.bind.get(address);
+  const h = Number.isInteger(id) && id > 0 ? heroById(world, id) : null;
+  return h && (name == null || h.name === name) ? h : null;
+}
+
+function buildSheet(world, heroId, tab, f, clock, address = null, name = null) {
+  const calm = !!(world.state.herd.cfg && world.state.herd.cfg.calm);
+  const hero = sheetHero(world, heroId, address, name);
   if (!hero) {
     return {
-      heroId: Number.isFinite(heroId) ? heroId : 0, tab, tabs: SHEET_TABS.map(([id, label]) => ({ id, label, badge: null })), calm,
+      heroId: Number.isFinite(heroId) ? heroId : 0, tab, tabs: SHEET_TABS.map(([id, label]) => ({ id, label, badge: null, tip: null })), calm,
       missing: "This hero has left the roster.", header: null, note: null,
       gear: null, skills: null, stats: null, career: null, journal: null,
     };
@@ -2278,6 +2379,8 @@ function rosterRow(world, idx, hero, live, clock) {
         tone: "danger", confirm: `Retire ${first}?`, tooltip: "Joins the Hall of Fame (+0.5% herd XP); its gear goes to vendor/",
       });
   }
+  // a Contractor's row says when it joins the roster (owner decision, round 4)
+  const h = hireOf(world, hero, clock);
   return {
     key: `r:${hero.id}`, heroId: hero.id, name: `${str(hero.name, "Termling")}${hero.contractor ? " (contractor)" : ""}`, level: `Lv ${hero.L}`,
     title: career.title, status, stripe: STATUS_COLOR[status] || COL.idle,
@@ -2288,33 +2391,63 @@ function rosterRow(world, idx, hero, live, clock) {
       programIcon: live ? programIconOf(live.program) : programIconOf(shippedProgram(programKey)),
     },
     retire,
+    space: null,
+    hire: h ? { text: h.short, tooltip: h.tooltip, color: h.color } : null,
   };
 }
 
 function rosterVM(world, idx, clock) {
   const state = world.state;
-  const groups = [];
+  const spaces = [];
   const byKey = new Map();
   for (const [hero, live] of idx.pairs) {
     const sp = str(live.space);
     const key = `g:${sp || "none"}`;
     let g = byKey.get(key);
     if (!g) {
-      g = { key, name: str(live.spaceName).trim() || sp || "Other agents", rows: [] };
+      g = { key, name: str(live.spaceName).trim() || sp || "Other agents", inline: false, rows: [] };
       byKey.set(key, g);
-      groups.push(g);
+      spaces.push(g);
     }
     g.rows.push(rosterRow(world, idx, hero, live, clock));
   }
+  // D§11.14 as built (round 4): a space with one hero gets no header line of its own; its row
+  // names the space instead. Those rows come first, in one block without a header (below a
+  // header they would read as that space's); spaces with two or more heroes keep their headers.
+  const groups = [];
+  const one = { key: "one-each", name: "One hero per space", inline: true, rows: [] };
+  for (const g of spaces) {
+    if (g.rows.length === 1) {
+      g.rows[0].space = g.name;
+      one.rows.push(g.rows[0]);
+    } else groups.push(g);
+  }
+  if (one.rows.length) groups.unshift(one);
   const off = state.heroes.filter((h) => !idx.liveOf.has(h.id));
   off.sort((a, b) => (a.seat < b.seat ? -1 : a.seat > b.seat ? 1 : 0) || num(a.ord) - num(b.ord) || a.id - b.id);
-  if (off.length) groups.push({ key: "g:off", name: "Off duty", rows: off.map((h) => rosterRow(world, idx, h, null, clock)) });
+  if (off.length) groups.push({ key: "g:off", name: "Off duty", inline: false, rows: off.map((h) => rosterRow(world, idx, h, null, clock)) });
   const total = groups.reduce((n, g) => n + g.rows.length, 0);
   const fame = Herd.hallOfFame(state);
   const legacy = Herd.legacyBonus(state);
   const hired = hiredToday(state);
+  // Contractors in line for a hire: the first one's moment (the rows say each one's)
+  const line = [];
+  for (const [hero] of idx.pairs) if (hero.contractor) line.push(hero);
+  let waiting = "";
+  if (line.length) {
+    let next = null;
+    if (typeof Agents.hireOutlook === "function") {
+      for (const c of line) {
+        const o = Agents.hireOutlook(world, c);
+        if (o && o.position === 0) { next = hireOf(world, c, clock); break; }
+      }
+    }
+    // a read-only save hires nobody: "the next never hired here" would not read
+    const tail = !next ? "" : next.when === "never" ? ", none hired here: this save is read-only" : `, the next ${next.long}`;
+    waiting = ` · ${line.length} ${plural(line.length, "contractor")}${tail}`;
+  }
   return {
-    count: `${state.heroes.length} / ${T.roster.max} heroes · ${hired} hired today (${T.roster.newPerDay} a day)`,
+    count: `${state.heroes.length} / ${T.roster.max} heroes · ${hired} hired today (${T.roster.newPerDay} a day)${waiting}`,
     slim: total > ROSTER_SLIM_AT,
     groups,
     emptyText: "No heroes yet. Start an agent to hire one: every coding agent becomes a Termling.",
@@ -2379,12 +2512,14 @@ function digestVM(world, clock) {
     keyOf("s", x), `${x.name ? firstName({ name: x.name }) : "A hero"} shipped “${str(x.text) || "Commit"}”`,
     num(x.seals) > 0 ? `${(Math.round(num(x.seals) * 10) / 10).toFixed(1)} Seals` : null, COL.done,
   ));
-  // chests that opened Unreviewed (off duty 24 h, or the hero left): where the chest went
+  // chests that opened Unreviewed (off duty 24 h, or the hero left): where the chest went, and
+  // when (round 4: the losses lead the digest, each with its time)
   const unreviewed = (d.unreviewed || []).slice().reverse().map((x) => {
     const who = x.name ? firstName({ name: x.name }) : "A hero";
     const n = Math.max(1, num(x.n, 1));
-    const text = n > 1 ? `${who}: ${n} chests opened Unreviewed` : `${who}'s chest opened Unreviewed`;
-    return line(keyOf("u", x), text, `${n === 1 && str(x.text) ? `“${str(x.text)}” · ` : ""}half value, no Seals`, COL.idle);
+    const title = n === 1 ? str(x.text) : "";
+    const text = n > 1 ? `${who}: ${n} chests opened Unreviewed` : `${who}'s chest opened Unreviewed${title ? `: “${title}”` : ""}`;
+    return line(keyOf("u", x), text, `half value, no Seals · ${whenOrEarlier(x.at, clock)}`, COL.idle);
   });
   const badges = d.badges.slice().reverse().map((x) => line(keyOf("bd", x), `Badge: ${str(x.text)}`, whenOrEarlier(x.at, clock), COL.xp));
   const chests = [];
@@ -2402,30 +2537,44 @@ function digestVM(world, clock) {
   }
   const sections = [];
   const add = (key, title, icon, lines) => { if (lines.length) sections.push({ key, title, icon, lines: capLines(key, lines) }); };
+  // losses before gains: chests that opened Unreviewed lead
+  add("unreviewed", "Opened Unreviewed", "ui/chest.svg", unreviewed);
   add("levels", "Levels", "ui/star.svg", levels);
   add("drops", "Release or better", "ui/slot-weapon.svg", drops);
   add("bosses", "Bosses", "ui/boss.svg", bosses);
   add("shipped", "Shipped", "ui/chest.svg", shipped);
-  add("unreviewed", "Opened Unreviewed", "ui/chest.svg", unreviewed);
   add("badges", "Badges", "ui/star.svg", badges);
   add("chests", "Chests waiting", "ui/chest.svg", chests);
-  const dot = !!world.rt.digestDot;
+  const dot = Herd.digestDot(world);
   const empty = sections.length === 0;
+  // chests that opened Unreviewed since the Digest was last viewed (herd.unseenLosses, saved): the
+  // Herd dot stays lit for them until the person sees the Digest; the role runs `seen` once the
+  // tab is on screen (round 4), which clears the count but keeps the lines until "Mark as read"
+  const unseen = typeof Herd.unseenLosses === "function" ? Herd.unseenLosses(state) : 0;
   return {
     since: since > 0 ? `Since you last looked · ${ago(since, clock.now)}` : "Since the herd began",
     sections,
     // a herd never looked at has no "last looked" (its header says "Since the herd began")
     emptyText: since > 0 ? "Nothing new since you last looked." : "Nothing yet: levels, big drops, bosses and shipped tasks land here.",
     ack: !empty || dot ? action("digest:ack", "Mark as read", "digestSeen", {}, { tooltip: "Clears the dot on the Herd button; the next digest starts now" }) : null,
+    unseen,
+    seen: unseen > 0 ? action("digest:seen", "Seen", "lossesSeen", {}, { tooltip: `${unseen} Unreviewed ${plural(unseen, "chest")} seen` }) : null,
   };
 }
 
 function digestBadge(world) {
   const d = Herd.digest(world.state);
-  if (d.empty) return world.rt.digestDot ? "•" : null;
+  if (d.empty) return Herd.digestDot(world) ? "•" : null;
   const n = d.levels.length + d.drops.length + d.bosses.length + d.badges.length + (d.unreviewed || []).length + d.chestsWaiting;
   if (n <= 0) return "•";
   return n > 9 ? "9+" : String(n);
+}
+
+/** What the Digest tab's badge counts, for its tooltip ("3 new since you last looked"). */
+function digestTip(badge) {
+  if (!badge) return null;
+  if (badge === "•") return "something new since you last looked";
+  return badge === "9+" ? "more than 9 new since you last looked" : `${badge} new since you last looked`;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2460,6 +2609,9 @@ function settingsVM(world) {
           options: RARITIES.map((r, i) => ({ id: i, label: i === 0 ? "All" : r.name, color: r.color })), setting: "glow", chrome: null, wide: true },
         { key: "stageH", label: "Stage height", hint: "At 64 px: nameplates, chests, bubbles and HP lines only", kind: "choice", value: stageH,
           options: [{ id: 64, label: "64" }, { id: 120, label: "120" }, { id: 200, label: "200" }], setting: "stageH", chrome: { resize: "stage" } },
+        // the layout's own blocks (owner decision, round 4: the stage too, however it was hidden):
+        // the role reads whether each is shown, and finds them by content
+        { key: "stage", label: "Stage strip", hint: "The game under the terminals; hidden, the herd plays on", kind: "toggle", value: null, options: null, setting: null, chrome: { toggle: "stage" } },
         { key: "hud", label: "HUD strip", hint: "A thin strip under the stage: gold, Sprint, who's working", kind: "toggle", value: null, options: null, setting: null, chrome: { toggle: "hud" } },
         tog("collapse", "Collapse the stage when nothing works", "Hides it a minute after the last hero stops; it comes back when one works", "collapse", cfg.collapse),
       ] },
@@ -2534,7 +2686,7 @@ function buildHerd(world, tab, f, clock) {
   const idx = indexOf(world);
   const badge = digestBadge(world);
   const vm = {
-    tab, tabs: HERD_TABS.map(([id, label]) => ({ id, label, badge: id === "digest" ? badge : null })),
+    tab, tabs: HERD_TABS.map(([id, label]) => ({ id, label, badge: id === "digest" ? badge : null, tip: id === "digest" ? digestTip(badge) : null })),
     calm: !!(world.state.herd.cfg && world.state.herd.cfg.calm), header: herdHeader(world, idx),
     save: null, upgrades: null, stash: null, tracker: null, bosses: null, roster: null, digest: null, settings: null,
   };

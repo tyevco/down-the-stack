@@ -65,6 +65,9 @@
  *           draws only the front mobs, then none (detail(), D§11.9.7).
  * @property {boolean} [hit]   Took damage this tick: opacity dips to 0.55 (ARCHITECTURE §9.2).
  * @property {boolean} [waiting]  Queued behind a blocked hero: shows a "…" bubble (D§11.10).
+ * @property {number|null} [heroId]  Whose lane (and home slot) the mob stands in; null for a boss
+ *           fight's adds in the arena. view.js keeps a lane mob's body and its pacing swing
+ *           (± paceAmp) inside that hero's slot; the renderer does not read it.
  *   phaser → opacity flicker loop 1 → 0.6 (1.2 s); pending → "…" ring; dying → fades out.
  *
  * @typedef {object} ChestVMAdditions

@@ -6,7 +6,7 @@ Design version 1.0. Start point: the "signals" design (judges' consensus winner)
 
 ## 1. Pitch and title
 
-**Title shown in the app: Down the Stack.** The mod id (its folder) is `down-the-stack` and the layout file is `Down-the-Stack.json`: herdr has no display title for either and shows the folder and file names, so both are named after the game. The codename (the repository's name) appears on no screen: nothing the mod draws and nothing herdr shows for it says "maple".
+**Title shown in the app: Down the Stack.** The mod id (its folder) is `down-the-stack` and the layout file is `Down-the-Stack.json`: herdr has no display title for either and shows the folder and file names, so both are named after the game. The repository and its package are named `down-the-stack` too; the project was built under a codename, which no file, folder or screen uses: nothing the mod draws and nothing herdr shows for it uses another name.
 
 herdr's own chrome shows the ids:
 - the Settings layout picker, the macOS View > Layout menu and the win98 Start menu show "Down-the-Stack";
@@ -73,7 +73,7 @@ Pinned, focused and party status never change these effects (2.8).
 
 ### 2.3 Tasks (Quests) and transitions
 
-A **task** opens when a hero starts `working` and closes when a non-working status other than `blocked` has held for **8 ticks**. Flipping back to working inside those 8 ticks continues the same task. Blocked time never counts toward task minutes. The task's **Quest name** is the latest non-empty terminal `title`, truncated to 40 characters, kept only in the local save. As built the latest *telling* title (11.11 as built: status glyph stripped; not the program's name, a shell, a path or a prompt), so a task opened under its program's name has none until the agent names its work.
+A **task** opens when a hero starts `working` and closes when a non-working status other than `blocked` has held for **8 ticks**. Flipping back to working inside those 8 ticks continues the same task. Blocked time never counts toward task minutes. The task's **Quest name** is the latest non-empty terminal `title`, truncated to 40 characters, kept only in the local save. As built the latest *telling* title (11.11 as built: status glyph stripped; not the program's name, a shell, a path or a prompt), so a task opened under its program's name has none until the agent names its work. As built (round 4): a title that only repeats the agent's space, tab or pane name tells nothing either (Claude Code titles its terminal after its folder, which herdr also names the space after), compared trimmed, case-insensitive and without the status glyph; the Quest name and chest titles never take one. A label (11.11) may still show a pane's or a named tab's name exactly as the person typed it.
 
 | Transition | Game event |
 |---|---|
@@ -127,6 +127,8 @@ Seals are linear in working time, so four 10-minute tasks and one 40-minute task
 Closing a terminal is **not** acknowledgment. Pending chests on an off-duty hero wait; after 24 h they open as **Unreviewed**: half gold, half chest XP, `floor(rawSeals/2)` items, **no Seals**. The sidebar row of an off-duty hero shows its chest icon, so one click still claims it fully.
 
 As built (round 3): the folded "Off duty" group header shows its pending chests (a gold chest chip "×n"), each off-duty row's tooltip says when its chest opens Unreviewed, and the Herd button's dot (party footer and HUD) lights while an off-duty chest is within 4 h of opening Unreviewed; viewing the Digest does not clear that dot, claiming or the opening does. A chest that opens Unreviewed (after 24 h off duty, or at once when its hero is let go to make room or is a Contractor whose agent leaves) writes one journal line, "Chest opened Unreviewed: “task” (half value, no Seals)" (or "n chests …"), which the Digest lists under "Opened Unreviewed".
+
+As built (round 4): a chest that opens Unreviewed also raises a header note at that moment ("Kip: a chest opened Unreviewed (half value)", or "n chests …") and adds to a saved count of unseen losses (`herd.unseenUnrev`). While that count is above 0 the Herd button's dot (party footer, rail and HUD) stays lit, its tooltip says why ("Herd panel: 2 chests opened Unreviewed (half value, no Seals): the Digest lists them"), and it goes out when the Digest is viewed: the Digest tab on screen runs `lossesSeen`, and "Mark as read" (`digestSeen`) clears it too. A save from before the count counts the journal's Unreviewed lines since the Digest was last read. The dot for an off-duty chest near opening still clears only when the chest is claimed or opens (docs/DECISIONS.md).
 
 ### 2.5 Flap guard
 
@@ -222,6 +224,8 @@ As built: "characters" are UTF-16 units, and the cut never keeps half of an emoj
 
 Several heroes can share a seat; each has an ordinal (0, 1, 2…) used only for its default name. The hero also stores `space.id`: if a space is renamed but its id matches, the seat is re-keyed automatically.
 
+As built (round 4): a space on another machine adds the machine to the seat, `norm(space) + "@" + norm(machine) + "/" + program`. herdr's `agents()` has no machine field, but it prefixes a remote space's id and its terminals' addresses with `<machine>/` (local ids never hold a `/`), and the engine reads the machine from that. This computer's seats are unchanged, so same-named spaces on two machines keep their own benched heroes, a hero last seen on one machine is never picked by an agent on another, and an older save's remote hero is re-keyed when its own machine's agent comes back.
+
 ### 3.2 Binding (only for terminals not yet bound)
 
 1. If the terminal has a `parent`, it becomes a Forkling (2.7).
@@ -231,7 +235,9 @@ Several heroes can share a seat; each has an ordinal (0, 1, 2…) used only for 
 
 The address → hero map lives in memory for the address's lifetime, so reordering tabs never swaps heroes. `addr` is saved so a reload that keeps the same terminal rebinds instantly. The sheet offers **Rebind**: move a live agent onto any benched hero, of any seat.
 
-As built (round 3): the instant rebind by saved `addr` needs the hero's seat to match, or the same space id and the same program; another program started in the same terminal (codex after claude) binds like a new terminal of its own seat, and the old hero keeps its seat and its unseen chest. Rebind moves the agent onto the target hero's own Daily Shift (2.9: the Shift is per hero), so one agent rotated across benched heroes keeps full rate past 4 or 8 working hours; this follows 12.3's "not adversarial anti-cheat" and is left for the owner to confirm (out/VERIFY.md, round 3).
+As built (round 3): the instant rebind by saved `addr` needs the hero's seat to match, or the same space id and the same program; another program started in the same terminal (codex after claude) binds like a new terminal of its own seat, and the old hero keeps its seat and its unseen chest. Rebind moves the agent onto the target hero's own Daily Shift (2.9: the Shift is per hero), so one agent rotated across benched heroes keeps full rate past 4 or 8 working hours; this follows 12.3's "not adversarial anti-cheat" and is left for the owner to confirm (docs/DECISIONS.md).
+
+As built (round 4): step 4's Contractor is promoted to a saved hero when hiring reopens (3.4). A hire never goes to a newcomer while a Contractor waits: promotion runs before new terminals bind. A hero whose terminal ended in the same snapshot is not let go for a promotion in that snapshot, so a pane replaced at once (step 2) still takes its hero back.
 
 ### 3.3 Names
 
@@ -244,10 +250,17 @@ Default name = first name + epithet from `FNV1a32(seat + "#" + ordinal)`: `first
 | Saved heroes | 30 |
 | New heroes per local day | 6 |
 | Roster full on a new agent | Delete the least-recently-seen hero below Lv 10 (its gear goes to the stash). If every hero is Lv 10+, the agent becomes a Contractor. High-level heroes are never deleted automatically. |
-| **Contractor** | Not saved. Level = max(1, median roster level − 5), reference kit at that level (all Alpha), class from the agent's signature if known, else Shellmancer. Kills and chests pay gold and Seals to the herd normally. Half of its XP goes to the lowest-level off-duty hero of the same seat, if any. Tag "(contractor)"; tooltip "Contractors don't get equity." |
+| **Contractor** | Not saved. Level = max(1, median roster level − 5), reference kit at that level (all Alpha), class from the agent's signature if known, else Shellmancer. Kills and chests pay gold and Seals to the herd normally. Half of its XP goes to the lowest-level off-duty hero of the same seat, if any. Tag "(contractor)"; tooltip "Contractors don't get equity." As built (round 4): promoted to a saved hero when hiring reopens (below). |
 | **Retire** (manual, Lv 30+) | The hero goes to the **Hall of Fame** (name, class, level, date, about 40 bytes). Gear moves to the stash. Legacy: +0.5% herd XP per retiree, max +10% (inside the herd cap, 10.4). |
 | Off duty | Keeps everything; Fresh Eyes accrues; pending chests wait (2.4). |
 | **Onboarding** (catch-up) | +50% XP (additive, outside the herd cap) while the hero's level ≤ herd's top level − 10. Shown as a "new hire lanyard". As built: a "New hire" chip in the character sheet's header (its tooltip gives the bonus) and "Onboarding" in the XP breakdown; no lanyard sprite (the Intern's class accessory is already one). |
+
+As built (round 4, owner decision "promote only", docs/DECISIONS.md):
+- **Hires:** 6 new heroes a game day (it turns at 04:00 local, 2.9), the first day included.
+- **Promotion:** a Contractor whose agent is still live is promoted to a saved hero when hiring reopens: at the 04:00 game day turn, or when a roster slot frees (a retire, a hero let go to make room, a hero below Lv 10 going off duty while the roster is full). The longest-running Contractor goes first, within the day's hires left and the rules for a new hire (3.2 step 3 and the "Roster full" row: a full roster lets go its least-recently-seen unbound hero below Lv 10; with none, the Contractor waits). A read-only save never promotes.
+- **What it keeps:** the same hero (name, level, XP, class, skills, pending chests, seat, terminal and pane); its reference kit becomes real saved Alpha items; it takes a roster id and one of the day's hires. Its journal gets "Hired: <name> (was a contractor)", and a header note says so.
+- **Told when:** the party row, pane header and stage tooltips end with the engine's sentence ("Hired at the next 04:00 game day (today: 0 of 6 hires left)", "… · 1 ahead in line", "Hired when a roster slot frees (a retire, or a hero below Lv 10 off duty)"). The character sheet's banner reads "Contractor: hired tomorrow at 04:00 · not saved until then; its kills and chests still pay the herd", with the full sentence, what a hire keeps and "Contractors don't get equity." in its tooltip. The Roster's Contractor rows show the moment ("Hired tomorrow 04:00") and its count line ends "· 24 contractors, the next hired tomorrow at 04:00".
+- **Limits:** Contractors are still never saved. After a restart or hot reload the hiring line re-forms in snapshot order. A Contractor waiting across a restart at 04:00 binds again as a new terminal and is hired fresh at Lv 1 if hires remain, without its level or kit.
 
 ---
 
@@ -460,7 +473,7 @@ Each row is a zone's three mobs at their home-map mid level, with their multipli
 
 | Zone | Mob (home level) | HP | Swing | XP | Main hit | Ticks |
 |---|---|---|---|---|---|---|
-| Lint Meadows | Typo Sprout (2) / Semicolon Snail (6) / Unused Import (10) | 17 / 38 / 80 | 3 / 6 / 5 | 6 / 16 / 34 | 7 / 9 / 14 | 3 / 3.9 / 4.8 |
+| Lint Meadows | Typo Sprout (2) / Semicolon Sloth (6) / Unused Import (10) | 17 / 38 / 80 | 3 / 6 / 5 | 6 / 16 / 34 | 7 / 9 / 14 | 3 / 3.9 / 4.8 |
 | Callback Caverns | Callback Bat (14) / Promise Wisp (18) / Null Pointer Frog (21) | 66 / 143 / 182 | 5 / 13 / 19 | 34 / 65 / 88 | 21 / 31 / 41 | 2.4 / 3.3 / 3 |
 | Regex Ruins | Capture Group Goblin ×2 (24) / Backslash Bandit (28) / Greedy Glob (32) | 152 each / 349 / 767 | 15 / 33 / 42 | 64 / 154 / 285 | 55 / 80 / 115 | 1.8 each / 2.7 / 3.9 |
 | Merge Marshes | Diff Leech (36) / Rebase Wraith (40) / Merge Conflict Golem (43) | 800 / 1,330 / 2,869 | 59 / 100 / 96 | 276 / 512 / 869 | 167 / 241 / 316 | 2.7 / 3 / 4.8 |
@@ -554,6 +567,7 @@ Calendar pacing for four personas is in section 12.
 - **Burst window** (bosses only): if a burst-check telegraph (Backtracker, Hydra) starts within 4 ticks, heroes hold their Ultimate and Buff until it starts.
 - Cooldowns are in ticks; CDR applies, rounded up. Ultimates announce themselves by a 2-tick visual wind-up before they are ready (never a mechanical delay).
 - Display: a skill's name floats above the hero (class colour, 1 s) only for Ultimates and Signatures. Multi-hit skills show one merged number ("×8 12.4k").
+- As built (round 4): the "Visual cue" columns below are art direction. The stage draws one class-coloured hit effect per action, not each cue, so the sheet's skill tooltips name no cue except the one the stage really draws (Works On My Machine: dodged hits show "404"), and the ladder's Capstone note reads "Capstone passive" (no trim is drawn).
 
 ### 7.2 Intern (Lv 1–9)
 
@@ -782,7 +796,7 @@ Multipliers are final (trait effects on stats are already included); traits only
 | Zone | Mob | Map | Traits | HP / ATK / XP | Size | Sprite | Flavour |
 |---|---|---|---|---|---|---|---|
 | 1 | Typo Sprout | 1 | – | 1.0 / 1.0 / 1.0 | S | Seedling whose leaf says `teh` | Sprouts wherever fingers outrun eyes. |
-| 1 | Semicolon Snail | 2 | slow | 1.3 / 1.4 / 1.2 | S | `;` shell leaving a dotted trail | Optional in some regions. |
+| 1 | Semicolon Sloth | 2 | slow | 1.3 / 1.4 / 1.2 | S | Sleepy sloth crawling low, a `;` on its back, long pale claws | Optional in some regions. Gets there eventually. |
 | 1 | Unused Import | 3 | tanky | 1.6 / 0.8 / 1.4 | M | Sleeping imp hugging a crate it never opens | Imported years ago. Never called. |
 | 2 | Callback Bat | 1 | fast | 0.8 / 0.6 / 0.9 | S | Boomerang-shaped wings | Will call you back. Eventually. Possibly twice. |
 | 2 | Promise Wisp | 2 | pending | 1.1 / 1.0 / 1.1 | S | Cocoon with a loading spinner | Pending… pending… resolved. |
@@ -979,6 +993,7 @@ Hello, World (first kill) · First Commit (first chest opened) · 404 Not Found 
 
 - **Hall of Fame:** retired heroes (3.4) with name, class, level and date; Legacy bonus.
 - **Since you last looked:** when the herdr window regains focus after 30 minutes or more, the Herd button gets a small dot. The Herd panel's Digest tab lists levels gained, Release-or-better drops, bosses beaten and chests waiting. Never a popup.
+- As built (round 4): the Digest leads with "Opened Unreviewed" (losses before gains), each line timed ("half value, no Seals · 06:30", "· Yesterday"), then levels, drops, bosses, shipped tasks, badges and chests waiting. Viewing it clears the unseen-loss count that keeps the dot lit (2.4 as built). Journal lines name their hero (13.2), so a Contractor's or a let-go hero's line still says whose it was; a hero renamed since shows its new name.
 
 ---
 
@@ -1019,7 +1034,7 @@ As built (`ui/party.js` `stripeColor`): a status mark (the sidebar stripe, a fol
 y=0    ┌ 1-3 Warning Gate ▰▰▰▱ 31/40 · Sprint 4/6 ┬ 2-2 Nested Tunnels ───────────────┐  room headers
 y=18   │  far hills (drift 8 px/s while working)   │  {{{ stalactites                  │
        │        [ ! ]                               │                                   │
-y=112  │  Kip>  *  sprout  snail   ┊ Rue (o_o) … …  │  Ada >_  ))) bat  bat             │
+y=112  │  Kip>  *  sprout  sloth   ┊ Rue (o_o) … …  │  Ada >_  ))) bat  bat             │
 y=160  ╞═══════════════════════════════════════════╪═══════════════════════════════════╡  ground line
        │  [Kip 9]            [Rue 8  ! 2m]          │  [Ada 17]                         │  nameplates, tags
 y=200  └───────────────────────────────────────────┴───────────────────────────────────┘
@@ -1043,6 +1058,8 @@ Positions inside a slot of width w: hero at 0.24w, Forklings at 0.10–0.18w, ch
 6. **Empty states:** no agents: Localhost at night fills the strip with a sign "Help wanted: start an agent to hire a hero." All idle: each slot shows its campfire; nothing else moves.
 
 As built (`game/view/stage.js`): when the protected heroes of rule 4 alone need more room than 150 px slots give, the slots squeeze down to 90 px (heroes drawn smaller). Past that, and past **30 slots on any strip** (what the stage's element budget, 11.9 item 7, holds at its barest detail), protected heroes fold too: chest holders first, then pinned, then focused, and blocked heroes last, lowest level first. So a 4000 px stage shows 25 slots of 150 px, or up to 30 squeezed ones; a blocked hero goes to camp only when more than 30 heroes are blocked at once. The camp chip's dot keeps its status colour.
+
+As built (round 4): the camp chip's tooltip lists at most 12 heroes, waiting first, then those with a chest waiting ("· chest waiting"), then working, then resting (each group in the strip's order), and sums up the rest in one line ("…and 18 more (3 with a chest, 15 working)"); its dots follow the same order, so a waiting hero's amber dot is among the ten drawn. Each lane mob stays inside its own hero's slot (with its pacing swing and an elite's larger body): it steps left rather than spilling into the next slot.
 
 ### 11.4 Sprites
 
@@ -1158,8 +1175,9 @@ gold 48.2k · Snippets 133 · Sprint: Pyramid of Doom 7/10 · [Herd •] [Settin
 - **Row (44 px):** 3 px status stripe (11.1), 32 px portrait (head crop with the live face glyph and program icon corner; focused ring when focused), line 1 name and level, line 2 career title, class and map, line 3 HP bar (red, 3 px) and XP bar (cyan, 3 px, Fresh Eyes segment), right-side chip and badges (Forkling count, Unblocked spark, star for a pending choice, red BOSS chip, chest icon).
 - **Click a row:** show its terminal (2.7). Click the portrait: character sheet. Off-duty rows open the sheet. A chest icon claims the chest.
 - **Waiting agents never hide:** the header shows "N need you" ("! N" when narrow) while anyone is blocked; a click shows the next blocked row's terminal (repeated clicks walk through them; rows still never re-sort). A guild header with a blocked row carries a `!` badge, folded or not, and in the 44 px rail a blocked portrait carries a `!` corner badge. The waiting chip's tooltip names the task ("Waiting for you for 2m on “Bump deps”"). As built it names the most telling label herdr gives the terminal, judged by herdr's own agents-list test: the live title (status glyph stripped), else the task's last title, else a pane or tab name the person gave; never an empty title, a path, a user@host prompt, the program's own name, or a shell or interpreter name ("zsh", "node"), and when nothing tells, the line leaves the name out. The label is cut to 40 characters, as the Quest name is (2.3). The quest, shipped-chest and Forkling lines use the same test, and so do the stage's hero, Forkling and chest tooltips, the character sheet's quest line, its Bind buttons and the digest's waiting chests. The engine applies the test too: a task keeps the last telling title as its Quest name (status glyph stripped, 40 characters), so an agent that retitles itself after its program or a shell keeps the task's real name, and its chest records that name (none when the task never had one: the journal then reads "Commit").
-- As built (round 3): "N need you", the group `!` and the rail `!` count pane agents (rows) only. A waiting pane-less sub-agent shows as an amber fork chip with its count on its parent's row in the wide party (its click shows the one waiting, `terminal.peek`), and gives no cue in the 44 px rail; herdr's own status bar counts only agents too, but herdr's agents list ranks a parent by its most urgent sub-agent. Whether blocked Forklings should count is left for the owner (out/VERIFY.md, round 3). On light chrome (paper, win98) the `!` chip, "N need you" and the rail badge use the light blocked step (#863808, the stripe's own colour; the rail badge is that step with a white `!`).
+- As built (round 4, owner decision): a waiting sub-agent counts like a waiting agent, as herdr's agents list ranks a parent by its most urgent sub-agent. "N need you" lists it ("Pax the Rebased's sub-agent") after the blocked rows, its group header gets the `!`, and in the 44 px rail its parent's portrait gets the `!` badge. A click shows it: `pane.focus {terminal}` when it has a pane, else herdr's peek (`terminal.peek`); the rail badge's own click does not also click the row. A peek leaves the focus where it was, so "N need you" remembers the last one it showed and walks on from there (a blocked agent without a pane too). The amber fork chip on the parent's row still shows the one waiting. The HUD's "blocked" count is heroes only. On light chrome (paper, win98) the `!` chip, "N need you" and the rail badge use the light blocked step (#863808, the stripe's own colour; the rail badge is that step with a white `!`).
 - **Narrow sidebars:** below about 230 px a row keeps the chips that fit (urgent first), then the level; it never runs past the edge.
+- As built (round 4): a hero pinned to its map shows a hollow-head pin glyph beside its level (herdr's terminal pin is the filled one), in view at every width, in slim rows and when hovered; its tooltip says why ("Pinned to 1-1 Squiggle Path: the autopilot keeps it on this map (Auto on the Career tab's Map card unpins it)"). Line 2 shows the map alone.
 - **Order:** grouped by space (guild) in herdr's own order; rows never re-sort on status changes. Off-duty heroes collapse into one group at the bottom.
 - **Footer:** gold, Snippets, Release version, frontier Sprint meter, [Herd] button (digest dot), [Settings].
 
@@ -1173,7 +1191,7 @@ gold 48.2k · Snippets 133 · Sprint: Pyramid of Doom 7/10 · [Herd •] [Settin
 - Centre: herdr's own terminal title stays as it is; real information always wins.
 - Right: 48 px HP bar, 64 px XP bar, status chip: "fighting 2-2" (grey), "BOSS 41%" (red), "! waiting 2m" (amber), "shipped · chest ready" (gold), "resting" (grey), "supervising 2 Forklings" (grey). The agent's own state comes first: "BOSS 41%" / "REVIEW" shows only while the participant is questing or supervising; a blocked participant reads "! waiting" (it holds its seat, 9.5, and its tooltip says "holding until you answer"), a done or idle one has walked out and reads "shipped" / "resting".
 - Below 360 px the header keeps the program icon, the face, herdr's terminal title (it truncates first) and the chip; the name goes, and "Lv 14" shows only while the title keeps its room. Below 200 px: the face, the chip's short form ("!", "! 2m") and the title when 48 px are left. Hover: Power Level, current quest, Fresh Eyes, Shift, buffs and the "why" tooltip.
-- As built (round 3): the HP and XP bars show only when herdr's whole terminal title fits beside them, with room reserved for the longest name and a 100 px chip whatever they are, so they depend on the pane's width and title alone and a hover never toggles them; once shown they stay until the title's room falls 24 px short. In practice that needs a pane of about 650–780 px, so an even two-pane split shows no bars (the party rows and the sheet still carry them). The title has a tooltip with the full title.
+- As built (round 4, owner decision): the bars show in splits too. The full 48 / 64 px bars show when herdr's whole terminal title fits beside them (room reserved for the longest name and a 100 px chip); otherwise compact 28 / 36 px bars show from a pane of about 420 px, and herdr's title is cut sooner (it keeps at least about 40 px, and the whole title is its tooltip at every width). Beside compact bars the chip takes its short form when the full one would cost the title, and a wide chip ("supervising") shrinks the name first, down to 48 px. The bars depend on the pane's width and title alone, never on the name, status or hover, and keep a 24 px hysteresis (compact bars, once shown, stay down to 396 px). Hovered, the name shrinks so the four pane buttons stay inside the header; at about 396–440 px a hover can shrink the title to its icon until the pointer leaves.
 
 ### 11.13 Character sheet (overlay, 760 × 500; Esc or click outside closes)
 
@@ -1187,31 +1205,36 @@ gold 48.2k · Snippets 133 · Sprint: Pyramid of Doom 7/10 · [Herd •] [Settin
 
 As built: the boss card sits in the Career tab after the ladder; while its zone boss fight runs or is paused it leads the tab, red-edged, with its Retreat in the card's title row (11.16), so it is in view without scrolling at 760 × 500. Its Challenge / Fight again shares the title row with the win estimate, so both stay in view when a long ladder pushes the card down (at Lv 60+ the card's name and status lines need a scroll). In the Herd panel the Bosses tab's fight banner holds the same Retreat above the boss list. A running review's line reads "81% left against <opponent>". The Skills tab's skill-point note (Intern refund, provisional class) sits under the respec rules, and the tab's left column scrolls.
 
+As built (round 4): the tabs' tooltips name their key and what a badge counts ("Gear · key 1", "Skills · 2 skill points to spend · key 2"), in the sheet and the Herd panel. A Contractor's sheet says when it is hired (3.4 as built) and follows the hero to its roster id when it is promoted (only a hero of the same name bound to that terminal). The header's quest line drops a quest that only repeats the space it names. With the autopilot master switch off, the Skills hint reads "Waits: the Autopilot is off in Settings".
+
 As built (round 3): outside a fight the career boss card no longer needs a scroll at Lv 60+: tiers left behind drop their won review line, and a won review on the current tier takes one line. The Herd panel's Bosses tab scrolls its fighting row into view once per fight and per visit (the Retreat stays in the banner). The journal reads chests that opened Unreviewed (2.4 as built). The XP breakdown names the level gap when it binds (2.9 as built).
 
 ### 11.14 Herd panel (overlay, Localhost)
 
 Tabs: Upgrades (buildings), Stash, Bug Tracker, Trophies and bosses (meters, Wounds, Lessons, repeat cooldowns), Roster and Hall of Fame (retire, rebind, rename), Digest, Settings.
 
-As built: the Settings tab's "career" switch is labelled "Promotion reviews" (`auto.career`: it starts the Senior and Staff Reviews at ≥ 90%); "Auto-boss" and "Farm bosses" read their thresholds (90% and 150%) from the tuning. The Stage height row finds the stage block by its content (this mod's stage, any id, as the host's collapse does), is dimmed with "This layout has no stage" where there is none, and still resizes a hidden stage ("The stage is hidden now; it opens at this height."). The HUD switch finds its block the same way. There is no show/hide switch for the stage itself (an open decision, out/VERIFY.md round 3). The palette has one entry, "Down the Stack: Herd panel", which opens the panel on its Digest tab from any layout (`mod.open`); the character sheet and calm mode are reached from the keys, the Roster and Settings tabs and clicks.
+As built: the Settings tab's "career" switch is labelled "Promotion reviews" (`auto.career`: it starts the Senior and Staff Reviews at ≥ 90%); "Auto-boss" and "Farm bosses" read their thresholds (90% and 150%) from the tuning. The Stage height row finds the stage block by its content (this mod's stage, any id, as the host's collapse does), is dimmed with "This layout has no stage" where there is none, and still resizes a hidden stage ("The stage is hidden now; it opens at this height."). The HUD switch finds its block the same way.
+
+As built (round 4, owner decision): a "Stage strip" switch sits right before the HUD strip switch. It is on while the stage block is shown, and it shows or hides the stage whoever hid it (the collapse, `ctrl-shift-g`, `herdr-app do`, herdr's `.state` file from an earlier install): `layout.show` / `layout.hide` on the block found by content, as the Stage height row finds it. A stage shown or hidden with it is the person's (11.15). With no stage in the layout the switch is disabled and says "This layout has no stage". The commands `down-the-stack.stage`, `.stage:show` and `.stage:hide` do the same from keys. The Roster puts spaces holding one hero in one block first, with no header, each row naming its space; spaces with two or more heroes keep their headers, then Off duty (30 heroes in 25 spaces take 35 lines instead of 55). The Digest leads with "Opened Unreviewed" (10.7 as built). The palette has one entry, "Down the Stack: Herd panel", which opens the panel on its Digest tab from any layout (`mod.open`); the character sheet and calm mode are reached from the keys, the Roster and Settings tabs and clicks.
 
 ### 11.15 Notifications, calm controls, settings
 
 - **Notifications:** none by default. Opt-in (each off by default, at most 3 per day, never sound): "Herd-first boss kill", "LTS or Keepsake drop", "Hero reached Principal". In-stage header notes (≤ 3 s, text only, inside the header band) cover new hires, promotions, map clears and Release-or-better drops.
 - **Calm mode** (one toggle, also a hotkey): no damage numbers, no banners or pillars, stage at 60% opacity; bubbles and chests stay.
 - **Reduced motion** (follows the OS): no bob, pacing or parallax; each room shows one static "DPS 1.2k" text instead of numbers; celebrations become 5 s static badges.
-- **Settings:** stage height 64 / 120 / 200 px (at 64 only nameplates, chests, bubbles and HP lines); damage numbers All / Crits / Off; loot glow minimum rarity; collapse the stage when nothing is working; autopilot master switch and per-system switches (auto-equip, auto-deprecate, auto-learn, auto-polish, buildings, map choice, auto-boss, farm bosses, answer calls, career); optional sound off.
+- **Settings:** stage height 64 / 120 / 200 px (at 64 only nameplates, chests, bubbles and HP lines); as built also the Stage strip and HUD strip switches (11.14); damage numbers All / Crits / Off; loot glow minimum rarity; collapse the stage when nothing is working; autopilot master switch and per-system switches (auto-equip, auto-deprecate, auto-learn, auto-polish, buildings, map choice, auto-boss, farm bosses, answer calls, career); optional sound off.
 
 As built (ARCHITECTURE §3.4, §4):
 - **Notifications** are herdr toasts (`notify`), posted by the host only. Each kind is off by default. At most 3 are raised a day over all kinds: the game's day (2.9: 04:00 local, from the snapshot's clock and time zone), counted in the save, so a restart keeps the count and a clock set back a day keeps the later day's (set back further, as when a clock that ran days ahead is put right, the count starts afresh). Only live play raises one: never the first tick after the app starts or reloads (or, when herdr lists no agents at first, the tick that first sees them), an offline gap (Unreviewed chests opened while away) or a clock behind, so reopening after a night posts no burst of stale news; a person's own commands are live. A milestone is posted only once a save that holds it as taken is on disk, so a restart, a hot reload or a second window on the same save never posts it twice (at most once: one lost with a write that never finishes is not posted later), and never one older than 10 minutes. "Herd-first boss kill" is the first kill of a zone boss ("The Deadlock Hydra: FIXED" / "The herd reached frame #4, Merge Marshes."); "LTS or Keepsake drop" names the item and its finder; "Hero reached Principal" names the hero and its title. Level "success", no icon, never a sound. A click opens the Herd panel on its Digest tab (`mod.open`, which works in any layout); while a Herd panel is open the toast has no click action.
   - Round 3: a boss's Keepsake counts as a Keepsake drop. A repeat kill's Keepsake raises "LTS or Keepsake drop"; a herd-first kill's Keepsake rides on the boss toast while "Herd-first boss kill" is on ("The herd reached frame #2, Callback Caverns. Keepsake: Hazard Cone Hat."), so the kill spends one of the day's three, and raises its own toast only while the boss kind is off. Promotions to Junior, Senior and Staff raise nothing.
   - A milestone raised by a click within a second of a load or reload, before the first tick told the time zone, counts toward the local day (the host passes the time zone with every command; the engine holds such a milestone until the next tick otherwise).
   - The one way a milestone is posted twice is a rollback of the save: a cold restart that finds `save.json` garbage loads `save.bak` (13.1), which may predate the save that took it. Two windows on one save with another program deleting or garbling `save.json` within seconds of a kill can also repeat one. A hot reload never rolls back.
-  - Toasts use herdr's default timeout (5 s for "success"), like herdr's own agent toasts, and herdr closes them whether or not the window is active; the Digest keeps every line. A longer timeout is an open decision (out/VERIFY.md, round 3).
+  - Toasts use herdr's default timeout (5 s for "success"), like herdr's own agent toasts, and herdr closes them whether or not the window is active; the Digest keeps every line. A longer timeout is an open decision (docs/DECISIONS.md).
 - **Loot glow minimum rarity:** All (the default: every drop glows) / Alpha / Beta / Release / LTS / Keepsake. A drop below it draws neither its loot glow nor its light pillar (pillars are LTS and Keepsake only); the header note and journal line of a Release+ drop stay.
 - **Collapse the stage when nothing is working** (off by default): a minute after the last questing (crashed counts: its agent still works) or supervising hero stops, the stage block is hidden (`layout.hide`); it comes back (`layout.show`) when one quests or supervises again, and when the setting is turned off. Turning it on while nothing works collapses at once. It acts on those transitions only and shows only a stage it hid itself (the save remembers that, since herdr keeps a hidden block hidden across restarts): a stage shown or hidden by hand (`ctrl-shift-g`) stays as the person left it.
   - Round 3: an app start or reload while nothing works does not collapse the stage (it is not a transition). A countdown cut short by a restart continues from its saved start (`herd.cfg.idleAt`), giving the new session at least 10 s of its own idling; a hot reload hands it over exactly. The note that this window hid the stage is per window: a save another window wrote never changes it, so two windows on one save each show only a stage they hid.
-  - A stage hidden without that note (herdr's `layouts/.state/Down-the-Stack.json` left from an earlier install, a lost save) stays hidden, as hidden by hand; it comes back with `ctrl-shift-g` (keys merged) or `herdr-app do layout.show --id stage`. herdr's palette hides `layout.show`/`toggle`, and the Settings tab has no stage switch: an open decision (out/VERIFY.md, round 3).
+  - A stage hidden without that note (herdr's `layouts/.state/Down-the-Stack.json` left from an earlier install, a lost save) stays hidden, as hidden by hand, so the collapse never shows it. As built (round 4) the Settings tab's Stage strip switch shows it (11.14), as do `ctrl-shift-g` (keys merged) and `herdr-app do layout.show --id stage`.
+  - Round 4: a stage shown or hidden with the Stage strip switch (or `down-the-stack.stage`) belongs to the person: the collapse forgets that it hid it, and a running countdown is called off. A stage hidden with it is never shown by the collapse. A stage the collapse had hidden and the switch shows stays until work next stops and a minute passes (the switch's message says so).
 - **Autopilot master switch:** the first row of the Autopilot column. Off stops every system; the per-system switches keep their values (they show dimmed and inactive) and apply again when it is back on.
 
 ### 11.16 Interactions (all optional; none needed to progress)
@@ -1231,7 +1254,7 @@ As built (ARCHITECTURE §3.4, §4):
 
 Nothing in the game ever moves keyboard focus away from a terminal.
 
-As built (round 3): a room whose heroes are all pinned draws a cream pin before its title (left out with the stats on bare rooms when the strip is crowded), and its header tooltip reads "Pinned: this hero stays on 1-1 · click to unpin". A pinned hero's tooltip says "(pinned: click the room header to unpin)" when its whole room is pinned, else "(pinned: Auto on the Career tab's Map card unpins)", since a header click in a mixed room pins everyone; the party row's map reads "… (pinned)". When a pin holds a hero far below its level, the why line names the gap (2.9 as built).
+As built (round 3): a room whose heroes are all pinned draws a cream pin before its title (left out with the stats on bare rooms when the strip is crowded), and its header tooltip reads "Pinned: this hero stays on 1-1 · click to unpin". A pinned hero's tooltip says "(pinned: click the room header to unpin)" when its whole room is pinned, else "(pinned: Auto on the Career tab's Map card unpins)", since a header click in a mixed room pins everyone. As built (round 4) the party row shows a pin glyph beside the level instead of "(pinned)" (11.11). When a pin holds a hero far below its level, the why line names the gap (2.9 as built).
 
 ---
 
@@ -1295,7 +1318,7 @@ Raw (bonus-free, on-level) working time to level: Lv 5 in 11.5 min, Lv 10 in 45 
 
 - One JSON file, compact keys, UTF-8. Written atomically (write `save.tmp`, fsync, rename); the previous file is kept as `save.bak`.
 - Saved every 30 s while dirty, 2 s after a major event (level-up, boss result, Release+ drop, chest opened, promotion), and on quit.
-- `crc` is CRC32 (hex) of the file with `crc` set to `""`. On mismatch or parse failure, load `save.bak` (also when `save.json` is missing); if that fails too, load whichever file's only fault is its checksum (an edited or re-encoded but intact save); only then start fresh. A file that does not load is kept aside, never overwritten: `save.broken`, then `save.broken-<ms>` for later incidents. A `save.json` that cannot be *read* (locked, invalid UTF-8) is read again before deciding, and saving resumes once it reads; a herd that started fresh meanwhile is kept as `save.unsaved-<ms>`.
+- `crc` is CRC32 (hex) of the file with `crc` set to `""`. On mismatch or parse failure, load `save.bak` (also when `save.json` is missing); if that fails too, load whichever file's only fault is its checksum (an edited or re-encoded but intact save); only then start fresh. A file that does not load is kept aside: `save.broken` for the first incident, never overwritten, then `save.broken-1`, `-2` and `-3`. A `save.json` that cannot be *read* (locked, invalid UTF-8) is read again before deciding, and saving resumes once it reads; a herd that started fresh meanwhile is kept as `save.unsaved` (then `-1` to `-3`). As built (round 4): each kind keeps its first incident and the newest three. Once `-1` to `-3` are all taken, the oldest gives way (`-1` takes `-2`'s text, `-2` takes `-3`'s, the new text goes to `-3`), each write checked against the text just read, since herdr's mod API cannot list or delete files without running a program and the mod runs none. A text already kept is not written again. Copies named `save.broken-<ms>` / `save.unsaved-<ms>` by earlier builds stay until deleted by hand.
 - Save trouble is never silent: a read-only, not-saving or restored save shows a notice on the stage (dismissable), a band in the Herd panel (13.4), and, so it is seen with the stage hidden, an amber cue in the party sidebar's footer (a dot on the narrow rail) and in the HUD strip that opens the Herd panel.
 - Not saved: terminal bindings (except `addr` for fast rebind), mob lanes, effects, render state, Contractors, mid-tick state. A boss fight in progress is saved as a suspended fight.
 - As built (round 3), hot reload (herdr reloads the mod in place when its files change): the new code takes the running world over and never rolls back to the save, also when `save.json` is unreadable (it is then never written until it reads), missing (written again) or garbage another program wrote (kept aside as `save.broken`). A valid save another window wrote since is loaded instead. When `save.json` reads again after a session that could never read it, the rule above applies at once: if that session started a fresh herd, or the file is a newer version, the file is loaded and the session's world kept aside as `save.unsaved`. A save notice survives a reload. A *cold* restart that finds `save.json` garbage still falls back to `save.bak`, the one rollback left, which can repeat a notification (11.15).
@@ -1327,7 +1350,7 @@ Raw (bonus-free, on-level) working time to level: Lv 5 in 11.5 min, Lv 10 in 45 
     "backlog": [0, 0],
     "digestAt": 1794990000,
     "cfg": {"auto": 4095, "calm": 0, "stageH": 200, "nums": 2, "rm": 0, "notify": 0},
-    "log": [[1795000000, "ship", 7, "Fix flaky auth test", 2.4]],
+    "log": [[1795000000, "ship", 7, "Fix flaky auth test", 2.4, "Kip the Idempotent"]],
     "rng": 2463534242
   },
   "heroes": [{
@@ -1360,6 +1383,8 @@ Raw (bonus-free, on-level) working time to level: Lv 5 in 11.5 min, Lv 10 in 45 
 | `herd.badges` | Base64 bitset |
 | `herd.cfg` | Settings (11.15). As built also `ap` (0: autopilot master switch off), `glow` (loot glow minimum rarity 1–5), `col` (collapse the stage when nothing works), `held` (the game hid the stage and owes it a show), each written only when set |
 | `herd.nf` / `herd.ms` | As built: notifications (11.15) `[local day, raised that day, last number]`, and milestones raised but not yet posted |
+| `herd.log` | Journal lines `[time, kind, hero id, text, value, hero name]`. As built (round 4) the sixth column is the hero's name when the line is about a hero (through the `str` table), so a line about a Contractor or a hero since let go still names it; older lines without it load unchanged. Contractor ids are written as 0 on load (they last one session). Kinds include `"hired"` ("Hired: <name> (was a contractor)") and `"unrev"` |
+| `herd.unseenUnrev` | As built (round 4): chests opened Unreviewed since the Digest was last viewed (2.4), kept under its readable name in `herd.x` (the codec's extras); missing in an older save, which counts its journal's Unreviewed lines instead |
 | item | `[baseId, iLvl, rarity 0–5, polish, [[affixId, roll 0–99], …], flags (1 lock, 2 new), propertyId or −1]` — about 35–45 bytes; affixes stored explicitly, never regenerated from a seed |
 | `hero.c` / `prov` | Class index (14.1 order) / provisional flag |
 | `hero.sp` | Skill ranks in slot order (Main, Area, Passive, Buff, Signature, Ultimate, Capstone) |
@@ -1378,6 +1403,7 @@ As built (docs/BALANCE.md §10): the journal keeps 120 lines up to 20 heroes and
 - the 30-hero worst case above (full Release/LTS gear, 140 stash items, 60 journal lines, one pending chest each): 27.3 KB (28.7 KB before titles and journal strings were interned);
 - a 30-hero herd left running (`stress30`: 30 agents over three spaces, Lv 68–95, 140 stash items) for 0 / 10,000 / 20,000 / 40,000 / 80,000 s: 19.0 / 25.1 / 26.3 / 28.6 / 28.8 KB with 2 / 37 / 68 / 121 / 120 pending chests (before: 19.4 / 26.8 / 28.7 / 31.9 / 32.1 KB);
 - every one of 30 heroes holding the full 20 pending chests (600, three shared titles) on that worst case: 39.2 KB (61.0 KB with titles inline; 40.2 KB in round 3's measurement, of which the pending chests are 471 B per hero). That is the one state still over the budget; nothing depends on the budget, and herdr's hard limit is 1 MiB per file. Getting under 30 KB would take a lossy or format change (chest times to the second, columnar rows), which SAVE_VERSION 1 cannot carry without an older build misreading the save.
+- round 4: journal lines carry their hero's name (13.2), interned in the `str` table. The worst case the engine review measured, 60 journal lines naming 60 distinct 32-character heroes, is 29.7 KB (budget 30 KB); the pacing personas' end-of-run saves grew by 0.2–0.3 KB. SAVE_VERSION stays 1: a save written by this build and opened by an older one would show wrong or blank names on journal lines, nothing else.
 
 ### 13.4 Versioning and migration
 
@@ -1581,8 +1607,8 @@ Each block is valid JSON. Array order is the integer id used in saves (`n` where
    "palette": {"sky": "#CFEFD8", "far": "#8FD19E", "ground": "#4E8F5F", "accent": "#E0605A"},
    "scenery": "Soft green hills; dandelions with red squiggly stems", "perk": {"xp": 0.02},
    "maps": [{"id": "1-1", "name": "Squiggle Path", "levels": [1, 4], "spawn": {"typo_sprout": 1}},
-            {"id": "1-2", "name": "Whitespace Fields", "levels": [5, 8], "spawn": {"semicolon_snail": 0.75, "typo_sprout": 0.25}},
-            {"id": "1-3", "name": "Warning Gate", "levels": [9, 11], "spawn": {"unused_import": 0.75, "semicolon_snail": 0.25}}]},
+            {"id": "1-2", "name": "Whitespace Fields", "levels": [5, 8], "spawn": {"semicolon_sloth": 0.75, "typo_sprout": 0.25}},
+            {"id": "1-3", "name": "Warning Gate", "levels": [9, 11], "spawn": {"unused_import": 0.75, "semicolon_sloth": 0.25}}]},
   {"n": 1, "id": "callback_caverns", "name": "Callback Caverns", "levels": [12, 22], "boss": 1, "sprint": 10,
    "palette": {"sky": "#2B2140", "far": "#463566", "ground": "#2E2545", "accent": "#9EE6FF"},
    "scenery": "Indigo caves; stalactites shaped like {{{; glowing mushrooms", "perk": {"gold": 0.03},
@@ -1651,8 +1677,8 @@ Each block is valid JSON. Array order is the integer id used in saves (`n` where
   "mobs": [
     {"id": "typo_sprout", "zone": 0, "map": 1, "name": "Typo Sprout", "size": "S", "traits": [], "hp": 1.0, "atk": 1.0, "xp": 1.0, "gold": 1.0,
      "sprite": "Seedling whose leaf says teh", "flavor": "Sprouts wherever fingers outrun eyes."},
-    {"id": "semicolon_snail", "zone": 0, "map": 2, "name": "Semicolon Snail", "size": "S", "traits": ["slow"], "hp": 1.3, "atk": 1.4, "xp": 1.2, "gold": 1.0,
-     "sprite": "A ; shell leaving a dotted trail", "flavor": "Optional in some regions."},
+    {"id": "semicolon_sloth", "zone": 0, "map": 2, "name": "Semicolon Sloth", "size": "S", "traits": ["slow"], "hp": 1.3, "atk": 1.4, "xp": 1.2, "gold": 1.0,
+     "sprite": "A sleepy sloth crawling low, a ; marked on its back", "flavor": "Optional in some regions. Gets there eventually."},
     {"id": "unused_import", "zone": 0, "map": 3, "name": "Unused Import", "size": "M", "traits": ["tanky"], "hp": 1.6, "atk": 0.8, "xp": 1.4, "gold": 1.5,
      "sprite": "Sleeping imp hugging a crate it never opens", "flavor": "Imported years ago. Never called."},
     {"id": "callback_bat", "zone": 1, "map": 1, "name": "Callback Bat", "size": "S", "traits": ["fast"], "hp": 0.8, "atk": 0.6, "xp": 0.9, "gold": 1.0,

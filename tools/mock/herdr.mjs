@@ -16,7 +16,9 @@
 // Fixture hooks for IO trouble (tests): fixture().readError?.(absPath) → an Error (or message) makes
 // that readTextFile reject; fixture().hangAfterWrite?.(absPath) → true makes that writeTextFile
 // land on disk but never settle (herdr: the calling copy went away while the write ran);
-// fixture().runError?.(name, args) → an Error (or message) is thrown by that run() call.
+// fixture().runError?.(name, args) → an Error (or message) is thrown by that run() call;
+// fixture().exec?.(command, args, options) → that exec's result (throw: it cannot start). Without
+// it, exec runs `ls` and `rm` on the mock file system (machineExec) and answers others with code 0.
 
 import path from "node:path";
 import { S, als, report, fixture, deliver, updateFixture } from "./state.mjs";
@@ -47,8 +49,51 @@ export function exec(command, args = [], options = {}) {
   const c = host("exec");
   S.calls.exec.push({ command, args, options, copy: c?.label });
   if (S.checking) report("warning", "exec-in-check", `exec("${command}") runs for real during \`herdr-app check\`; guard it with checking()`, { copy: c });
+  // herdr refuses a timeout that is not a positive number of milliseconds (mods.rs exec_limit)
+  const t = options && typeof options === "object" ? options.timeout : undefined;
+  if (t != null && !(typeof t === "number" && Number.isFinite(t) && t > 0)) throw new TypeError("timeout must be a positive number of milliseconds");
   const fx = fixture().exec;
-  return Promise.resolve(fx ? fx(command, args, options) : { code: 0, stdout: "", stderr: "" });
+  if (fx) {
+    try {
+      return Promise.resolve(fx(command, args, options));
+    } catch (e) {
+      return Promise.reject(e); // "cannot run <program>" (not installed)
+    }
+  }
+  return Promise.resolve(machineExec(command, args));
+}
+
+/**
+ * The machine's `ls -1 [--] <dir>` and `rm [-f] [--] <file>...` on the mock file system (the
+ * mod's save folder pruning, host.js prune); any other program answers code 0 and no output.
+ * A fixture's exec(command, args, options) replaces this (throw to reject: herdr rejects when the
+ * program cannot start).
+ */
+function machineExec(command, args) {
+  const list = Array.isArray(args) ? args.map(String) : [];
+  const operands = (xs) => {
+    const i = xs.indexOf("--");
+    return i >= 0 ? xs.slice(i + 1) : xs.filter((a) => !a.startsWith("-"));
+  };
+  if (command === "ls") {
+    const out = [];
+    for (const d of operands(list)) {
+      try {
+        for (const [name] of memfs.readdir(d)) out.push(name);
+      } catch (e) {
+        return { code: 2, stdout: out.join("\n"), stderr: `ls: cannot access '${d}': No such file or directory\n` };
+      }
+    }
+    return { code: 0, stdout: out.length ? `${out.join("\n")}\n` : "", stderr: "" };
+  }
+  if (command === "rm") {
+    const force = list.some((a) => a !== "--" && /^-[a-zA-Z]*f/.test(a));
+    for (const f of operands(list)) {
+      try { memfs.unlink(f); } catch (e) { if (!force) return { code: 1, stdout: "", stderr: `rm: cannot remove '${f}': No such file or directory\n` }; }
+    }
+    return { code: 0, stdout: "", stderr: "" };
+  }
+  return { code: 0, stdout: "", stderr: "" };
 }
 
 export function hc(args) {

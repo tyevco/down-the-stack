@@ -8,7 +8,9 @@
  * @typedef {Object} HudAdditions
  * gold, snippets and release are display strings ("48.2k", "133", "v2.3"; numbers are shown with
  * String()). sprint: null | { label, have, need } (as PartyVM.footer.sprint). working, blocked,
- * shipped: integers (shipped = done, not yet seen). digestDot: boolean. calm: boolean (calm mode;
+ * shipped: integers (shipped = done, not yet seen). digestDot: boolean; digestTip: null | string
+ * (why the dot is lit, as the party's Herd button says it: chests opened Unreviewed not yet seen
+ * in the Digest, or an off-duty chest about to; the Herd button's tooltip). calm: boolean (calm mode;
  * the strip ignores it, but key commands read it from here: the cheapest view, see chromeCommand).
  * save: null | { title, short, tooltip } (game/view saveCue): save trouble shows as an amber pill
  * before the Herd button (its short form below the words tier); a click opens the Herd panel.
@@ -109,6 +111,7 @@ export function renderHud(vm, env) {
     // when it builds the element, and a hover text colour would brighten only the label.
     h_flex().id("hud-herd").relative().flex_none().h(20).px(7).gap(5).items_center().rounded(5).bg(t.raised).text_color(t.muted)
       .hover((s) => s.bg(lift(t)))
+      .when(dot && Boolean(vm.digestTip), (el) => el.tooltip(String(vm.digestTip)))
       .child(svg(art("ui/herd.svg")).w(12).h(12).flex_none())
       .child(div().text_size(11).font_medium().child("Herd"))
       .when(dot, (el) => el.child(div().absolute().top(2).right(2).size(5).rounded_full().bg(t.accent))),

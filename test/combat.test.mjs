@@ -242,7 +242,7 @@ describe("lane rules (D§5.5)", () => {
   });
 
   test("slow mobs swing every 3rd tick, fast every tick, others every 2nd", () => {
-    for (const [id, every] of [["semicolon_snail", 3], ["callback_bat", 1], ["typo_sprout", 2]]) {
+    for (const [id, every] of [["semicolon_sloth", 3], ["callback_bat", 1], ["typo_sprout", 2]]) {
       const w = makeWorld({ seed: 5, heroes: [{ cls: "refactorer", L: 40, mapId: "1-1" }] });
       const live = liveOf(w, 1);
       setLane(w, 1, [{ id, hp: 1e9, atk: 10 }, { id, hp: 1e9 }, { id, hp: 1e9 }]);

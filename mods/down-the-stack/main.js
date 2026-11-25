@@ -12,9 +12,10 @@
 //    broadcasts run("down-the-stack.tick"); a copy that still shows an old version 1.5 s later (a missed
 //    broadcast, a hidden copy) re-renders itself;
 //  - listens on nextCommand(): "tick" → re-render; the key commands down-the-stack.sheet / .herd / .calm
+//    and .stage (.stage:show / .stage:hide: the Settings tab's Stage strip switch as a command)
 //    reach every shown copy, so the first copy to claim one handles it centrally (host.hotkey) and
-//    the others only re-render. The roles' own command() handlers are not used for these three;
-//    any other command is passed to the role.
+//    the others only re-render. The roles' own command() handlers are not used for these; any
+//    other command is passed to the role.
 // render() delegates to the role inside a try/catch: a renderer bug shows a small error chip
 // (with the debug tooltip) instead of breaking herdr's chrome, and is rethrown once from the next
 // timer tick so herdr logs it (`herdr-app status`; the mock check fails on it). A view builder
@@ -37,7 +38,9 @@ import HerdPanel from "./ui/herdpanel.js";
 import { useDialogs } from "./ui/party.js";
 
 const ROLES = { stage: Stage, party: Party, nameplate: Nameplate, hud: Hud, sheet: Sheet, herd: HerdPanel };
-const HOTKEYS = { sheet: true, herd: true, calm: true };
+// (read as own properties only: a command named like an Object.prototype member is not a hotkey)
+const HOTKEYS = { sheet: true, herd: true, calm: true, stage: true, "stage:show": true, "stage:hide": true };
+const isHotkey = (c) => typeof c === "string" && Object.prototype.hasOwnProperty.call(HOTKEYS, c);
 // Copies that live as long as the layout; pane headers and dialogs pump only as a fallback.
 const STABLE = { stage: true, party: true, hud: true };
 const STALE_MS = 1500;
@@ -108,7 +111,7 @@ export default class DownTheStack extends View {
   /** A command from nextCommand(): "tick" just re-renders (the caller notifies). */
   onCommand(c, cx) {
     if (c === "tick") return;
-    if (HOTKEYS[c]) {
+    if (isHotkey(c)) {
       if (this.host.claim(c)) this.host.hotkey(c);
       return;
     }

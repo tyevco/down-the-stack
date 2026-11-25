@@ -4,7 +4,7 @@ Written from source only (herdr-app master, gpui-shell vendored at `vendor/gpui-
 `vendor/gpui-pre` = crate `gpui-pre 0.3.8`, patched in `Cargo.toml:80`). Nothing was built or run.
 Machine-readable companion: `api-allowlist.json` (same folder).
 
-Path abbreviations used in citations (all relative to `/home/user/herdrdev/herdr-app/`):
+Path abbreviations used in citations (all relative to `<herdr-app source>/`):
 
 | abbrev | path |
 |---|---|

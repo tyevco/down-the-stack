@@ -29,6 +29,7 @@ const SheetMod = await import("../mods/down-the-stack/ui/sheet.js");
 const HerdMod = await import("../mods/down-the-stack/ui/herdpanel.js");
 const S = await import("../tools/vm-samples/sheet.mjs");
 const H = await import("../tools/vm-samples/herd.mjs");
+const G = await import("../tools/mock/gates.mjs");
 
 const NOW = Date.UTC(2026, 10, 24, 9, 30);
 const DAY = 86400000;
@@ -85,6 +86,29 @@ function bigWorld(n, { extra = [] } = {}) {
   return world;
 }
 
+/**
+ * Six heroes hired today, then the `extra` agents: Contractors until hiring reopens (owner
+ * decision, round 4: promoted at the 04:00 game day turn, or when a roster slot frees). Every agent
+ * starts after 04:00 today, so none has been promoted by NOW.
+ */
+function sameDayWorld(extra, { heroes = 6, spaces = 1 } = {}) {
+  const t0 = NOW - 2 * 3600000; // 07:30 UTC, the game day turned at 04:00
+  const ags = [];
+  for (let k = 0; k < heroes; k++) {
+    const sp = k % spaces;
+    ags.push(D.makeAgent({
+      address: `t${k + 1}`, program: "claude", space: `spc_${sp + 1}`, spaceName: sp ? `space-${sp + 1}` : "herdr-app",
+      tab: `tab_${k}`, tabIndex: k, plan: [["working", 1e9]], from: t0, titleIdx: k,
+    }));
+  }
+  extra.forEach((spec, i) => ags.push(D.makeAgent(Object.assign({ from: t0 + (i + 1) * 60000, plan: [["working", 1e9]] }, spec))));
+  const cast = D.makeCast(ags, { focus: "t2" });
+  const world = W.createWorld({ nowMs: t0, seed: 99 });
+  D.runCast(world, cast, NOW);
+  world.rt.demo = { cast };
+  return world;
+}
+
 let BIG = null;
 /** 30 heroes, every one Lv 30+ (retire buttons everywhere), 14 Hall of Fame entries. */
 function big() {
@@ -117,6 +141,8 @@ const NULLABLE = {
   options: "array", action: "object", badge: "string", missing: "string", header: "object", item: "object", icon: "string",
   gear: "object", skills: "object", stats: "object", career: "object", journal: "object",
   upgrades: "object", stash: "object", tracker: "object", bosses: "object", roster: "object", digest: "object", settings: "object",
+  // round 4: a tab's badge meaning, a roster row's space (no header) and a Contractor's hire, the digest's seen command
+  tip: "string", space: "string", hire: "object", seen: "object",
 };
 // settings values / option ids / chrome hooks, filter patches and command args differ per item
 const ANY = new Set(["value", "id", "chrome", "set", "args"]);
@@ -247,7 +273,7 @@ test("shape: herdView matches the sample VMs for every demo world and tab (focus
 test("shape: a 30-hero herd, Contractors and a paused / running boss fight match the samples too", () => {
   const w = big();
   for (const tab of HERD_TABS) assertShape(V.herdView(w, { tab, filter: FILTER }), HERD_SAMPLE[tab], `big/${tab}`);
-  const c = bigWorld(6, { extra: [{ address: "vps/t9", program: "claude", space: "spc_1", spaceName: "herdr-app", plan: [["working", 1e9]] }] });
+  const c = sameDayWorld([{ address: "vps/t9", program: "claude", space: "spc_1", spaceName: "herdr-app", plan: [["working", 1e9]] }]);
   const contractor = Array.from(c.rt.contractors.values())[0];
   assert.ok(contractor, "the 7th hire of the day is a Contractor");
   for (const tab of SHEET_TABS) {
@@ -479,7 +505,7 @@ async function layoutOf(page, m, { width = 760, height, theme = "graphite", butt
 
 test("layout: the career boss card's Retreat is in view at 760 × 500 during a fight (armed too); the Herd panel's fight banner too", async (t) => {
   let pw;
-  try { pw = (await import("node:module")).createRequire(import.meta.url)("playwright"); } catch { return t.skip("playwright not installed"); }
+  try { pw = (await import("node:module")).createRequire(import.meta.url)("playwright"); } catch { return G.skipGate(t, "the career boss card's Retreat in Chromium", "Playwright is not installed"); }
   const browser = await pw.chromium.launch();
   try {
     const page = await browser.newPage();
@@ -576,7 +602,7 @@ test("layout: the career boss card's Retreat is in view at 760 × 500 during a f
 
 test("layout: outside a fight a Lv 60+ hero's career boss card shows whole (name, status, button, estimate) at 760 × 500", async (t) => {
   let pw;
-  try { pw = (await import("node:module")).createRequire(import.meta.url)("playwright"); } catch { return t.skip("playwright not installed"); }
+  try { pw = (await import("node:module")).createRequire(import.meta.url)("playwright"); } catch { return G.skipGate(t, "a Lv 60+ career boss card in Chromium", "Playwright is not installed"); }
   const browser = await pw.chromium.launch();
   try {
     const page = await browser.newPage();
@@ -604,7 +630,7 @@ test("layout: outside a fight a Lv 60+ hero's career boss card shows whole (name
 
 test("layout: no tab of either dialog runs under its footer; skill effects, zone names and building effects stay whole", async (t) => {
   let pw;
-  try { pw = (await import("node:module")).createRequire(import.meta.url)("playwright"); } catch { return t.skip("playwright not installed"); }
+  try { pw = (await import("node:module")).createRequire(import.meta.url)("playwright"); } catch { return G.skipGate(t, "every dialog tab's layout in Chromium", "Playwright is not installed"); }
   const browser = await pw.chromium.launch();
   try {
     const page = await browser.newPage();
@@ -1459,9 +1485,39 @@ test("rules: a chest that opened Unreviewed reads in the hero's journal and the 
   assert.equal(sec.title, "Opened Unreviewed");
   const first = hero.name.split(" ")[0];
   assert.deepEqual(sec.lines.map((l) => [l.text, l.sub]), [
-    [`${first}: 3 chests opened Unreviewed`, "half value, no Seals"],
-    [`${first}'s chest opened Unreviewed`, "“Add retry to webhook sender” · half value, no Seals"],
+    [`${first}: 3 chests opened Unreviewed`, "half value, no Seals · 09:29"],
+    [`${first}'s chest opened Unreviewed: “Add retry to webhook sender”`, "half value, no Seals · 09:29"],
   ]);
+});
+
+test("rules (round 4): the digest leads with Opened Unreviewed (losses before gains), each line with its time; viewing it sees the losses", () => {
+  const world = D.demoWorld("mid", NOW).world;
+  const hero = world.state.heroes[0];
+  const first = hero.name.split(" ")[0];
+  // a night's work since the last read: levels and shipped tasks (the demo), then two losses
+  Herd.journal(world.state, "unrev", hero.id, "", 2, NOW - 26 * 3600000);
+  Herd.journal(world.state, "unrev", hero.id, "Bump the lockfile", 1, NOW - 3 * 3600000);
+  world.state.herd.unseenUnrev = 3;
+  world.rt.version++;
+  const d = V.herdView(world, { tab: "digest", filter: FILTER }).digest;
+  assert.ok(d.sections.length >= 2, "the demo digest has gains too");
+  assert.equal(d.sections[0].key, "unreviewed", `losses first: ${d.sections.map((x) => x.key).join(", ")}`);
+  const lines = d.sections[0].lines.map((l) => [l.text, l.sub]);
+  assert.deepEqual(lines.slice(0, 2), [
+    [`${first}'s chest opened Unreviewed: “Bump the lockfile”`, "half value, no Seals · 06:30"],
+    [`${first}: 2 chests opened Unreviewed`, "half value, no Seals · Yesterday"],
+  ]);
+  // the Herd dot stands for unseen losses until the Digest is viewed: the VM names the command
+  assert.equal(d.unseen, 3);
+  assert.equal(d.seen.cmd, "lossesSeen");
+  assert.deepEqual(d.seen.args, {});
+  const r = W.command(world, d.seen.cmd, d.seen.args, NOW);
+  assert.equal(r.ok, true, r.error);
+  assert.equal(Herd.unseenLosses(world.state), 0);
+  const after = V.herdView(world, { tab: "digest", filter: FILTER }).digest;
+  assert.equal(after.unseen, 0);
+  assert.equal(after.seen, null);
+  assert.equal(after.sections[0].key, "unreviewed", "seeing the losses keeps their lines until Mark as read");
 });
 
 test("rules: with auto-learn off for the herd (or the autopilot off), the sheet and the party never promise that points get spent", () => {
@@ -1492,4 +1548,242 @@ test("rules: with auto-learn off for the herd (or the autopilot off), the sheet 
     assert.ok(star(), "the party row shows the unspent-points star");
     world.state.herd.cfg = Object.assign({}, cfg, { autopilot: true, auto: Object.assign({}, cfg.auto, { learn: true }) });
   }
+});
+
+// ---------------------------------------------------------------------------------------------
+// round 4 (the owner's screenshots in real herdr)
+
+test("rules (round 4, P6): with the Autopilot off the skills hint says the Autopilot is off, not auto-learn", () => {
+  const world = D.demoWorld("mid", NOW).world;
+  const hero = world.state.heroes.find((h) => h.cls > 0 && world.rt.live.has(h.id));
+  hero.autoLearn = true;
+  hero.spFree = 2;
+  const skills = () => V.sheetView(world, { heroId: hero.id, tab: "skills", filter: FILTER }).skills;
+  world.state.herd.cfg = Object.assign({}, world.state.herd.cfg, { autopilot: false, auto: Object.assign({}, world.state.herd.cfg.auto, { learn: true }) });
+  world.rt.version++;
+  assert.equal(skills().autoLearn.hint, "Waits: the Autopilot is off in Settings");
+  assert.match(skills().sp.tooltip, /The Autopilot is off in Settings, so they wait\./);
+  assert.doesNotMatch(skills().autoLearn.hint + skills().sp.tooltip, /auto-learn is off/i);
+  // the herd's own auto-learn switch off (the Autopilot on): that switch is named
+  world.state.herd.cfg = Object.assign({}, world.state.herd.cfg, { autopilot: true, auto: Object.assign({}, world.state.herd.cfg.auto, { learn: false }) });
+  world.rt.version++;
+  assert.equal(skills().autoLearn.hint, "Waits: auto-learn is off in Settings");
+});
+
+test("rules (round 4, P3): no on-screen string promises a visual the game does not draw (career trims, skill cues)", () => {
+  const cues = [];
+  for (const list of Object.values(DATA.SKILLS.byClass)) for (const d of list) if (d.cue && d.cue !== "none") cues.push([d.id, d.cue]);
+  const drawn = new Set(["works_on_my_machine"]); // every dodge shows "404" (combat FX.miss)
+  const bad = cues.filter(([id]) => !drawn.has(id)).map(([, c]) => c);
+  assert.ok(bad.length > 20, "the data's cues are art direction");
+  const strings = [];
+  const walk = (v) => {
+    if (typeof v === "string") strings.push(v);
+    else if (Array.isArray(v)) v.forEach(walk);
+    else if (v && typeof v === "object") Object.values(v).forEach(walk);
+  };
+  const worlds = D.DEMO_KINDS.map(demo).concat([big()]);
+  const classes = new Set();
+  for (const world of worlds) {
+    for (const h of world.state.heroes) {
+      classes.add(h.cls);
+      for (const tab of ["skills", "career"]) walk(V.sheetView(world, { heroId: h.id, tab, filter: FILTER }));
+    }
+  }
+  assert.equal(classes.size, DATA.CLASSES.length, "every class's skills are drawn somewhere");
+  const text = strings.join("\n");
+  for (const c of bad) assert.ok(!text.includes(c), `a tooltip promises "${c}"`);
+  assert.doesNotMatch(text, /silver trim|title-bar trim|lanyard|\bcape\b/i);
+  const principal = V.sheetView(demo("mid"), { heroId: demo("mid").state.heroes[0].id, tab: "career", filter: FILTER }).career.ladder[4];
+  assert.equal(principal.note, "Capstone passive");
+  // the one cue the stage does draw may stay (it explains the "404" numbers)
+  assert.ok(text.includes("Dodged hits show 404") || !worlds.some((w) => w.state.heroes.some((h) => h.cls === 0)), "the 404 cue stays");
+});
+
+test("rules (round 4, P2): tab tooltips say what a badge counts (the number beside a label is its key, not a count)", () => {
+  const world = demo("mid");
+  const hero = world.state.heroes.find((h) => world.rt.live.has(h.id));
+  hero.spFree = 2;
+  world.rt.version++;
+  const tabs = V.sheetView(world, { heroId: hero.id, tab: "gear", filter: FILTER }).tabs;
+  const sk = tabs.find((x) => x.id === "skills");
+  assert.equal(sk.badge, "2");
+  assert.equal(sk.tip, "2 skill points to spend");
+  assert.equal(tabs.find((x) => x.id === "gear").tip, null);
+  const h = V.herdView(world, { tab: "roster", filter: FILTER }).tabs.find((x) => x.id === "digest");
+  if (h.badge) assert.match(h.tip, h.badge === "•" ? /something new/ : new RegExp(`^${h.badge === "9+" ? "more than 9" : h.badge} new since you last looked$`));
+  hero.spFree = 0;
+  world.rt.version++;
+});
+
+test("rules (round 4, P1): a Contractor's banner, tag and roster row say when it joins the roster", () => {
+  const world = sameDayWorld([
+    { address: "t7", program: "claude", space: "spc_9", spaceName: "ref-client" },
+    { address: "t8", program: "codex", space: "spc_9", spaceName: "ref-client" },
+  ]);
+  const cs = Array.from(world.rt.contractors.values());
+  assert.equal(cs.length, 2, "the 7th and 8th agents of the day are Contractors");
+  const first = cs.reduce((a, b) => (a.since <= b.since ? a : b));
+  // the day's six hires are spent: the next 04:00 game day reopens hiring (tomorrow, NOW being 09:30 UTC)
+  const sheet = V.sheetView(world, { heroId: first.id, tab: "gear", filter: FILTER });
+  assert.match(sheet.note.text, /^Contractor: hired tomorrow at 04:00 · not saved until then; its kills and chests still pay the herd$/);
+  assert.match(sheet.note.tooltip, /^Hired at the next 04:00 game day/);
+  assert.match(sheet.note.tooltip, /keeps its name, level, XP and class, and its kit becomes saved Alpha gear\. Contractors don't get equity\.$/);
+  assert.match(sheet.header.tagTip, /^Contractor: Hired at the next 04:00 game day/);
+  const roster = V.herdView(world, { tab: "roster", filter: FILTER }).roster;
+  assert.match(roster.count, / · 2 contractors, the next hired tomorrow at 04:00$/);
+  const rows = roster.groups.flatMap((g) => g.rows);
+  for (const c of cs) {
+    const row = rows.find((r) => r.heroId === c.id);
+    assert.ok(row, `a roster row for ${c.name}`);
+    assert.equal(row.hire.text, "Hired tomorrow 04:00");
+    assert.match(row.hire.tooltip, /04:00 game day/);
+  }
+  assert.match(rows.find((r) => r.heroId !== first.id && r.hire).hire.tooltip, /1 ahead in line/);
+  for (const r of rows) if (r.heroId > 0) assert.equal(r.hire, null, "roster heroes have no hire line");
+  // a full roster with nobody below Lv 10 to let go: hired when a slot frees
+  const proto = world.state.heroes[0];
+  for (let i = 0; i < 24; i++) world.state.heroes.push(Object.assign(JSON.parse(JSON.stringify(proto)), { id: 500 + i, L: 40, seat: `bench-${i}/claude`, name: `Bench ${i}` }));
+  world.rt.version++;
+  const full = V.sheetView(world, { heroId: first.id, tab: "gear", filter: FILTER });
+  assert.match(full.note.text, /^Contractor: hired when a roster slot frees · /);
+  assert.equal(V.herdView(world, { tab: "roster", filter: FILTER }).roster.groups.flatMap((g) => g.rows).find((r) => r.heroId === first.id).hire.text, "Hired when a slot frees");
+  // a read-only save hires nobody: said plainly, and the tooltip's sentences stay apart
+  world.rt.readOnly = true;
+  world.rt.version++;
+  const ro = V.sheetView(world, { heroId: first.id, tab: "gear", filter: FILTER });
+  assert.match(ro.note.text, /^Contractor: never hired here: this save is read-only · its kills and chests still pay the herd$/);
+  assert.match(ro.note.tooltip, /read-only\. Contractors don't get equity\.$/);
+  assert.match(V.herdView(world, { tab: "roster", filter: FILTER }).roster.count, / · 2 contractors, none hired here: this save is read-only$/);
+  world.rt.readOnly = false;
+  world.rt.version++;
+});
+
+test("rules (round 4, P1): a Contractor's sheet follows it onto the roster when it is hired (its terminal), and its journal says so", () => {
+  const world = sameDayWorld([{ address: "t7", program: "claude", space: "spc_9", spaceName: "ref-client" }]);
+  const c = Array.from(world.rt.contractors.values())[0];
+  const oldId = c.id; // promotion gives the same object a roster id
+  const before = V.sheetView(world, { heroId: oldId, tab: "journal", filter: FILTER, address: "t7" });
+  assert.equal(before.heroId, oldId);
+  assert.equal(before.header.focus.address, "t7");
+  // past the next 04:00: hiring reopens and the Contractor is promoted
+  D.runCast(world, world.rt.demo.cast, NOW + 20 * 3600000);
+  assert.equal(world.rt.contractors.size, 0, "promoted");
+  const hero = world.state.heroes.find((h) => h.name === c.name);
+  assert.ok(hero && hero.id > 0);
+  const gone = V.sheetView(world, { heroId: oldId, tab: "journal", filter: FILTER });
+  assert.equal(gone.missing, "This hero has left the roster.", "without its terminal the old id finds nobody");
+  const after = V.sheetView(world, { heroId: oldId, tab: "journal", filter: FILTER, address: "t7", name: c.name });
+  assert.equal(after.missing ?? null, null);
+  assert.equal(after.heroId, hero.id);
+  // another hero playing in that terminal (the Contractor left, another agent started there) is not
+  // the Contractor: its sheet says it left rather than showing someone else
+  const other = V.sheetView(world, { heroId: oldId, tab: "journal", filter: FILTER, address: "t7", name: `${c.name} the Second` });
+  assert.equal(other.missing, "This hero has left the roster.");
+  assert.equal(after.header.tag === "contractor", false);
+  assert.ok(after.journal.lines.some((l) => l.text === `Hired: ${c.name} (was a contractor)` && l.icon === "ui/herd.svg"), after.journal.lines.map((l) => l.text).join(" | "));
+});
+
+/** n heroes spread over spaces: spaceOf(k) names hero k's space. */
+function spacesWorld(n, spaceOf) {
+  const t0 = NOW - 6 * DAY;
+  const ags = [];
+  for (let k = 0; k < n; k++) {
+    const sp = spaceOf(k);
+    ags.push(D.makeAgent({
+      address: `t${k + 1}`, program: ["claude", "codex", "pi"][k % 3], space: `spc_${sp}`, spaceName: `project-${sp}`,
+      tab: `tab_${k}`, tabIndex: k, plan: [["working", 1e9]], from: t0 + Math.floor(k / 6) * DAY, titleIdx: k,
+    }));
+  }
+  const cast = D.makeCast(ags, { focus: "t1" });
+  const world = W.createWorld({ nowMs: t0, seed: 7 });
+  // as bigWorld: one tick as each day's six arrive, then the last minutes played out (playing the
+  // six days second by second took ~43 s per world)
+  D.runCast(world, cast, t0 + 1000);
+  const opens = [];
+  for (let d = 1; d * 6 < n; d++) opens.push(t0 + d * DAY);
+  opens.push(NOW - 5 * 60000);
+  for (const at of opens) {
+    D.advanceCast(cast, (at - world.state.herd.lastMs) / 1000);
+    W.tick(world, D.castSnapshot(cast, at));
+  }
+  D.runCast(world, cast, NOW);
+  world.rt.demo = { cast };
+  return world;
+}
+
+test("rules (round 4, P4): a space with one hero gets no header; its row names the space (30 heroes in 25 spaces)", () => {
+  // spaces 1-5 hold two heroes each, spaces 6-25 one each
+  const world = spacesWorld(30, (k) => (k < 10 ? 1 + (k >> 1) : k - 4));
+  assert.equal(world.state.heroes.length, 30);
+  const r = V.herdView(world, { tab: "roster", filter: FILTER }).roster;
+  assert.equal(r.slim, true);
+  const [one, ...rest] = r.groups;
+  assert.equal(one.inline, true, "the one-hero spaces come first, without a header");
+  assert.equal(one.rows.length, 20);
+  for (const row of one.rows) assert.match(row.space, /^project-\d+$/);
+  assert.equal(new Set(one.rows.map((x) => x.space)).size, 20);
+  const headed = rest.filter((g) => g.key !== "g:off");
+  assert.equal(headed.length, 5);
+  for (const g of headed) {
+    assert.equal(g.inline, false);
+    assert.equal(g.rows.length, 2);
+    for (const row of g.rows) assert.equal(row.space, null, "a row under its space's header does not repeat it");
+  }
+  // one line per hero: 30 rows and 5 headers, against 30 rows and 25 headers before
+  const headers = r.groups.filter((g) => !g.inline).length;
+  assert.equal(headers + r.groups.reduce((n, g) => n + g.rows.length, 0), 35);
+});
+
+test("rules (round 4, P8): the sheet header never quotes a title that only repeats the space it names", () => {
+  const world = sameDayWorld([], { heroes: 2 });
+  const [h1, h2] = world.state.heroes;
+  const l1 = world.rt.live.get(h1.id);
+  const l2 = world.rt.live.get(h2.id);
+  // Claude Code titles its terminal after the folder, which herdr names the space after (5.png)
+  l1.spaceName = "ref-client";
+  l1.title = "ref-client";
+  if (l1.task) l1.task.title = "";
+  l1.tabName = "1";
+  l1.paneName = null;
+  // a tab named after its space
+  l2.spaceName = "ref-client";
+  l2.title = "Claude Code";
+  if (l2.task) l2.task.title = "";
+  l2.tabName = "Ref-Client";
+  l2.paneName = null;
+  world.rt.version++;
+  for (const h of [h1, h2]) {
+    const head = V.sheetView(world, { heroId: h.id, tab: "gear", filter: FILTER }).header;
+    assert.match(head.sub, /^ref-client · /);
+    assert.equal(head.quest, null, `${h.name}: “${head.quest}” repeats the space`);
+  }
+  // a tab with a name of its own still reads
+  l2.tabName = "release notes";
+  world.rt.version++;
+  assert.equal(V.sheetView(world, { heroId: h2.id, tab: "gear", filter: FILTER }).header.quest, "release notes");
+});
+
+test("render (round 4, P4, P1): 30 heroes in 25 spaces, then 6 heroes and 24 Contractors, draw one line per hero inside the budget", async () => {
+  const w = spacesWorld(30, (k) => (k < 10 ? 1 + (k >> 1) : k - 4));
+  const { m } = await mount("herd", w, { props: { tab: "roster" } });
+  assertClean(m, "30 heroes in 25 spaces", 450);
+  // 5 space headers and the Hall of Fame's; 20 rows naming their space
+  const titled = m.findAll((n) => n.type === "text" && /^project-\d+ · 2$/.test(n.text));
+  assert.equal(titled.length, 5);
+  assert.equal(m.findAll((n) => typeof n.id === "string" && n.id.startsWith("hd-sp-")).length, 20);
+  // the owner's herd: six heroes hired today, the rest Contractors, one or two per space
+  const extra = [];
+  for (let k = 0; k < 24; k++) extra.push({ address: `c${k + 1}`, program: ["claude", "codex"][k % 2], space: `spc_${10 + (k >> 1)}`, spaceName: `repo-${10 + (k >> 1)}` });
+  const c = sameDayWorld(extra, { heroes: 6, spaces: 6 });
+  assert.equal(c.rt.contractors.size, 24);
+  const vm = V.herdView(c, { tab: "roster", filter: FILTER }).roster;
+  assert.match(vm.count, /^6 \/ 30 heroes · 6 hired today \(6 a day\) · 24 contractors, the next hired tomorrow at 04:00$/);
+  const rows = vm.groups.flatMap((g) => g.rows);
+  assert.equal(rows.filter((r) => r.hire).length, 24);
+  // six a day: the first six tomorrow, the next six the day after
+  assert.equal(rows.filter((r) => r.hire && r.hire.text === "Hired tomorrow 04:00").length, 6);
+  assert.equal(rows.filter((r) => r.hire && r.hire.text === "Hired Nov 26 04:00").length, 6);
+  const h = await mount("herd", c, { props: { tab: "roster" } });
+  assertClean(h.m, "6 heroes + 24 contractors", 450);
 });

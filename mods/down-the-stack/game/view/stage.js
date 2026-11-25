@@ -52,7 +52,7 @@ import { heroMapId, findHero } from "../combat.js";
 import { estimate as bossEstimate, canChallenge } from "../boss.js";
 // One Termling look and one D§2.9 "why" line for every role: the chrome views own these helpers
 // (the sidebar, nameplate and sheet draw the same hero with the same title bar and tooltip).
-import { termlingColors as colorsFor, programIconOf as iconOf, whyLine, taskLabel, tellingTitle } from "./chrome.js";
+import { termlingColors as colorsFor, programIconOf as iconOf, whyLine, taskLabel, tellingTitle, hireLine } from "./chrome.js";
 
 // ---------------------------------------------------------------------------------------------
 // Constants
@@ -594,12 +594,29 @@ function foldSet(wm, W, cands, fighters, shape, tick, chipW) {
   return set;
 }
 
+/** The camp chip's tooltip lists at most this many heroes (a big herd's list ran past the screen). */
+const CAMP_LINES = 12;
+/** What a folded hero is doing, most relevant first: waiting for you, a chest to open, working, resting. */
+const CAMP_RANK = (e) => (e.state === "waiting" ? 0 : e.hero.pend && e.hero.pend.length ? 1 : WORKING_STATES[e.state] ? 2 : 3);
+const CAMP_GROUP = ["waiting", "with a chest", "working", "resting"];
+
 function overflowVM(L) {
-  const list = L.folded;
+  // most relevant first (stable within a rank: the strip's own order); the dots follow it too, so
+  // the renderer's first ten carry a waiting hero's amber
+  const list = L.folded.map((e, i) => ({ e, i, rank: CAMP_RANK(e) })).sort((a, b) => a.rank - b.rank || a.i - b.i);
+  const line = ({ e, rank }) => `${e.hero.name} · Lv ${e.hero.L} · ${(WORD[e.state] || "resting").toLowerCase()}${rank === 1 ? " · chest waiting" : ""}`;
+  const lines = list.slice(0, CAMP_LINES).map(line);
+  const rest = list.slice(CAMP_LINES);
+  if (rest.length) {
+    const n = [0, 0, 0, 0];
+    for (const x of rest) n[x.rank]++;
+    const parts = n.map((k, r) => (k ? `${k} ${CAMP_GROUP[r]}` : "")).filter(Boolean);
+    lines.push(`…and ${rest.length} more${parts.length ? ` (${parts.join(", ")})` : ""}`);
+  }
   return {
     key: "overflow", x: r1(L.chip.x), w: r1(L.chip.w), count: list.length,
-    dots: list.map((e) => DOT[e.state] || COL.idle),
-    tooltip: `At camp (${list.length}):\n` + list.map((e) => `${e.hero.name} · Lv ${e.hero.L} · ${(WORD[e.state] || "resting").toLowerCase()}`).join("\n"),
+    dots: list.map(({ e }) => DOT[e.state] || COL.idle),
+    tooltip: `At camp (${list.length}):\n${lines.join("\n")}`,
   };
 }
 
@@ -686,8 +703,9 @@ function slotContents(ctx, e, s, L, out) {
     const engaged = m.uid === live.engagedUid && !arriving;
     const mv = mobVM(ctx, m, x, {
       engaged, arriving, pacing: working && !engaged && !arriving, waiting: st === "waiting",
-      paceAmp: Math.max(4, Math.min(12, Math.round(0.05 * w))), scale, lane: pos,
+      paceAmp: Math.max(4, Math.min(12, Math.round(0.05 * w))), scale, lane: pos, heroId: e.id,
     });
+    inSlot(mv, sx, w);
     out.mobs.push(mv);
     out.mobPos.set(m.uid, mobPosOf(mv));
   }
@@ -698,14 +716,16 @@ function reviewMobs(ctx, e, f, sx, w, lanePos, scale, out) {
   const body = f.parts.find((p) => p.kind === "boss");
   let j = 0;
   if (body && body.hp > 0) {
-    const mv = partMob(ctx, f, body, sx + lanePos[0] * w, { engaged: true, sprite: "boss/senior_reviewer.svg", px: 56, size: "L", scale, lane: 0 });
+    const mv = partMob(ctx, f, body, sx + lanePos[0] * w, { engaged: true, sprite: "boss/senior_reviewer.svg", px: 56, size: "L", scale, lane: 0, heroId: e.id });
+    inSlot(mv, sx, w);
     out.mobs.push(mv);
     out.mobPos.set(body.uid, mobPosOf(mv));
     j = 1;
   }
   for (const p of f.parts) {
     if (p.kind !== "add" || !(p.hp > 0) || j >= lanePos.length) continue;
-    const mv = partMob(ctx, f, p, sx + lanePos[j] * w, { engaged: false, scale, lane: j });
+    const mv = partMob(ctx, f, p, sx + lanePos[j] * w, { engaged: false, scale, lane: j, heroId: e.id });
+    inSlot(mv, sx, w);
     j++;
     out.mobs.push(mv);
     out.mobPos.set(p.uid, mobPosOf(mv));
@@ -870,6 +890,9 @@ function heroTooltip(ctx, e, career, inArena) {
   if ((hero.fe || 0) >= 1) lines.push(`Fresh Eyes ${fmtDuration(Math.floor(hero.fe) * 60)} banked (×${T.freshEyes.xpMult} kill XP while questing)`);
   const forks = live.forklings || [];
   if (forks.length) lines.push(`${forks.length === 1 ? "1 Forkling" : `${forks.length} Forklings`} (sub-agents)`);
+  // a Contractor says when it joins the roster (owner decision, round 4)
+  const hire = hireLine(ctx.world, hero);
+  if (hire) lines.push(hire);
   return lines.join("\n");
 }
 
@@ -911,6 +934,7 @@ function mobVM(ctx, m, x, o) {
     phaser: (tr.phaser || 0) > 0 || tr.shape === "phaser",
     pending: (tr.pending || 0) > 0 && !o.arriving, growScale: r2((1 + (tr.grow || 0)) * (o.scale || 1)), dying: false,
     hit: ctx.hitNow.has(m.uid), waiting: !!o.waiting && !o.arriving, lane: o.lane || 0,
+    heroId: o.heroId == null ? null : o.heroId,
   };
 }
 
@@ -924,8 +948,23 @@ function partMob(ctx, f, p, x, o) {
     glyph: null, glyphColor: COL.cream, elite: false, holo: false, hpFrac: r2(frac(p.hp, p.maxHp)),
     showHp: true, engaged: !!o.engaged, pacing: false, paceAmp: 12, opacity: 1, phaser: false,
     pending: false, growScale: r2(o.scale || 1), dying: false, hit: ctx.hitNow.has(p.uid), waiting: false,
-    lane: o.lane || 0,
+    lane: o.lane || 0, heroId: o.heroId == null ? null : o.heroId,
   };
+}
+
+/** A mob's drawn size (ui/stage.js mob(): px × 1.25 when elite × growScale, which carries the slot's scale). */
+const drawnPx = (mv) => Math.round(mv.px * (mv.elite ? 1.25 : 1) * (mv.growScale || 1));
+
+/**
+ * Keep a lane mob's whole body, and its pacing swing (ui/stage.js loops its left edge ± paceAmp),
+ * inside its own hero's slot: the last lane of a narrow slot (0.88w, or 0.84w under 180 px) put a
+ * large or elite mob up to 10 px into the next slot, and pacing swung it further. The mob steps
+ * left instead (lanes may overlap: the queue bunches up, it never spills).
+ */
+function inSlot(mv, sx, w) {
+  const half = drawnPx(mv) / 2 + (mv.pacing ? mv.paceAmp : 0);
+  const hi = Math.floor((sx + w - half) * 10) / 10;
+  if (mv.x > hi) mv.x = Math.max(r1(sx + half), hi);
 }
 
 function mobPosOf(mv) {
@@ -1076,7 +1115,7 @@ function arenaContents(ctx, fight, L, fighters, out) {
   for (const p of f.parts) {
     if (p.kind !== "add" || !(p.hp > 0) || fight.ended) continue;
     const x = addLeft - (30 * (j % 3) + 12 * Math.floor(j / 3)) * z;
-    const mv = partMob(ctx, f, p, x, { engaged: false, scale: z, lane: j });
+    const mv = partMob(ctx, f, p, x, { engaged: false, scale: z, lane: j, heroId: null }); // the arena's adds: no slot
     j++;
     out.mobs.push(mv);
     out.mobPos.set(p.uid, mobPosOf(mv));
@@ -1515,4 +1554,4 @@ export function _resetStageMemo(world) {
   if (world) MEMO.delete(world);
 }
 
-export const _internal = { arenaShape, widths, whyText, SLOT_MIN, ARENA_GAP, MAX_SLOTS };
+export const _internal = { arenaShape, widths, whyText, SLOT_MIN, ARENA_GAP, MAX_SLOTS, drawnPx };

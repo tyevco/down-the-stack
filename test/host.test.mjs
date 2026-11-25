@@ -308,6 +308,88 @@ test("corrupt save and corrupt bak → a fresh world; both texts kept aside, an 
   for (const w of M.calls().writeTextFile.filter((c) => c.path.startsWith(BROKEN))) assert.equal(w.expected, null, "kept-aside files are only ever created");
 });
 
+// Kept-aside copies are bounded (round 4): one save.broken / save.unsaved per incident would pile up,
+// so a kind keeps its first incident and the newest three (-1..-3). herdr's mod API has no listing
+// or removal call without exec, and the mod runs no programs: the three rotate by overwriting the
+// oldest, each write checked against the text just read.
+const keptWrites = (stem) => M.calls().writeTextFile.filter((c) => c.path === stem || c.path.startsWith(`${stem}-`));
+
+test("kept-aside copies: save.broken first, then -1..-3; once full the oldest of the three is dropped; no program runs; other files untouched", async () => {
+  M.resetState();
+  const good = saveOf("idle");
+  const others = { [`${BROKEN}-1700000000000`]: "an earlier build's copy", [`${DIR}/store-1.json`]: "{}" };
+  let mod = await mount({ role: "hud" }, { fixture: {}, files: { [SAVE]: "{incident 1", [BAK]: good, ...others } });
+  let host = await hostOf(mod);
+  assert.equal(host.stats.loadedFrom, "bak");
+  assert.equal(M.memfs.readText(BROKEN), "{incident 1");
+  const incident = async (k) => {
+    M.memfs.write(SAVE, `{incident ${k}`, { mkdirs: true });
+    M.setClock(M.mockNow() + 1000);
+    mod = await mount({ role: "hud" }, { fixture: null });
+    host = await hostOf(mod);
+    assert.equal(host.stats.loadedFrom, "bak", `incident ${k}`);
+  };
+  await incident(2);
+  await incident(3);
+  await incident(4);
+  assert.deepEqual(brokenFiles(), {
+    "save.broken": "{incident 1", "save.broken-1": "{incident 2", "save.broken-2": "{incident 3", "save.broken-3": "{incident 4",
+    "save.broken-1700000000000": "an earlier build's copy",
+  });
+  for (const w of keptWrites(BROKEN)) assert.equal(w.expected, null, `${w.path}: created while there is room`);
+  await incident(5);
+  await incident(6);
+  assert.deepEqual(brokenFiles(), {
+    "save.broken": "{incident 1", "save.broken-1": "{incident 4", "save.broken-2": "{incident 5", "save.broken-3": "{incident 6",
+    "save.broken-1700000000000": "an earlier build's copy",
+  }, "the first incident and the newest three");
+  assert.match(host.saveStatus().message, /kept as save\.broken-3\./, "the notice names the file the text went to");
+  // every overwrite expected the text it read: nothing another session wrote meanwhile is lost
+  for (const w of keptWrites(BROKEN).filter((c) => c.expected !== null)) assert.match(w.expected, /^\{incident [2-5]$/, w.path);
+  assert.equal(M.memfs.readText(`${DIR}/store-1.json`), "{}");
+  assert.equal(M.calls().exec.length, 0, "no program runs");
+  // a text already kept (under any of the four names) is not written again
+  const before = keptWrites(BROKEN).length;
+  M.memfs.write(SAVE, "{incident 5", { mkdirs: true });
+  mod = await mount({ role: "hud" }, { fixture: null });
+  host = await hostOf(mod);
+  assert.equal(keptWrites(BROKEN).length, before);
+  assert.match(host.saveStatus().message, /kept as save\.broken-2\./);
+  assert.deepEqual(mod.errors, []);
+});
+
+test("kept-aside copies: save.unsaved rotates the same way; a copy that cannot be read is never written over; nothing while checking()", async () => {
+  M.resetState();
+  const UNSAVED = `${DIR}/save.unsaved`;
+  const unreadable = new Set([`${UNSAVED}-2`]);
+  const files = { [SAVE]: saveOf("idle"), [UNSAVED]: "first", [`${UNSAVED}-1`]: "u1", [`${UNSAVED}-2`]: "u2 (unreadable)" };
+  let mod = await mount({ role: "hud" }, { fixture: { readError: (p) => (unreadable.has(p) ? new Error("EACCES") : null) }, files });
+  let host = await hostOf(mod);
+  assert.equal(await host.keepAside("world a", UNSAVED), `${UNSAVED}-3`, "the free name, skipping the one it cannot read");
+  assert.equal(await host.keepAside("world a", UNSAVED), null, "each text once a session");
+  // full, and one of the three unreadable: nothing is written over, the trouble is logged
+  const n = keptWrites(UNSAVED).length;
+  assert.equal(await host.keepAside("world b", UNSAVED), null);
+  assert.equal(keptWrites(UNSAVED).length, n);
+  assert.equal(M.memfs.readText(`${UNSAVED}-2`), "u2 (unreadable)");
+  assert.ok(host.errors.some((e) => e.where === "keep a damaged save"), JSON.stringify(host.errors));
+  // readable again: the oldest of the three goes
+  unreadable.clear();
+  assert.equal(await host.keepAside("world c", UNSAVED), `${UNSAVED}-3`);
+  assert.deepEqual(names().filter((x) => x.startsWith("save.unsaved")).sort().map((x) => [x, M.memfs.readText(`${DIR}/${x}`)]), [
+    ["save.unsaved", "first"], ["save.unsaved-1", "u2 (unreadable)"], ["save.unsaved-2", "world a"], ["save.unsaved-3", "world c"],
+  ]);
+  assert.equal(M.calls().exec.length, 0);
+  assert.deepEqual(mod.errors, [], "logged, not a script error");
+  // checking(): the host never keeps anything aside
+  M.resetState();
+  mod = await mount({ role: "hud" }, { fixture: {}, checking: true });
+  host = await hostOf(mod);
+  assert.equal(await host.keepAside("x", UNSAVED), null);
+  assert.equal(M.calls().readTextFile.length + M.calls().writeTextFile.length + M.calls().exec.length, 0);
+  M.setChecking(false);
+});
+
 test("save.json missing but save.bak there: the herd comes back from the bak, never a new herd that rotates over it", async () => {
   M.resetState();
   const good = saveOf("idle");

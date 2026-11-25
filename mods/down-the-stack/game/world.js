@@ -87,8 +87,9 @@ export function loadWorld(text, { nowMs = 0 } = {}) {
 //   wherever the text is shown (agents.js now cuts with cutText). The seat drops the half
 //   character as normSeat now does, so its hero still matches the space; a title also loses the
 //   space before it (questName's trimEnd).
-// - Contractor ids in the paused boss fight: Contractors are never saved and are numbered afresh
-//   (-1, -2, ...) after a load, so a saved negative id would seat an unrelated Contractor.
+// - Contractor ids in the paused boss fight and the journal: Contractors are never saved and are
+//   numbered afresh (-1, -2, ...) after a load, so a saved negative id would seat an unrelated
+//   Contractor (a journal line keeps its stored name, and hero id 0).
 function repairLoaded(state) {
   const mend = (v) => {
     if (typeof v !== "string") return v;
@@ -99,7 +100,13 @@ function repairLoaded(state) {
     if (typeof h.seat === "string") h.seat = wellFormed(h.seat, "");
     for (const p of h.pend || []) if (p && typeof p.title === "string") p.title = mend(p.title);
   }
-  for (const e of state.herd.log || []) if (Array.isArray(e) && typeof e[3] === "string") e[3] = mend(e[3]);
+  for (const e of state.herd.log || []) {
+    if (!Array.isArray(e)) continue;
+    if (typeof e[3] === "string") e[3] = mend(e[3]);
+    // a Contractor's line: its id was that session's only (a new Contractor would take it and its
+    // sheet would list these lines); the line keeps the name it stored (herd.lineName)
+    if (e[2] < 0) e[2] = 0;
+  }
   const f = state.herd.fight;
   if (f && Array.isArray(f.ids) && f.ids.some((id) => !(id > 0))) {
     const n = f.n || f.ids.length; // the boss's HP pool was sized for every participant
@@ -244,7 +251,7 @@ function budget(world, list) {
 
 /**
  * The emitter world.tick and world.command pass to every engine module:
- * {fx(kind, data), note(text, color), banner(text, sub), major(), journal(kind, heroId, text, value),
+ * {fx(kind, data), note(text, color), banner(text, sub), major(), journal(kind, heroId, text, value, name?),
  * milestone(kind, {title, body})}. fx are buffered per tick and flushed through budget() into rt.fx
  * with keys "fx:<tick>:<n>". `live` (opts.live) lets milestones through: world.tick sets it for the
  * steps and reconcile of a call that is neither the VM's first, the one that settles an offline gap
@@ -274,8 +281,15 @@ export function makeEmitter(world, { live = false } = {}) {
       rt.dirty = !rt.readOnly;
       ev.visible = true;
     },
-    journal(kind, heroId, text, value) {
-      H.journal(state, kind, heroId, text, value, rt.nowMs);
+    journal(kind, heroId, text, value, name) {
+      // the hero's name goes into the line (a Contractor or a hero let go is not there to ask
+      // later); callers pass it when the hero has already left the roster
+      let who = name;
+      if (who == null && heroId) {
+        const h = A.heroById(world, heroId);
+        who = h ? h.name : undefined;
+      }
+      H.journal(state, kind, heroId, text, value, rt.nowMs, who);
     },
     /** An opt-in notification milestone (D§11.15): kind boss | lts | principal; data {title, body}. */
     milestone(kind, data) {
@@ -1053,7 +1067,9 @@ const COMMANDS = {
     // Postmortem (Wounds kept) instead of waiting for a hero who never comes back
     const api = AP.bossApi(world);
     if (typeof api.leaveSavedFight === "function") api.leaveSavedFight(world, hero.id, ev);
-    return { ok: true, msg: r.msg };
+    // the freed slot goes to the longest-running Contractor at once, if the day has a hire left
+    const hired = A.promoteContractors(world, ev);
+    return { ok: true, msg: hired ? `${r.msg}; a contractor joined the roster` : r.msg };
   },
 
   rebind(world, a, now, ev) {
@@ -1125,11 +1141,20 @@ const COMMANDS = {
   digestSeen(world, a, now) {
     H.digestMark(world.state, now); // herd.digestAt = now, plus the snapshot the next digest diffs against
     world.rt.digestDot = false;
+    world.state.herd.unseenUnrev = 0;
     return { ok: true };
+  },
+
+  // round 4: the Digest was viewed (its tab shown): chests opened Unreviewed are seen, so the Herd
+  // dot no longer stands for them (H.unseenLosses); the digest itself keeps its lines until marked read
+  lossesSeen(world) {
+    const had = H.unseenLosses(world.state);
+    world.state.herd.unseenUnrev = 0;
+    return { ok: true, msg: had ? `${had} Unreviewed chest${had === 1 ? "" : "s"} seen` : "Seen" };
   },
 };
 
-/** Command names (ARCHITECTURE §3.5, plus digestSeen). */
+/** Command names (ARCHITECTURE §3.5, plus digestSeen and lossesSeen). */
 export const COMMAND_NAMES = Object.keys(COMMANDS);
 
 /**

@@ -1,12 +1,12 @@
 # herdr-app mod runtime semantics (source-verified)
 
-Scope: herdr-app master (~0.1.17) at `/home/user/herdrdev/herdr-app`. Source only, nothing built or run.
+Scope: herdr-app master (~0.1.17) at `<herdr-app source>`. Source only, nothing built or run.
 
 Path abbreviations used in citations:
-- `src/…` = `/home/user/herdrdev/herdr-app/src/…`
-- `shell/…` = `/home/user/herdrdev/herdr-app/vendor/gpui-kit/crates/shell/src/…`
+- `src/…` = `<herdr-app source>/src/…`
+- `shell/…` = `<herdr-app source>/vendor/gpui-kit/crates/shell/src/…`
 - `qjs/…` = `shell/engine/quickjs/…`
-- `AGENTS.md` = `/home/user/herdrdev/herdr-app/defaults/AGENTS.md`, `d.ts` = `defaults/herdr.d.ts`
+- `AGENTS.md` = `<herdr-app source>/defaults/AGENTS.md`, `d.ts` = `defaults/herdr.d.ts`
 
 Anything I could not prove from source is marked **UNCONFIRMED**.
 

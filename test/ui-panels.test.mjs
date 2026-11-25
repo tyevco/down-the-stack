@@ -931,3 +931,165 @@ test("herd: a save in trouble shows the band under the header (D§13.4), with th
   const fine = await mount("herd", "upgrades");
   assert.equal(fine.m.node("hd-save"), null, "no band while the save is fine");
 });
+
+// ---------------------------------------------------------------------------------------------
+// round 4 (the owner's screenshots in real herdr)
+
+const tipOf = (m, id) => m.node(id)?.last("tooltip")?.[0] ?? null;
+
+test("round 4 (P2): a tab's tooltip names its key, and what its badge counts (\"Digest (6)\" read as six new)", async () => {
+  const s = await mount("sheet", "gear"); // Kip: one skill point
+  assert.equal(tipOf(s.m, "sh-tab-gear"), "Gear · key 1");
+  assert.equal(tipOf(s.m, "sh-tab-skills"), "Skills · 1 skill point to spend · key 2");
+  assert.equal(tipOf(s.m, "sh-tab-journal"), "Journal · key 5");
+  const h = await mount("herd", "roster");
+  assert.equal(tipOf(h.m, "hd-tab-upgrades"), "Upgrades · key 1");
+  assert.equal(tipOf(h.m, "hd-tab-digest"), "Digest · 4 new since you last looked · key 6");
+  assert.equal(tipOf(h.m, "hd-tab-settings"), "Settings · key 7");
+  for (const m of [s.m, h.m]) {
+    for (const n of m.findAll((x) => typeof x.id === "string" && /-tab-/.test(x.id))) assert.doesNotMatch(n.last("tooltip")[0], /\(\d+\)/, n.id);
+  }
+});
+
+test("round 4 (P1): the sheet's contractor banner says when it is hired (its tooltip the whole story); the tag too", async () => {
+  const { m } = await mount("sheet", "contractor");
+  const vm = S.scenarios.contractor;
+  assert.ok(m.text().includes("Contractor: hired tomorrow at 04:00 · not saved until then"));
+  assert.equal(tipOf(m, "sh-note"), vm.note.tooltip);
+  assert.equal(tipOf(m, "sh-tag"), vm.header.tagTip);
+  assertClean(m, "contractor");
+});
+
+test("round 4 (P1): a Contractor's sheet sends its terminal and follows the hero id it is hired under", async () => {
+  const { m, host } = await mount("sheet", "contractor");
+  m.render();
+  assert.deepEqual([lastView(host).heroId, lastView(host).address, lastView(host).name], [-3, "t33", "Wren Monorepo-Raised"]);
+  // hired: the VM for that terminal carries the new roster id; the sheet asks for that id from now on
+  const hired = { ...S.scenarios.contractor, heroId: 9, note: null, header: { ...S.scenarios.contractor.header, tag: null, tagTip: null } };
+  host.view = function view(k, args) { this.views.push([k, JSON.parse(JSON.stringify(args))]); return hired; };
+  m.render();
+  m.render();
+  assert.equal(lastView(host).heroId, 9);
+  assert.equal("address" in lastView(host) || "name" in lastView(host), false, "a roster hero is asked for by id alone");
+  assert.equal(m.text().includes("Contractor:"), false);
+});
+
+test("round 4 (P4, P1): a space with one hero has no header line, its row names the space; a Contractor's row says when it is hired", async () => {
+  for (const slim of [false, true]) {
+    const base = H.scenarios.roster;
+    const vm = { ...base, roster: { ...base.roster, slim } };
+    const { m } = await mount("herd", "roster", { host: { vm } });
+    const text = m.text();
+    assert.equal(text.includes("One hero per space"), false, `${slim}: the one-hero block has no header`);
+    assert.ok(text.includes("herdr-app · 3") && text.includes("Off duty · 4"), `${slim}: spaces with two or more keep theirs`);
+    assert.equal(m.node("hd-sp-r:9").children[0].text, "docs-site");
+    assert.equal(m.node("hd-sp-r:-1").children[0].text, "ref-client");
+    assert.equal(m.node("hd-sp-r:1"), null, "a row under its space's header does not repeat it");
+    assert.equal(m.node("hd-hire-r:-1").children[0].text, "Hired tomorrow 04:00");
+    assert.match(tipOf(m, "hd-hire-r:-1"), /^Hired at the next 04:00 game day/);
+    assert.equal(m.node("hd-hire-r:9"), null);
+    assert.ok(text.includes("1 contractor, the next hired tomorrow at 04:00"));
+    if (slim) assert.match(tipOf(m, "hd-r:-1"), /^ref-client · Wren Monorepo-Raised \(contractor\) · .* · Hired at the next 04:00 game day/);
+    assertClean(m, `roster slim=${slim}`);
+  }
+});
+
+test("round 4 (P4, P1): a Contractor's hire moment shrinks rather than push a row's fixed cells out; a narrow dialog narrows the slim columns", async () => {
+  const base = H.scenarios.roster;
+  const vm = { ...base, roster: { ...base.roster, slim: true } };
+  for (const width of [640, 760]) {
+    const { m } = await mount("herd", "roster", { width, host: { vm } });
+    // a flex_none hire beside fixed name / level / seen / Retire / Sheet cells overflows a 640 px
+    // dialog: the Sheet button leaves the row. It shrinks (truncated); title · where gives way first
+    const hire = m.node("hd-hire-r:-1");
+    assert.equal(hire.has("flex_none"), false, `${width}: the hire text never refuses to shrink`);
+    assert.deepEqual(hire.last("min_w"), [0]);
+    assert.ok(hire.has("truncate"));
+    const title = hire.parent.children[hire.parent.children.indexOf(hire) + 1];
+    assert.ok(title.has("flex_1") && title.has("truncate"), "title · where takes what is left");
+    // the space column: 118 px, 92 below 720 px (the name column 170 / 140)
+    assert.deepEqual(m.node("hd-sp-r:9").last("w"), [width < 720 ? 92 : 118]);
+    assertClean(m, `roster slim at ${width}`);
+  }
+  // wide rows: the space and the hire shrink too
+  const wide = await mount("herd", "roster", { width: 640 });
+  assert.equal(wide.m.node("hd-sp-r:-1").has("flex_none"), false);
+  assert.equal(wide.m.node("hd-hire-r:-1").has("flex_none"), false);
+});
+
+test("round 4 (P5): the Digest on screen sees its losses: lossesSeen once, from a timer (never in render), only on that tab", async () => {
+  const d = await mount("herd", "digest");
+  assert.deepEqual(d.host.commands, [], "nothing runs in render");
+  await d.m.tick(1000);
+  assert.deepEqual(d.host.commands, [["lossesSeen", {}]]);
+  await d.m.tick(3000);
+  assert.deepEqual(d.host.commands, [["lossesSeen", {}]], "once per unseen count (a refused one is not asked again every second)");
+  // the sections lead with the losses
+  const first = d.m.findAll((n) => typeof n.id === "string" && n.id.startsWith("hd-ds-"))[0];
+  assert.equal(first.id, "hd-ds-unreviewed");
+  // another tab: nothing
+  const r = await mount("herd", "roster");
+  await r.m.tick(2000);
+  assert.deepEqual(r.host.commands, []);
+  // nothing unseen: nothing
+  const e = await mount("herd", "digestEmpty");
+  await e.m.tick(2000);
+  assert.deepEqual(e.host.commands, []);
+});
+
+test("round 4 (P7): the Stage strip switch shows or hides the stage found by content, whoever hid it; disabled without a stage", async () => {
+  const block = (id, role, extra = {}) => ({ id, type: "block", size: { px: 200 }, content: { mod: "down-the-stack", props: { role } }, ...extra });
+  const tree = (...children) => ({ id: "root", type: "column", children: [{ id: "panes", type: "block", content: { builtin: "panes" } }, ...children] });
+  // hidden (by herdr's .state from an earlier install, say), under another id: the switch reads off
+  const hidden = await mount("herd", "settings", { fixture: { layout: tree(block("arena", "stage", { hidden: true })) } });
+  assert.equal(tipOf(hidden.m, "hd-sw-stage"), "Show the stage strip");
+  click(hidden.m, "hd-sw-stage");
+  assert.deepEqual(runs("layout.show").map((c) => c.args), [{ id: "arena" }]);
+  assert.deepEqual(hidden.host.commands, [], "no herd.cfg change: the layout holds it");
+  assert.ok(hidden.m.text().includes("Stage strip shown."));
+  assert.equal(tipOf(hidden.m, "hd-sw-stage"), "Hide the stage strip");
+  assert.deepEqual(errorsOf(hidden.m), []);
+  // shown: hides it
+  const shown = await mount("herd", "settings", { fixture: { layout: tree(block("stage", "stage")) } });
+  assert.equal(tipOf(shown.m, "hd-sw-stage"), "Hide the stage strip");
+  click(shown.m, "hd-sw-stage");
+  assert.deepEqual(runs("layout.hide").map((c) => c.args), [{ id: "stage" }]);
+  // a host that owns the stage's collapse acts for the switch (host.stageStrip), and its answer flashes
+  const owned = await mount("herd", "settings", { fixture: { layout: tree(block("stage", "stage", { hidden: true })) } });
+  const asked = [];
+  owned.host.stageStrip = (show, id) => { asked.push([show, id]); return { ok: true, msg: "Stage shown (the collapse lets it be)." }; };
+  click(owned.m, "hd-sw-stage");
+  assert.deepEqual(asked, [[true, "stage"]]);
+  assert.equal(runs("layout.show").length, 0, "the host runs it");
+  assert.ok(owned.m.text().includes("Stage shown (the collapse lets it be)."));
+  // no stage in this layout (herdr's main layout, from a toast's mod.open): disabled, says why
+  const none = await mount("herd", "settings", { fixture: { layout: tree(block("hud", "hud")) } });
+  assert.equal(tipOf(none.m, "hd-sw-stage"), "This layout has no stage");
+  assert.ok(none.m.text().includes("This layout has no stage"), "the row's hint says why");
+  click(none.m, "hd-sw-stage");
+  assert.equal(runs("layout.show").length + runs("layout.hide").length + runs("layout.toggle").length, 0);
+  assert.deepEqual(errorsOf(none.m), []);
+  // its place: beside the HUD strip switch
+  const rows = none.m.findAll((n) => typeof n.id === "string" && n.id.startsWith("hd-set-")).map((n) => n.id);
+  assert.equal(rows.indexOf("hd-set-hud") - rows.indexOf("hd-set-stage"), 1);
+});
+
+test("round 4 (P7): a host that keeps the stage's state (stageInfo) is believed over layout() (herdr runs run() after the click)", async () => {
+  const block = (id, role, extra = {}) => ({ id, type: "block", size: { px: 200 }, content: { mod: "down-the-stack", props: { role } }, ...extra });
+  const layout = { id: "root", type: "column", children: [{ id: "panes", type: "block", content: { builtin: "panes" } }, block("arena", "stage")] };
+  const { m, host } = await mount("herd", "settings", { fixture: { layout } });
+  assert.equal(tipOf(m, "hd-sw-stage"), "Hide the stage strip");
+  // the host has just hidden it; layout() has not caught up yet
+  host.stageInfo = () => ({ id: "arena", hidden: true, held: false });
+  host.stageStrip = (show, id) => ({ ok: true, id, hidden: !show });
+  m.render();
+  assert.equal(tipOf(m, "hd-sw-stage"), "Show the stage strip");
+  click(m, "hd-sw-stage");
+  assert.ok(m.text().includes("Stage strip shown."));
+  // the stage height row acts on that node too
+  click(m, "hd-opt-stageH-120");
+  assert.deepEqual(runs("layout.resize").map((c) => c.args), [{ id: "arena", px: 120 }]);
+  host.stageInfo = () => null;
+  m.render();
+  assert.equal(tipOf(m, "hd-sw-stage"), "This layout has no stage");
+});

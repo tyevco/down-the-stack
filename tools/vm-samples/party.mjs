@@ -3,8 +3,9 @@
 // every visual state the renderer supports has a scenario. Ids and keys are stable strings.
 //
 // Shapes: PartyVM / RowVM as in ARCHITECTURE §5, plus the "VM additions" documented at the top of
-// ui/party.js (RowVM.pane, RowVM.colors, RowVM.levelUpAge, RowVM.slim, RowVM.machine; chip.tooltip
-// and the fork chip's terminal; footer values are display strings).
+// ui/party.js (RowVM.pane, RowVM.colors, RowVM.levelUpAge, RowVM.slim, RowVM.machine,
+// RowVM.waitingForks, RowVM.mapPin; chip.tooltip and the fork chip's terminal; footer values are
+// display strings).
 
 const C = { working: "#4CC38A", blocked: "#F2A93B", done: "#FFD447", idle: "#8A8F98", hp: "#FF5A5F", xp: "#7FE9F5", fresh: "#A9B8FF", lts: "#FF9A2E" };
 
@@ -61,6 +62,8 @@ function row(id, o) {
     levelUpAge: o.levelUpAge ?? null,
     slim: !!o.slim,
     machine: o.machine ?? null,
+    waitingForks: o.waitingForks ?? [],
+    mapPin: o.mapPin ?? null,
   };
 }
 
@@ -69,7 +72,7 @@ const chip = (id, kind, text, color, extra) => ({ key: `c:${id}:${kind}`, kind, 
 // has one (pane.focus), else herdr's peek (terminal.peek), as herdr's agents list opens sub-agents.
 const forkChip = (id, n, terminal) => chip(id, "fork", String(n), C.idle, { terminal, tooltip: `${n} Forklings · click to jump to one` });
 
-const FOOTER = { gold: "48.2k", snippets: "133", release: "v2.3", sprint: { label: "Pyramid of Doom", have: 7, need: 10 }, digestDot: true };
+const FOOTER = { gold: "48.2k", snippets: "133", release: "v2.3", sprint: { label: "Pyramid of Doom", have: 7, need: 10 }, digestDot: true, digestTip: null };
 
 // ---------------------------------------------------------------------------------------------
 // heroes
@@ -109,9 +112,10 @@ const pax = row(5, {
   chips: [chip(5, "unblocked", "", C.working), chip(5, "star", "", C.lts)],
   tooltip: "Pax the Rebased · Lv 9 Intern\nUnblocked: +15% damage and XP for 1m 40s\nNew LTS drop: Hackathon Jacket",
 });
+const PIN_TIP = (map) => `Pinned to ${map}: the autopilot keeps it on this map (Auto on the Career tab's Map card unpins it)`;
 const ori = row(6, {
   name: "Ori Semicolon-Sworn", level: 22, careerTitle: "Junior Forkbinder", clsName: "Forkbinder",
-  mapLabel: "2-3 Pyramid Steps", status: "idle", programIcon: ICON.opencode,
+  mapLabel: "2-3 Pyramid Steps", mapPin: { tooltip: PIN_TIP("2-3 Pyramid Steps") }, status: "idle", programIcon: ICON.opencode,
   hpFrac: 1, xpFrac: 0.57, feFrac: 0.25,
   tooltip: "Ori Semicolon-Sworn · Lv 22 Junior Forkbinder\nResting at the campfire · Fresh Eyes 52m",
 });
@@ -172,6 +176,29 @@ const blockedGroups = () => [
 ];
 
 // ---------------------------------------------------------------------------------------------
+// forkWaits: a working hero's pane-less sub-agent waits for the person (D§2.7). It counts in
+// "N need you" (2: Rue and Pax's sub-agent), puts the "!" on its group (api-gateway has no
+// blocked row) and on the rail portrait; its amber fork chip and the badge peek it.
+
+const waitingFork = (heroName, address, title) => ({
+  key: `wf:${address}`, address, name: `${heroName}'s sub-agent`,
+  tooltip: `A sub-agent of ${heroName} waits for you${title ? ` on “${title}”` : ""} · click to show it`,
+});
+const paxWaits = row(5, {
+  name: "Pax the Rebased", level: 9, careerTitle: "Intern", clsName: "Intern",
+  mapLabel: "1-2 Whitespace Fields", status: "working", programIcon: ICON.gemini,
+  hpFrac: 0.95, xpFrac: 0.12,
+  chips: [chip(5, "fork", "2", C.blocked, { terminal: "t5.1", tooltip: "2 Forklings: Ask about the schema (blocked), grep call sites (working) · click to show the one waiting for you" })],
+  waitingForks: [waitingFork("Pax the Rebased", "t5.1", "Ask about the schema")],
+  tooltip: "Pax the Rebased · Lv 9 Intern\nQuest: migrate the test runner (4m)\n2 Forklings: Ask about the schema (blocked), grep call sites (working)",
+});
+const forkGroups = () => [
+  { key: "g:s1", name: "herdr-app", offDuty: false, rows: [kip, rue, ada] },
+  { key: "g:s2", name: "api-gateway", offDuty: false, rows: [juno, paxWaits, ori] },
+  { key: "g:off", name: "Off duty", offDuty: true, chests: 1, rows: [zed, lumi, brin] },
+];
+
+// ---------------------------------------------------------------------------------------------
 // crowded: 30 live heroes (game/view switches to slim rows above 12 live rows)
 
 const PROGS = [ICON.claude, ICON.codex, ICON.pi, ICON.gemini, ICON.opencode];
@@ -194,6 +221,7 @@ function crowdedGroups() {
       programIcon: PROGS[i % PROGS.length], focused: i === 5, pinned: i === 0 || i === 17,
       hpFrac: 1 - (i % 5) * 0.15, xpFrac: ((i * 13) % 100) / 100, feFrac: i % 4 === 0 ? 0.1 : 0,
       chips, chestPending: status === "done", slim: true, machine: i === 8 ? "vps" : null, levelUpAge: i === 2 ? 0 : null,
+      mapPin: i === 5 || i === 7 ? { tooltip: PIN_TIP(`${1 + (i % 9)}-${1 + (i % 3)} Somewhere`) } : null,
     }));
   }
   return [
@@ -209,14 +237,15 @@ export const scenarios = {
   /** host.view returned null: the world is still loading. */
   loading: null,
   /** No agent has reported a status yet. */
-  empty: party([], { count: 0, agentOrder: [], footer: { gold: "0", snippets: "0", release: "v0.1", sprint: null, digestDot: false } }),
+  empty: party([], { count: 0, agentOrder: [], footer: { gold: "0", snippets: "0", release: "v0.1", sprint: null, digestDot: false, digestTip: null } }),
   /** First day: one hero in one guild. */
   one: party([{ key: "g:s1", name: "herdr-app", offDuty: false, rows: [row(21, { name: "Nib the Linted", level: 3, careerTitle: "Intern", clsName: "Intern", mapLabel: "1-1 Squiggle Path", status: "working", focused: true, hpFrac: 0.9, xpFrac: 0.62 })] }],
-    { footer: { gold: "312", snippets: "4", release: "v0.1", sprint: { label: "Lint Meadows boss", have: 1, need: 6 }, digestDot: false } }),
+    { footer: { gold: "312", snippets: "4", release: "v0.1", sprint: { label: "Lint Meadows boss", have: 1, need: 6 }, digestDot: false, digestTip: null } }),
   /** Six heroes in two guilds plus a collapsed off-duty group (statuses, chips, focus, pin, level-up). */
   six: party(sixGroups()),
   /** Most of the party is blocked. */
-  blocked: party(blockedGroups(), { footer: { gold: "1.24M", snippets: "2.1k", release: "v5.0", sprint: { label: "The Octopus Merge", have: 3, need: 12 }, digestDot: true } }),
+  blocked: party(blockedGroups(), { footer: { gold: "1.24M", snippets: "2.1k", release: "v5.0", sprint: { label: "The Octopus Merge", have: 3, need: 12 }, digestDot: true,
+    digestTip: "Herd panel: 2 chests opened Unreviewed (half value, no Seals): the Digest lists them" } }),
   /** The sidebar rail (width 52): portraits and stripes only. */
   rail: party(sixGroups(), { compact: true }),
   /** Calm mode: no blinking faces, no shimmer. */
@@ -225,12 +254,16 @@ export const scenarios = {
   saveTrouble: party(sixGroups(), { save: SAVE }),
   /** The same on the rail: an amber dot above the Herd button. */
   saveRail: party(sixGroups(), { compact: true, save: SAVE }),
+  /** A working hero's sub-agent waits for the person: it counts in "N need you" and marks the group. */
+  forkWaits: party(forkGroups()),
+  /** The same on the rail: the "!" badge on the parent's portrait peeks the sub-agent. */
+  forkRail: party(forkGroups(), { compact: true }),
   /** 30 live heroes: slim 28 px rows (and a remote agent's machine label). */
-  crowded: party(crowdedGroups(), { footer: { gold: "9.81M", snippets: "12.4k", release: "v4.7", sprint: { label: "Bloatodon, the Heaviest Object", have: 41, need: 70 }, digestDot: false } }),
+  crowded: party(crowdedGroups(), { footer: { gold: "9.81M", snippets: "12.4k", release: "v4.7", sprint: { label: "Bloatodon, the Heaviest Object", have: 41, need: 70 }, digestDot: false, digestTip: null } }),
 };
 
 /** Block width (logical px) each scenario is meant to be seen at. */
-export const widths = { loading: 268, empty: 268, one: 268, six: 268, blocked: 268, rail: 52, calm: 268, crowded: 268, saveTrouble: 268, saveRail: 52 };
+export const widths = { loading: 268, empty: 268, one: 268, six: 268, blocked: 268, rail: 52, calm: 268, crowded: 268, saveTrouble: 268, saveRail: 52, forkWaits: 268, forkRail: 52 };
 
 /** The same VM one tick later (bars moved, a chip changed): ids must stay stable. */
 export function nextTick(vm) {

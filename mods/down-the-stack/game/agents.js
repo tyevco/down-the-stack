@@ -21,10 +21,11 @@ import {
   crowding as crowdingMult, partyXp, iRef, itemTier, polishMax, autoOn, cutText,
 } from "./formulas.js";
 import { newHero, stats, grantXP, recordTask, autoRanks, careerOf } from "./heroes.js";
-import { rollChest, baseIdFor, stashAdd, repairItem } from "./items.js";
+import { rollChest, baseIdFor, stashAdd, repairItem, newItem } from "./items.js";
 import { seedOf } from "./rng.js";
 import {
   addGold, addSeals, herdXpBonus, freshEyesCapMin, onboardingBonus, awardBadge, logDrop, journal as herdJournal,
+  unseenLosses,
 } from "./herd.js";
 import { chooseMap, mapLevels, offerDrop, bossApi } from "./autopilot.js";
 import { heroCtx, addBuff, unblockedTicks } from "./combat.js";
@@ -54,10 +55,43 @@ export function normSeat(s) {
   return cutText(String(s == null ? "" : s).trim().toLowerCase(), NORM_MAX);
 }
 
-/** Seat key (D§3.1): norm(space.name || space.id || "nospace") + "/" + (program.key || app || "agent"). */
-export function seatKey(spaceName, spaceId, programKey, app) {
-  const sp = normSeat(spaceName) || normSeat(spaceId) || "nospace";
-  return `${sp}/${programKey || app || "agent"}`;
+/**
+ * Seat key (D§3.1): norm(space.name || space.id || "nospace") + "/" + (program.key || app ||
+ * "agent"). A space on another machine (round 4) adds "@" + norm(machine) to the space part, so
+ * same-named spaces on two machines keep their own seats and benched heroes; this computer's seats
+ * are unchanged (machine null), so older saves keep their heroes.
+ */
+export function seatKey(spaceName, spaceId, programKey, app, machine) {
+  const m = machine == null ? "" : normSeat(String(machine).replace(/\//g, "-"));
+  // a remote space id carries its machine ("devbox/s…"): only its own part names the space
+  let id = spaceId == null ? "" : String(spaceId);
+  if (m && machine && id.startsWith(`${machine}/`)) id = id.slice(String(machine).length + 1);
+  const sp = normSeat(spaceName) || normSeat(id) || "nospace";
+  return `${sp}${m ? `@${m}` : ""}/${programKey || app || "agent"}`;
+}
+
+/**
+ * The machine an agent lives on, or null for this computer. herdr qualifies a remote space's id,
+ * and its terminals' addresses, as "<machine>/<id>" (src/mirror.rs qualify; herdr.d.ts: "Remote
+ * space/tab/pane ids have a machine/ prefix"); local ids never hold a "/" (model.rs fresh_id). A
+ * snapshot field `machine` (from spaces()[].machine) wins when the host passes one.
+ */
+export function machineOf(a) {
+  if (!a) return null;
+  if (typeof a.machine === "string" && a.machine) return a.machine;
+  for (const v of [a.space, a.address]) {
+    const s = v == null ? "" : String(v);
+    const i = s.lastIndexOf("/");
+    if (i > 0) return s.slice(0, i);
+  }
+  return null;
+}
+
+// the machine part of a saved space id (hero.sid), or null for this computer's
+function sidMachine(sid) {
+  const s = sid == null ? "" : String(sid);
+  const i = s.lastIndexOf("/");
+  return i > 0 ? s.slice(0, i) : null;
 }
 
 function seatProgram(seat) {
@@ -67,7 +101,7 @@ function seatProgram(seat) {
 }
 
 function agentSeat(a) {
-  return seatKey(a.space_name, a.space, a.program && a.program.key, a.app);
+  return seatKey(a.space_name, a.space, a.program && a.program.key, a.app, machineOf(a));
 }
 
 /** Terminals with neither program nor app never become heroes (D§2.10). */
@@ -94,21 +128,32 @@ const ownKey = (o, k) => typeof k === "string" && Object.prototype.hasOwnPropert
  * list test (defaults/mods/agents/main.js title(): "telling"): the status glyph stripped, not
  * empty, not the terminal's id, not the program's name or key, not a path, no "@" (a shell's
  * user@host prompt). Also not one of herdr's shell or interpreter names, nor the agent's app id,
- * nor marks alone (no letter or digit).
- * who: {address, program: {key, name}, app} (a live hero or a Forkling record), or null.
+ * nor marks alone (no letter or digit), nor a repeat of the agent's space, tab or pane name
+ * (round 4: Claude Code titles its terminal after the folder, which herdr also names the space
+ * after; compared trimmed, case-insensitive, without a leading status glyph).
+ * A string that is exactly the pane's or the tab's own name (as the person typed it; not a tab's
+ * bare position) passes: that is the person's name for the place, which chrome.taskLabel falls
+ * back to, shown as typed. questName (the engine's task and chest titles) has no such exception.
+ * who: {address, program: {key, name}, app, spaceName?, tabName?, paneName?} (a live hero, a
+ * Forkling record or a hero's last place), or null.
  */
 export function tellingTitle(raw, who) {
+  return judgeCached(raw, who, false);
+}
+
+// the regexes cost ~20 µs a call in QuickJS and every view asks again each tick: remember the
+// answer per (title, terminal, program, app, places, strictness); a pure function, so the cache
+// never changes a result
+function judgeCached(raw, who, strict) {
   const s = raw == null ? "" : String(raw);
   if (!s) return "";
-  // the regexes cost ~20 µs a call in QuickJS and every view asks again each tick: remember the
-  // answer per (title, terminal, program, app); a pure function, so the cache never changes a result
   const w = who || {};
   const prog = w.program || {};
-  const key = `${s}\u0000${w.address}\u0000${prog.name}\u0000${prog.key}\u0000${w.app}`;
+  const key = `${strict ? 1 : 0}${s}\u0000${w.address}\u0000${prog.name}\u0000${prog.key}\u0000${w.app}\u0000${w.spaceName}\u0000${w.tabName}\u0000${w.paneName}`;
   const hit = TELLING.get(key);
   if (hit !== undefined) return hit;
   if (TELLING.size >= TELLING_MAX) TELLING.clear();
-  const out = judgeTitle(s, w, prog);
+  const out = judgeTitle(s, w, prog, strict);
   TELLING.set(key, out);
   return out;
 }
@@ -117,24 +162,48 @@ const TELLING_MAX = 512;
 /** For tests: the size of tellingTitle's answer cache (bounded by TELLING_MAX). */
 export const _internal = { tellingCacheSize: () => TELLING.size, TELLING_MAX };
 
-function judgeTitle(s, w, prog) {
+// a place name as a title compares: no leading status glyph, trimmed, lower case
+const placeKey = (v) => (v == null ? "" : String(v).replace(TITLE_MARK, "").trim().toLowerCase());
+
+function judgeTitle(s, w, prog, strict) {
   const live = s.replace(TITLE_MARK, "").trim();
   if (!/[\p{L}\p{N}]/u.test(live)) return ""; // empty, or only marks ("⏳", "…")
   // TITLE_MARK would strip a path's leading ~ or /: test the title with only its status glyph gone
   if (/^[~/]|^[A-Za-z]:\\/.test(s.replace(/^[^\p{L}\p{N}~/]+/u, "")) || live.includes("@")) return "";
   const low = live.toLowerCase();
   for (const v of [w.address, prog.name, prog.key, w.app]) if (v != null && low === String(v).toLowerCase()) return "";
-  return ownKey(PROCESS_NAMES, low.replace(/\.exe$/, "")) ? "" : live;
+  if (ownKey(PROCESS_NAMES, low.replace(/\.exe$/, ""))) return "";
+  // the person's own name for the pane or tab, asked about as itself (chrome.taskLabel's fallback)
+  const t = s.trim();
+  const own = !strict && ((w.paneName != null && t === String(w.paneName).trim()) ||
+    (w.tabName != null && t === String(w.tabName).trim() && !/^\d+$/.test(t)));
+  if (!own) for (const v of [w.spaceName, w.tabName, w.paneName]) if (v != null && low === placeKey(v) && low) return "";
+  return live;
 }
 
 /**
  * The Quest name a title gives a task (D§2.3): the telling title (status glyph stripped), cut to
  * 40 UTF-16 units without splitting an emoji (cutText); "" when the title names the program,
- * shell, a path or nothing at all.
+ * shell, a path, the agent's space, tab or pane, or nothing at all.
  */
 export function questName(raw, who) {
-  const s = tellingTitle(raw, who);
+  const s = judgeCached(raw, who, true);
   return s.length > TITLE_MAX ? cutText(s, TITLE_MAX).trimEnd() : s;
+}
+
+/** Where an off-duty hero last played, as tellingTitle's `who` (no terminal; its seat's program). */
+function lastPlace(hero) {
+  const seat = String(hero.seat || "");
+  const i = seat.lastIndexOf("/");
+  let space = i >= 0 ? seat.slice(0, i) : "";
+  // a seat on another machine ends its space part with "@machine" (seatKey): the name is before it
+  const m = sidMachine(hero.sid);
+  const tail = m ? `@${normSeat(m.replace(/\//g, "-"))}` : "";
+  if (tail && space.endsWith(tail)) space = space.slice(0, -tail.length);
+  return {
+    address: hero.addr, program: { key: i >= 0 ? seat.slice(i + 1) : seat }, app: null,
+    spaceName: space, tabName: hero.lastTab, paneName: hero.lastPane,
+  };
 }
 
 function ensureRt(rt) {
@@ -231,7 +300,7 @@ function newLive(world, hero, a, tick) {
   return {
     heroId: hero.id, address: a.address, contractor: !!hero.contractor,
     status: normStatus(a.status), seq: a.seq, statusSince: tick, prevStatus: null, state: "resting",
-    focused: false, pinned: false, program: null, app: null, title: "", space: "", spaceName: "", tab: "",
+    focused: false, pinned: false, program: null, app: null, title: "", space: "", spaceName: "", machine: null, tab: "",
     tabName: "", pane: "", paneName: null,
     task: null, blockedSince: null, blockedAtMs: null, blockedTicks: 0, bubbleShown: false,
     forklings: [], forkCount: st.forklingCount || T.forkling.counted, spawnPending: false,
@@ -255,6 +324,7 @@ function updateLiveFields(world, live, a, snap) {
   live.title = title;
   live.space = a.space || "";
   live.spaceName = a.space_name || "";
+  live.machine = machineOf(a); // null: this computer (seats, rebind)
   live.tab = a.tab || "";
   live.tabName = a.tab_name == null ? "" : String(a.tab_name);
   live.pane = a.pane || "";
@@ -336,6 +406,7 @@ export function makeContractor(world, a, seat, nowMs) {
   const h = newHero(scratch, { seat, sid: a.space || null, ord: 1000 + rt.contractorSeq, nowMs });
   h.id = -rt.contractorSeq;
   h.contractor = true;
+  h.since = nowMs; // its place in the hiring line (promoteContractors: longest-running first)
   h.L = L;
   h.cls = L >= 10 ? CLASS_IDX.shellmancer : 0;
   h.prov = 0;
@@ -372,12 +443,191 @@ function evictHero(world, hero, ev) {
     hero.eq[s] = null;
     if (it && !(it.base === 0 && it.rar === 0)) stashAdd(state, it);
   }
-  emitJournal(world, ev, "leave", hero.id, hero.name, hero.L);
+  emitJournal(world, ev, "leave", hero.id, hero.name, hero.L, hero.name);
 }
 
-function emitJournal(world, ev, kind, heroId, text, value) {
-  if (ev && typeof ev.journal === "function") ev.journal(kind, heroId, text, value);
-  else herdJournal(world.state, kind, heroId, text, value, world.rt && world.rt.nowMs);
+// name: the hero's, when it may no longer be found by id (it has just left the roster)
+function emitJournal(world, ev, kind, heroId, text, value, name) {
+  if (ev && typeof ev.journal === "function") ev.journal(kind, heroId, text, value, name);
+  else {
+    const h = name == null && heroId ? heroById(world, heroId) : null;
+    herdJournal(world.state, kind, heroId, text, value, world.rt && world.rt.nowMs, name ?? (h ? h.name : undefined));
+  }
+}
+
+/**
+ * The hero a full roster lets go for a new hire (D§3.4): the least-recently-seen unbound hero below
+ * Lv 10, or null. spare: hero ids not to let go this time (promoteContractors' own reconcile).
+ */
+function rosterVictim(world, spare) {
+  let victim = null;
+  for (const h of world.state.heroes) {
+    if (isBound(world, h.id) || h.L >= 10 || (spare && spare.has(h.id))) continue;
+    if (!victim || (h.seenAt || 0) < (victim.seenAt || 0) || ((h.seenAt || 0) === (victim.seenAt || 0) && h.id < victim.id)) victim = h;
+  }
+  return victim;
+}
+
+/**
+ * Room for one more roster hero under D§3.4's rules for a new hire: a free slot, else the
+ * least-recently-seen unbound hero below Lv 10 leaves (evictHero). False when every hero left is
+ * Lv 10+ or playing. (The day's hire count is the caller's: hiredToday.)
+ */
+function makeRoom(world, ev, spare) {
+  const state = world.state;
+  if (state.heroes.length < T.roster.max) return true;
+  const victim = rosterVictim(world, spare);
+  if (victim) evictHero(world, victim, ev);
+  return state.heroes.length < T.roster.max;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Contractor promotion (owner decision, round 4: "promote only")
+// ---------------------------------------------------------------------------------------------
+
+/** Live Contractors in hiring order: longest-running first (since, then the order they arrived). */
+function contractorLine(world) {
+  const rt = world.rt;
+  if (!rt.contractors || !rt.contractors.size) return [];
+  const out = [];
+  for (const [addr, c] of rt.contractors) if (rt.live.has(c.id)) out.push([addr, c]);
+  out.sort((x, y) => ((x[1].since || 0) - (y[1].since || 0)) || (y[1].id - x[1].id));
+  return out;
+}
+
+/**
+ * Promotes live Contractors to saved heroes while the day has hires left and the roster has room
+ * under the rules for a new hire (D§3.2 step 3, D§3.4): longest-running first. Runs at every
+ * reconcile before new terminals bind (so a Contractor never loses its turn to a newcomer), which
+ * covers both moments hiring reopens: the 04:00 game day turn (hiredToday() starts at 0 again) and
+ * a roster slot freeing (a retire: world.js also calls it at once; a hero let go, or a hero below
+ * Lv 10 going off duty while the roster is full). A read-only world never hires.
+ * spare (optional Set of hero ids): heroes never let go this time. reconcile passes the heroes whose
+ * terminals ended in that very snapshot, so a replacement terminal in it can still take its hero
+ * back (D§3.2 step 2 comes before a hire); the next reconcile may let them go.
+ * @returns {number} Contractors promoted
+ */
+export function promoteContractors(world, ev, spare) {
+  const { state, rt } = world;
+  ensureRt(rt);
+  if (!rt.contractors.size || rt.readOnly) return 0;
+  let n = 0;
+  for (const [addr, c] of contractorLine(world)) {
+    if (hiredToday(state) >= T.roster.newPerDay) break;
+    if (!makeRoom(world, ev, spare)) break;
+    promote(world, addr, c, ev);
+    n++;
+  }
+  return n;
+}
+
+const remapIds = (list, from, to) => {
+  if (!Array.isArray(list)) return;
+  for (let i = 0; i < list.length; i++) if (list[i] === from) list[i] = to;
+};
+
+/**
+ * A Contractor becomes a saved roster hero: it keeps its name, level, XP, class, skills, stats,
+ * pending chests, seat and terminal; its reference kit becomes real saved Alpha items (new uids);
+ * it takes a roster id (the negative Contractor id is rewritten wherever this session holds it:
+ * the binding, its live state, fights, the journal) and one of the day's hires. Journal: "hired"
+ * "Hired: <name> (was a contractor)" (value: its level).
+ */
+function promote(world, address, c, ev) {
+  const { state, rt } = world;
+  const herd = state.herd;
+  const oldId = c.id;
+  const live = rt.live.get(oldId);
+  if (!(herd.nextHeroId >= 1)) herd.nextHeroId = 1;
+  const id = herd.nextHeroId++;
+  c.id = id;
+  delete c.contractor;
+  delete c.since;
+  c.ord = lowestFreeOrd(state, c.seat);
+  c.eq = c.eq.map((it) => (it ? newItem(state, it) : null));
+  c.addr = address;
+  if (live) {
+    if (live.space) c.sid = live.space;
+    if (live.paneName != null) c.lastPane = String(live.paneName);
+    if (live.tabName) c.lastTab = live.tabName;
+  }
+  c.seenAt = rt.nowMs;
+  state.heroes.push(c);
+  noteHire(state);
+  rt.contractors.delete(address);
+  rt.bind.set(address, id);
+  if (live) {
+    rt.live.delete(oldId);
+    live.heroId = id;
+    live.contractor = false;
+    live.why = null;
+    rt.live.set(id, live);
+  }
+  if (rt.cxp) rt.cxp.delete(oldId);
+  if (rt.apSig) rt.apSig.delete(oldId);
+  for (const f of rt.fights || []) { remapIds(f.heroIds, oldId, id); remapIds(f.helpers, oldId, id); }
+  if (herd.fight) { remapIds(herd.fight.ids, oldId, id); remapIds(herd.fight.hl, oldId, id); }
+  for (const f of rt.fx || []) if (f.heroId === oldId) f.heroId = id;
+  // its journal lines so far follow it (Contractor ids are this session's only)
+  for (const e of herd.log || []) if (Array.isArray(e) && e[2] === oldId) e[2] = id;
+  // the digest counts levels from the last read: a promoted hero starts at the level it joined with
+  if (herd.digestSnap && herd.digestSnap.lv && typeof herd.digestSnap.lv === "object") herd.digestSnap.lv[id] = c.L;
+  rt.roomsDirty = true;
+  rt.whyRooms = null;
+  const text = `Hired: ${c.name} (was a contractor)`;
+  emitJournal(world, ev, "hired", id, text, c.L);
+  if (ev) {
+    ev.note?.(text);
+    ev.major?.();
+  }
+  return c;
+}
+
+/**
+ * When a Contractor will be hired (owner decision, round 4), for the views: its place in the
+ * hiring line (0 = next), the day's hires (left of perDay), the roster's room for new hires now
+ * (free slots plus unbound heroes below Lv 10) and the moment: "soon" (at the next reconcile),
+ * "day" (the 04:00 game day turn at atMs; days = which turn, 1 = the next), "slot" (when a roster
+ * slot frees), "never" (a read-only save). text: one sentence for a tooltip or the sheet.
+ * @returns {null|{when:string, position:number, ahead:number, hiresLeft:number, perDay:number,
+ *   room:number, atMs:number|null, days:number, text:string}} null for a roster hero
+ */
+export function hireOutlook(world, heroOrId) {
+  const { state, rt } = world;
+  const hero = typeof heroOrId === "object" && heroOrId ? heroOrId : heroById(world, heroOrId);
+  if (!hero || !hero.contractor || !rt) return null;
+  const R = T.roster;
+  // the line and the room are the same for every Contractor of a render (the party, the stage and
+  // the sheet ask for each of up to ~30): computed once per tick and roster shape
+  const key = `${rt.tick}|${rt.contractors ? rt.contractors.size : 0}|${rt.contractorSeq}|${state.heroes.length}|${rt.live ? rt.live.size : 0}|${hiredToday(state)}`;
+  let c = rt._hireLine;
+  if (!c || c.key !== key) {
+    let r = Math.max(0, R.max - state.heroes.length);
+    for (const h of state.heroes) if (!isBound(world, h.id) && h.L < 10) r++;
+    c = rt._hireLine = { key, line: contractorLine(world).map((e) => e[1]), room: r };
+  }
+  let position = c.line.indexOf(hero);
+  if (position < 0) position = c.line.length;
+  const hiresLeft = Math.max(0, R.newPerDay - hiredToday(state));
+  const room = c.room;
+  const left = `today: ${hiresLeft} of ${R.newPerDay} hires left`;
+  const out = { when: "slot", position, ahead: position, hiresLeft, perDay: R.newPerDay, room, atMs: null, days: 0, text: "" };
+  if (rt.readOnly) {
+    out.when = "never";
+    out.text = "Not hired: this save is read-only";
+  } else if (position < Math.min(hiresLeft, room)) {
+    out.when = "soon";
+    out.text = `Joins the roster in a moment (${left})`;
+  } else if (position < room) {
+    out.when = "day";
+    out.days = Math.floor((position - hiresLeft) / R.newPerDay) + 1;
+    const tz = Number.isFinite(rt.tzOffsetMin) ? rt.tzOffsetMin : 0;
+    out.atMs = ((state.herd.day || 0) + out.days) * 86400000 + T.shift.resetHourLocal * 3600000 + tz * 60000;
+    out.text = `${out.days > 1 ? `Hired in ${out.days} game days (04:00)` : "Hired at the next 04:00 game day"}${position ? ` · ${position} ahead in line` : ""} (${left})`;
+  } else {
+    out.text = `Hired when a roster slot frees (a retire, or a hero below Lv 10 off duty)${position ? ` · ${position} ahead in line` : ""} (${left})`;
+  }
+  return out;
 }
 
 /** Picks a free hero for a new terminal (D§3.2 step 2), or null. */
@@ -386,8 +636,12 @@ function pickFreeHero(world, a, seat) {
   const prog = seatProgram(seat);
   let best = null;
   let bestKey = null;
+  const machine = machineOf(a);
   for (const h of state.heroes) {
     if (isBound(world, h.id)) continue;
+    // a hero last seen on another machine never crosses over, even under an older save's seat
+    // without the machine (it is re-keyed when its own machine's agent comes back: below)
+    if (h.sid && sidMachine(h.sid) !== machine && a.space) continue;
     const sameSeat = h.seat === seat;
     // a renamed space keeps its id: re-key heroes whose space id and program match (D§3.1)
     const rekey = !sameSeat && h.sid && a.space && h.sid === a.space && seatProgram(h.seat) === prog;
@@ -436,25 +690,12 @@ function bindAgent(world, a, snap, ev) {
   if (!hero) hero = pickFreeHero(world, a, seat);
   // a read-only world (a save from a newer version, never written back) binds for display only:
   // no hires (a new agent plays as an unsaved Contractor), no chests, no XP (world.tick runs no steps)
-  if (!hero && !rt.readOnly) {
-    const R = T.roster;
-    if (hiredToday(state) < R.newPerDay) {
-      if (state.heroes.length >= R.max) {
-        let victim = null;
-        for (const h of state.heroes) {
-          if (isBound(world, h.id) || h.L >= 10) continue;
-          if (!victim || (h.seenAt || 0) < (victim.seenAt || 0) || ((h.seenAt || 0) === (victim.seenAt || 0) && h.id < victim.id)) victim = h;
-        }
-        if (victim) evictHero(world, victim, ev);
-      }
-      if (state.heroes.length < R.max) {
-        hero = newHero(state, { seat, sid: a.space || null, ord: lowestFreeOrd(state, seat), nowMs: now });
-        state.heroes.push(hero);
-        noteHire(state);
-        emitJournal(world, ev, "hire", hero.id, hero.name, 1);
-        if (ev) ev.note?.(`New hire: ${hero.name}`);
-      }
-    }
+  if (!hero && !rt.readOnly && hiredToday(state) < T.roster.newPerDay && makeRoom(world, ev)) {
+    hero = newHero(state, { seat, sid: a.space || null, ord: lowestFreeOrd(state, seat), nowMs: now });
+    state.heroes.push(hero);
+    noteHire(state);
+    emitJournal(world, ev, "hire", hero.id, hero.name, 1);
+    if (ev) ev.note?.(`New hire: ${hero.name}`);
   }
   let contractor = false;
   if (!hero) {
@@ -813,6 +1054,12 @@ export function reconcile(world, snap, ev) {
   }
   for (const addr of Array.from(rt.orphans.keys())) if (!subAddr.has(addr)) rt.orphans.delete(addr);
 
+  // 1b. Contractors still playing join the roster while hiring is open (the 04:00 game day turn,
+  //     a slot that freed), before any newcomer below can take the day's hires. A hero whose
+  //     terminal ended in this snapshot is not let go for it yet: a replacement terminal in the
+  //     same snapshot takes it back first (step 1's promise); the next reconcile may let it go
+  if (rt.contractors.size) promoteContractors(world, ev, gone.length ? new Set(gone.map((g) => g[1])) : null);
+
   // 2. top-level agents: bind, refresh, seq-gated status
   processTops(world, tops, snap, ev);
 
@@ -1066,6 +1313,7 @@ export function openChests(world, hero, opts = {}, ev) {
   hero.pend = unreviewed && !opts.all ? hero.pend.filter((p) => !open.includes(p)) : [];
 
   const live = rt && rt.live ? rt.live.get(hero.id) : null;
+  const where = live || lastPlace(hero); // whose place names a chest title must not merely repeat
   const lv = mapLevels(world, hero, live);
   const st = stats(hero, statsCtx(world, hero));
   const xpPct = (st.xpPct || 0) + herdXpBonus(state) + onboardingBonus(state, hero);
@@ -1098,16 +1346,21 @@ export function openChests(world, hero, opts = {}, ev) {
     }
     out.opened++;
     if (!unreviewed) {
-      // a chest from an older save may carry a program or shell name as its title
-      const title = tellingTitle(p.title, live) || "Commit";
+      // a chest from an older save may carry a program or shell name, or its space's name, as its title
+      const title = judgeCached(p.title, where, true) || "Commit";
       emitJournal(world, ev, "ship", hero.id, title, Math.round(seals * 10) / 10);
     }
   }
   if (unreviewed && out.opened) {
     // one journal line for the batch, so the person learns where the chest went (the sheet's
     // journal and the Herd digest): its task when one chest opened, the count in the value
-    const title = out.opened === 1 ? tellingTitle(open[0].title, live) || "" : "";
+    const title = out.opened === 1 ? judgeCached(open[0].title, where, true) || "" : "";
+    // the loss is told at once (a header note) and stays counted (saved, herd.unseenUnrev) until
+    // the person views the Digest: the Herd dot reads it (herd.unseenLosses / digestDot; round 4)
+    const unseen = unseenLosses(state);
     emitJournal(world, ev, "unrev", hero.id, title, out.opened);
+    state.herd.unseenUnrev = unseen + out.opened;
+    if (ev) ev.note?.(`${hero.name}: ${out.opened === 1 ? "a chest" : `${out.opened} chests`} opened Unreviewed (half value)`);
   }
   if (ev) {
     if (out.gold > 0) ev.fx?.("coin", { heroId: hero.id, value: Math.round(out.gold) });
@@ -1217,7 +1470,7 @@ export function rebind(world, heroId, address, ev) {
       from.addr = null;
     }
   }
-  const seat = seatKey(live.spaceName, live.space, live.program && live.program.key, live.app);
+  const seat = seatKey(live.spaceName, live.space, live.program && live.program.key, live.app, machineOf(live));
   target.seat = seat;
   if (live.space) target.sid = live.space;
   target.addr = address;

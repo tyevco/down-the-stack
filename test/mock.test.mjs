@@ -15,6 +15,7 @@ const { h_flex, Button } = await import("gpui-base");
 const herdr = await import("herdr");
 const { treeToHtml, unmappedMethods } = await import("../tools/preview/render.mjs");
 const { runCheck } = await import("../tools/check.mjs");
+const G = await import("../tools/mock/gates.mjs");
 
 const DEMO = path.join(M.REPO, "tools", "mock", "sample", "mods", "mockdemo", "main.js");
 const HERO = "mods/mockdemo/art/hero.svg";
@@ -57,8 +58,8 @@ test("mock modules export exactly herdr's names", async () => {
 
 test("the sample programs are herdr's records (programs.json through programs.rs shown())", (t) => {
   // A wrong `tint` draws a full-colour icon as a one-colour mask: codex's white tile filled solid.
-  const file = path.join(process.env.HERDR_SRC ?? "/home/user/herdrdev/herdr-app", "defaults", "programs.json");
-  if (!fs.existsSync(file)) return t.skip("herdr source not found (set HERDR_SRC)");
+  const file = path.join(G.HERDR_SRC, "defaults", "programs.json");
+  if (!fs.existsSync(file)) return G.skipGate(t, "the mock's sample programs against herdr's programs.json", G.herdrMissing());
   const table = JSON.parse(fs.readFileSync(file, "utf8")).programs;
   for (const [key, p] of Object.entries(M.PROGRAMS)) {
     const e = table[key];
@@ -376,6 +377,56 @@ test("IO trouble hooks: readError rejects a read, hangAfterWrite lands a write t
   assert.equal(settled, false);
 });
 
+test("exec: the machine's ls and rm run on the mock file system; a fixture's exec replaces them; a bad timeout throws as herdr's does", async () => {
+  M.resetState();
+  const dir = `${M.APP_HOME}/data/x`;
+  M.memfs.write(`${dir}/b.txt`, "b", { mkdirs: true });
+  M.memfs.write(`${dir}/a.txt`, "a", { mkdirs: true });
+  const mod = await M.mountView(class extends View { render() { return div(); } }, { props: {} });
+  await mod.flush();
+  assert.deepEqual(await herdr.exec("ls", ["-1", "--", dir]), { code: 0, stdout: "a.txt\nb.txt\n", stderr: "" });
+  const gone = await herdr.exec("ls", ["-1", "--", `${dir}/nope`]);
+  assert.equal(gone.code, 2);
+  assert.match(gone.stderr, /No such file/);
+  assert.deepEqual(await herdr.exec("rm", ["-f", "--", `${dir}/a.txt`, `${dir}/missing`], { timeout: 5000 }), { code: 0, stdout: "", stderr: "" });
+  assert.equal(M.memfs.readText(`${dir}/a.txt`), undefined);
+  assert.equal((await herdr.exec("rm", ["--", `${dir}/missing`])).code, 1, "without -f a missing file fails");
+  assert.deepEqual(await herdr.exec("git", ["status"]), { code: 0, stdout: "", stderr: "" }, "anything else: no output");
+  assert.throws(() => herdr.exec("ls", [dir], { timeout: 0 }), /positive number of milliseconds/);
+  M.updateFixture({ exec: (command) => { throw new Error(`cannot run ${command}: program not found`); } });
+  await assert.rejects(herdr.exec("ls", [dir]), /cannot run ls/);
+  assert.equal(M.calls().exec.length, 7);
+});
+
+test("gates: HERDR_SRC comes from the environment; a gate that cannot run prints one line and skips, or fails with STRICT_GATES=1", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const cfg = path.join(M.REPO, "tools", "mock", "config.mjs");
+  const src = (env) => spawnSync(process.execPath, ["--input-type=module", "-e", `import(${JSON.stringify(cfg)}).then((m) => console.log(m.HERDR_SRC))`], { encoding: "utf8", env: { ...process.env, ...env } }).stdout.trim();
+  assert.equal(src({ HERDR_SRC: "/elsewhere/herdr-app" }), "/elsewhere/herdr-app");
+  // (NODE_TEST_CONTEXT would make a child `node --test` report to this runner instead of printing)
+  const { HERDR_SRC: _drop, NODE_TEST_CONTEXT: _ctx, STRICT_GATES: _strict, ...rest } = process.env;
+  assert.equal(spawnSync(process.execPath, ["--input-type=module", "-e", `import(${JSON.stringify(cfg)}).then((m) => console.log(m.HERDR_SRC))`], { encoding: "utf8", env: rest }).stdout.trim(), path.resolve(M.REPO, "..", "herdrdev", "herdr-app"), "a herdrdev/herdr-app checkout next to the repo by default");
+  // a test file whose gate cannot run (a herdr source that is not there)
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mdr-gate-"));
+  const file = path.join(dir, "gate.test.mjs");
+  fs.writeFileSync(file, `import { test } from "node:test";
+import { skipGate, herdrSource, herdrMissing } from ${JSON.stringify(path.join(M.REPO, "tools", "mock", "gates.mjs"))};
+test("a herdr gate", (t) => { if (!herdrSource()) return skipGate(t, "a herdr gate", herdrMissing()); });
+`);
+  const run = (env) => spawnSync(process.execPath, ["--test", "--test-reporter=tap", file], { encoding: "utf8", env: { ...rest, HERDR_SRC: path.join(dir, "no-herdr"), ...env } });
+  const lax = run({});
+  assert.equal(lax.status, 0, lax.stdout + lax.stderr);
+  const said = lax.stdout.split("\n").filter((l) => l.includes("SKIPPED GATE: a herdr gate"));
+  assert.ok(said.some((l) => l.includes(`herdr 0.1.17 source not found at ${path.join(dir, "no-herdr")}; set HERDR_SRC`) && l.includes("STRICT_GATES=1")), lax.stdout);
+  assert.match(lax.stdout, /# skipped 1/);
+  const strict = run({ STRICT_GATES: "1" });
+  assert.equal(strict.status, 1, strict.stdout);
+  assert.match(strict.stdout, /SKIPPED GATE: a herdr gate .*STRICT_GATES=1 makes a skipped gate a failure/);
+  assert.match(strict.stdout, /# fail 1/);
+  // and with the source there, the gate runs
+  assert.equal(run({ HERDR_SRC: G.HERDR_SRC }).stdout.includes("SKIPPED GATE"), !G.herdrSource());
+});
+
 test("timers let go of closed copies; reloadAll gives every copy one new module scope", async () => {
   M.resetState();
   const src = tempMod("reloadall", `
@@ -627,7 +678,7 @@ test("check's command line refuses an argument it does not know, or one without 
 
 test("npm run qjs refuses an argument it does not know, or one without its value (exit 2), before it runs anything", async (t) => {
   const { spawnSync } = await import("node:child_process");
-  try { await import("quickjs-emscripten"); } catch { t.skip("the QuickJS-ng devDependencies are not installed"); return; }
+  try { await import("quickjs-emscripten"); } catch { return G.skipGate(t, "npm run qjs usage errors", "the QuickJS-ng devDependencies are not installed: npm install"); }
   const run = (...args) => spawnSync(process.execPath, [path.join(M.REPO, "tools", "qjs", "run.mjs"), ...args], { encoding: "utf8", timeout: 60000 });
   for (const args of [["--stict"], ["--only"], ["--ticks", "--strict"], ["--seconds", "x"], ["--only", "nope"], ["lint"]]) {
     const r = run(...args);
@@ -792,7 +843,7 @@ test("preview: svg() keeps the colour it was built with; SVG images are rasteris
 
 test("preview screenshots with Playwright", async (t) => {
   let pw;
-  try { pw = createRequire(import.meta.url)("playwright"); } catch { return t.skip("playwright not installed"); }
+  try { pw = createRequire(import.meta.url)("playwright"); } catch { return G.skipGate(t, "preview screenshots", "Playwright is not installed"); }
   const { shoot } = await import("../tools/preview/shoot.mjs");
   const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "mdr-shot-"));
   M.resetState();

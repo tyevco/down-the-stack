@@ -48,18 +48,44 @@ export function addSnippets(state, n) {
 }
 
 /**
- * Append a journal line [at, kind, heroId, text, value]; keeps the newest logMax(state) (120 up to
- * 20 heroes, 60 from 30; D§13.3: 60).
- * Kinds used by the engine: ship, level, promo, drop, boss, badge, release, hire, leave, retire,
- * deprecate, zone, map, class.
+ * Append a journal line [at, kind, heroId, text, value, name?]; keeps the newest logMax(state) (120
+ * up to 20 heroes, 60 from 30; D§13.3: 60).
+ * Kinds used by the engine: ship, unrev, level, promo, drop, boss, badge, release, hire, hired (a
+ * Contractor promoted), leave, retire, deprecate, zone, map, class.
+ * name: the hero's name as it is when the line is written (round 4), so the Digest and the
+ * journal can name a Contractor or a hero that has left (lineName); looked up in the roster when
+ * not given. Lines without a hero (heroId 0) and older saves' lines have no name.
  */
-export function journal(state, kind, heroId, text, value, nowMs) {
+export function journal(state, kind, heroId, text, value, nowMs, name) {
   const herd = state.herd;
   if (!herd.log) herd.log = [];
   const log = herd.log;
-  log.push([nowMs ?? herd.lastMs ?? 0, String(kind), heroId ?? 0, String(text ?? ""), value ?? 0]);
+  const row = [nowMs ?? herd.lastMs ?? 0, String(kind), heroId ?? 0, String(text ?? ""), value ?? 0];
+  let who = name;
+  if (who == null && heroId) {
+    const h = (state.heroes || []).find((x) => x.id === heroId);
+    who = h ? h.name : null;
+  }
+  if (typeof who === "string" && who) row.push(who);
+  log.push(row);
   const max = logMax(state);
   if (log.length > max) log.splice(0, log.length - max);
+}
+
+/**
+ * The name a journal line gives its hero: the roster hero's name now (a rename shows), else the
+ * name the line stored when it was written (a Contractor, a hero let go or retired), else null (an
+ * older save's line about a hero no longer in the roster). Contractor ids (negative) are never
+ * looked up: they are this session's only.
+ */
+export function lineName(state, e, byId) {
+  if (!Array.isArray(e)) return null;
+  const id = e[2];
+  if (id > 0) {
+    const h = byId ? byId.get(id) : (state.heroes || []).find((x) => x.id === id);
+    if (h) return h.name;
+  }
+  return typeof e[5] === "string" && e[5] ? e[5] : null;
 }
 
 /**
@@ -559,11 +585,11 @@ export function retire(world, heroId, nowMs, ev) {
   state.herd.fame.push(entry);
   const msg = `${hero.name} retired to the Hall of Fame`;
   if (ev) {
-    ev.journal?.("retire", hero.id, hero.name, hero.L);
+    ev.journal?.("retire", hero.id, hero.name, hero.L, hero.name);
     ev.note?.(msg);
     ev.major?.();
   } else {
-    journal(state, "retire", hero.id, hero.name, hero.L, nowMs);
+    journal(state, "retire", hero.id, hero.name, hero.L, nowMs, hero.name);
   }
   return { ok: true, entry, msg };
 }
@@ -580,9 +606,32 @@ export function hallOfFame(state) {
 // Digest: "since you last looked" (D§10.7)
 // ---------------------------------------------------------------------------------------------
 
-/** Should the Herd button show its dot? (rt.digestDot is set by world.js after 30 min away.) */
+/**
+ * Should the Herd button show its dot? rt.digestDot (world.js: back after 30 min away with
+ * something new), or chests that opened Unreviewed since the person last viewed the Digest
+ * (unseenLosses; round 4: the dot must not go dark at the moment of the loss).
+ */
 export function digestDot(world) {
-  return !!(world && world.rt && world.rt.digestDot);
+  return !!(world && world.rt && world.rt.digestDot) || unseenLosses(world && world.state) > 0;
+}
+
+/**
+ * Chests that opened Unreviewed (24 h off duty, a hero let go, a Contractor leaving) since the
+ * person last viewed the Digest: herd.unseenUnrev, saved; agents.openChests adds to it, the
+ * commands lossesSeen and digestSeen set it to 0. A save from before the count (no field) counts
+ * the journal's "unrev" lines newer than digestAt (value: the chests), as view/chrome.js does.
+ */
+export function unseenLosses(state) {
+  const herd = state && state.herd;
+  if (!herd) return 0;
+  const n = Number(herd.unseenUnrev);
+  if (Number.isFinite(herd.unseenUnrev)) return n > 0 ? Math.floor(n) : 0;
+  const since = Number(herd.digestAt) || 0;
+  let k = 0;
+  for (const e of herd.log || []) {
+    if (Array.isArray(e) && e[1] === "unrev" && Number(e[0]) > since) k += Math.max(1, Math.floor(Number(e[4]) || 1));
+  }
+  return k;
 }
 
 /** Minimum time away before the digest dot appears (ms). */
@@ -639,7 +688,7 @@ export function digest(state, sinceMs) {
   for (const e of herd.log || []) {
     if (!(e[0] > since)) continue;
     const [at, kind, heroId, text, value] = e;
-    const name = byHero.has(heroId) ? byHero.get(heroId).name : null;
+    const name = lineName(state, e, byHero);
     if (kind === "level") {
       lvAt.set(heroId, { heroId, name, level: value, at });
       if (!lvFirst.has(heroId)) lvFirst.set(heroId, value);
@@ -716,6 +765,7 @@ export function digest(state, sinceMs) {
       out.sealsWaiting += p.min >= T.seals.minMinutes ? p.min * T.seals.perMinute * (p.sealFactor ?? 1) : 0;
     }
   }
+  out.unseenLosses = unseenLosses(state);
   out.empty = !out.levels.length && !out.drops.length && !out.bosses.length && !out.shipped.length && !out.badges.length &&
     !out.unreviewed.length && !out.chestsWaiting && !out.dropsMore && !out.shippedMore;
   return out;

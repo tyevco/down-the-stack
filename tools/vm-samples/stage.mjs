@@ -57,6 +57,28 @@ const zoneOf = (mapId) => (mapId === "backlog" ? BACKLOG : ZONES[Number(mapId.sp
 const mapOf = (mapId) => (mapId === "backlog" ? { id: "backlog", name: "Floor 31" } : zoneOf(mapId).maps[Number(mapId.split("-")[1]) - 1]);
 const skyBands = (pal) => [0, 1, 2, 3].map((i) => mix(pal.sky, pal.far, i * 0.12));
 
+/**
+ * The camp chip: folded heroes most relevant first (waiting, a chest waiting, working, resting;
+ * the strip's order within each), the dots in that order, and a tooltip of at most 12 heroes, then
+ * "…and N more (…)" counting the rest by kind.
+ */
+function campChip(L, folded) {
+  const rank = (h) => (h.state === "waiting" ? 0 : h.chest ? 1 : ["questing", "supervising", "crashed"].includes(h.state) ? 2 : 3);
+  const list = folded.map((h, i) => ({ h, i, r: rank(h) })).sort((a, b) => a.r - b.r || a.i - b.i);
+  const lines = list.slice(0, 12).map(({ h, r }) => `${h.name} · Lv ${h.level} · ${STATE_WORD[h.state].toLowerCase()}${r === 1 ? " · chest waiting" : ""}`);
+  const rest = list.slice(12);
+  if (rest.length) {
+    const words = ["waiting", "with a chest", "working", "resting"];
+    const parts = words.map((w, r) => [rest.filter((x) => x.r === r).length, w]).filter(([k]) => k).map(([k, w]) => `${k} ${w}`);
+    lines.push(`…and ${rest.length} more (${parts.join(", ")})`);
+  }
+  return {
+    key: "overflow", x: round(L.chip.x), w: round(L.chip.w), count: folded.length,
+    dots: list.map(({ h }) => ({ questing: COL.working, supervising: COL.working, resting: COL.idle, shipped: COL.done, crashed: COL.hp, waiting: COL.blocked })[h.state]),
+    tooltip: `At camp (${folded.length}):\n${lines.join("\n")}`,
+  };
+}
+
 /** D§11.3: slot width, slot lefts, and the overflow chip / boss arena boxes. */
 function slotLayout(width, n, { arena = false } = {}) {
   const units = n + (arena ? 2 : 0);
@@ -213,6 +235,7 @@ function build(spec, { width, height, tick = 0 } = {}) {
           phaser: (def.traits ?? []).includes("phaser"), pending: Boolean(m.pending),
           growScale: m.grow ?? 1, dying: m.dyingAt != null && tick === m.dyingAt, hit: Boolean(m.hit && tick === 0),
           waiting: h.state === "waiting", lane: j, // 0 = the front of the lane (a crowded stage keeps it)
+          heroId: h.id, // whose lane (and slot) it stands in; null for a boss fight's adds in the arena
         });
       });
     }
@@ -337,11 +360,7 @@ function build(spec, { width, height, tick = 0 } = {}) {
     headerNote: spec.note && tick === 0 ? { key: `note:${TICK0}`, text: spec.note[0], color: spec.note[1] ?? COL.cream } : null,
     herdBanner: spec.herdBanner ? { key: `herd:${TICK0}`, text: spec.herdBanner } : null,
     rooms: roomVMs, heroes, mobs, chests, boss, fx, signs,
-    overflow: L.chip ? {
-      key: "overflow", x: round(L.chip.x), w: round(L.chip.w), count: folded.length,
-      dots: folded.map((h) => ({ questing: COL.working, supervising: COL.working, resting: COL.idle, shipped: COL.done, crashed: COL.hp, waiting: COL.blocked })[h.state]),
-      tooltip: `At camp (${folded.length}):\n` + folded.map((h) => `${h.name} · Lv ${h.level} · ${STATE_WORD[h.state].toLowerCase()}`).join("\n"),
-    } : null,
+    overflow: L.chip ? campChip(L, folded) : null,
   };
 }
 
@@ -386,7 +405,7 @@ const SPECS = {
     heroes: [
       { id: 5, name: "Juno of Small Commits", level: 11, cls: "shellmancer", career: "Junior Shellmancer", program: "pi", space: "s1", map: "1-3", state: "resting", hp: 1, xp: 0.35, fe: 0.2, fresh: "42m", zzz: true, tier: 1, hat: 1 },
       { id: 6, name: "Pax the Cached", level: 13, cls: "forkbinder", career: "Junior Forkbinder", program: "claude", space: "s1", map: "1-3", state: "supervising", hp: 0.9, xp: 0.5, forks: 4, forkBlocked: true, tier: 2,
-        mobs: [{ id: "unused_import", hp: 0.6 }, { id: "semicolon_snail" }, { id: "unused_import" }], quest: "migrate the test runner" },
+        mobs: [{ id: "unused_import", hp: 0.6 }, { id: "semicolon_sloth" }, { id: "unused_import" }], quest: "migrate the test runner" },
       kip({ map: "2-2", state: "questing", attacking: true, focused: true, hp: 0.72, xp: 0.91, quest: "fix flaky auth test", crit: true,
         mobs: [{ id: "promise_wisp", hp: 0.3, hit: true, dyingAt: 0 }, { id: "promise_wisp", pending: true }, { id: "callback_bat", elite: true }] }),
       { id: 2, name: "Rue Two-Spaces", level: 15, cls: "rubberducker", career: "Junior Rubberducker", program: "codex", space: "s1", map: "2-2", state: "waiting", blockedFor: "2m", hp: 0.95, xp: 0.2, tier: 2, hat: 3,

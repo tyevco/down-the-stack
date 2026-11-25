@@ -347,11 +347,11 @@ export const ZONES = [
       { id: "1-1", name: "Squiggle Path", levels: [1, 4], spawn: { typo_sprout: 1 } },
       {
         id: "1-2", name: "Whitespace Fields", levels: [5, 8],
-        spawn: { semicolon_snail: 0.75, typo_sprout: 0.25 }
+        spawn: { semicolon_sloth: 0.75, typo_sprout: 0.25 }
       },
       {
         id: "1-3", name: "Warning Gate", levels: [9, 11],
-        spawn: { unused_import: 0.75, semicolon_snail: 0.25 }
+        spawn: { unused_import: 0.75, semicolon_sloth: 0.25 }
       }
     ]
   },
@@ -516,9 +516,11 @@ export const MOBS = [
     flavor: "Sprouts wherever fingers outrun eyes."
   },
   {
-    id: "semicolon_snail", zone: 0, map: 2, name: "Semicolon Snail", size: "S", traits: ["slow"],
-    hp: 1.3, atk: 0.8, xp: 0.86, gold: 1, sprite: "A ; shell leaving a dotted trail", // balance: atk (design 1.4), xp (design 1.2)
-    flavor: "Optional in some regions."
+    // round 4 (originality): was "Semicolon Snail" (a snail as the first slow mob echoed a famous
+    // game's starter monsters); same numbers, new creature, new id (mob ids are never saved)
+    id: "semicolon_sloth", zone: 0, map: 2, name: "Semicolon Sloth", size: "S", traits: ["slow"],
+    hp: 1.3, atk: 0.8, xp: 0.86, gold: 1, sprite: "A sleepy sloth crawling low, a ; marked on its back", // balance: atk (design 1.4), xp (design 1.2)
+    flavor: "Optional in some regions. Gets there eventually."
   },
   {
     id: "unused_import", zone: 0, map: 3, name: "Unused Import", size: "M", traits: ["tanky"], hp: 1.6,
@@ -1191,7 +1193,7 @@ export const CLASS_COLORS = {
 // renderer's text overlay (MobVM.glyph). ASCII-first; "!" is never used (reserved for blocked).
 /** Code glyph per lane entity id (null = none). */
 export const MOB_GLYPHS = {
-  typo_sprout: "teh", semicolon_snail: ";", unused_import: "import", callback_bat: "cb()",
+  typo_sprout: "teh", semicolon_sloth: ";", unused_import: "import", callback_bat: "cb()",
   promise_wisp: "...", null_pointer_frog: "->0", capture_group_goblins: "()", backslash_bandit: "\\",
   greedy_glob: ".*", diff_leech: "+-", rebase_wraith: "~1", merge_conflict_golem: "<<<",
   left_pad_mites: "pad", transitive_vine: "->", version_pin_porcupine: "^~", race_condition_rats: "??",
@@ -1279,6 +1281,9 @@ ITEM_BASES.list = BASE_LIST;
 
 /** Lane entities by id: the 27 zone mobs plus the adds and the Holo Rubber Duck. */
 export const MOB_BY_ID = Object.assign(byId(MOBS), byId(ADDS), { holo_duck: HOLO_DUCK_MOB });
+// round 4: the old id of the Semicolon Sloth, for a stale reference (a sample, an older build's
+// runtime data) only: not enumerable, never spawned, its art is the sloth's (def.id)
+Object.defineProperty(MOB_BY_ID, "semicolon_snail", { value: MOB_BY_ID.semicolon_sloth, enumerable: false });
 export const ADD_BY_ID = byId(ADDS);
 export const ZONE_BY_ID = Object.assign(byId(ZONES), { backlog: BACKLOG });
 export const MAP_BY_ID = byId(MAPS);

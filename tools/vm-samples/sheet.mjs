@@ -67,9 +67,11 @@ export function filters(f = {}) {
   };
 }
 
+// tip: what a badge counts, for the tab's tooltip ("Skills · 1 skill point to spend · key 2")
+const BADGE_TIP = { skills: (b) => `${b} skill ${b === "1" ? "point" : "points"} to spend`, career: () => "a promotion review is ready" };
 function tabs(badges = {}) {
   return [["gear", "Gear"], ["skills", "Skills"], ["stats", "Stats"], ["career", "Career"], ["journal", "Journal"]]
-    .map(([id, label]) => ({ id, label, badge: badges[id] ?? null }));
+    .map(([id, label]) => ({ id, label, badge: badges[id] ?? null, tip: badges[id] && BADGE_TIP[id] ? BADGE_TIP[id](badges[id]) : null }));
 }
 
 function slotsOf(items, heroId) {
@@ -384,7 +386,7 @@ function rueCareer() {
       { key: "staff", title: "Staff", levels: "60–89", state: "locked", note: "Ultimate, +1 SP", review: {
         name: "Staff Review", status: "locked", statusText: "At Lv 60", estimate: null, challenge: null,
       } },
-      { key: "principal", title: "Principal", levels: "90–100", state: "locked", note: "Capstone, silver trim", review: null },
+      { key: "principal", title: "Principal", levels: "90–100", state: "locked", note: "Capstone passive", review: null },
     ],
     signature: { text: "median task 4 min · 0.6 blocks/h · 5% with sub-agents", recommended: "Hotfixer", state: "Locked at 15 tasks", tasks: "20 tasks on record" },
     classes: {
@@ -418,6 +420,7 @@ function rueCareer() {
 // Nib the Linted: Lv 3 Intern, first day, few items (Gear tab, nothing selected)
 
 const NIB = 21;
+const WREN = -3; // a Contractor (negative ids: never saved) wearing Nib's first-day kit
 const nibHeader = {
   name: "Nib the Linted", level: "Lv 3", title: "Intern", tag: null, tagTip: null, tagTab: null,
   sub: "herdr-app · Claude Code · fighting 1-1 Squiggle Path", quest: "Set up the project",
@@ -716,6 +719,18 @@ export const scenarios = {
   provisional: { ...base(PIP, "career", pipHeader), career: pipCareer() },
   /** The same hero on the Gear tab: the "provisional" tag is a link to Career. */
   provisionalGear: { ...base(PIP, "gear", pipHeader), gear: kipGear() },
+  /**
+   * A Contractor (owner decision, round 4: promoted when hiring reopens): the banner says when it
+   * joins the roster, its tooltip the whole story; the tag explains itself.
+   */
+  contractor: { ...base(WREN, "gear", { ...nibHeader, name: "Wren Monorepo-Raised", level: "Lv 6", tag: "contractor",
+    tagTip: "Contractor: Hired at the next 04:00 game day · 2 ahead in line (today: 0 of 6 hires left). When hired it keeps its name, level, XP and class, and its kit becomes saved Alpha gear.",
+    sub: "ref-client · Claude Code · fighting 1-2 Whitespace Fields", quest: null, focus: { pane: "p33", address: "t33" } }, {
+    note: {
+      text: "Contractor: hired tomorrow at 04:00 · not saved until then; its kills and chests still pay the herd", color: C.idle,
+      tooltip: "Hired at the next 04:00 game day · 2 ahead in line (today: 0 of 6 hires left). When hired it keeps its name, level, XP and class, and its kit becomes saved Alpha gear. Contractors don't get equity.",
+    },
+  }), gear: nibGear() },
   /** An off-duty (benched) hero: Career with Rebind, no Focus button. */
   benched: { ...base(JUNO, "career", junoHeader, { note: { text: "Off duty since Nov 21 · Fresh Eyes keeps building · pending chests wait", color: C.idle } }), career: junoCareer() },
 };
@@ -743,7 +758,7 @@ export function viewFor(name, args = {}) {
   if (vm.heroId === KIP) return kipVm(tab, f);
   if (tab === vm.tab && tab !== "gear") return vm;
   const out = { ...vm, tab, gear: null, skills: null, stats: null, career: null, journal: null };
-  if (tab === "gear") out.gear = vm.heroId === ADA ? adaGear(f) : vm.heroId === NIB ? nibGear(f) : kipGear(f);
+  if (tab === "gear") out.gear = vm.heroId === ADA ? adaGear(f) : vm.heroId === NIB || vm.heroId === WREN ? nibGear(f) : kipGear(f);
   else if (tab === "skills") out.skills = vm.heroId === ADA ? adaSkills() : kipSkills();
   else if (tab === "stats") out.stats = kipStats();
   else if (tab === "career") out.career = vm.heroId === JUNO ? junoCareer() : vm.heroId === PIP ? pipCareer() : rueCareer();

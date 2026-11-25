@@ -6,7 +6,9 @@
 //    (terminal.peek), as the agents list does for its sub-agent rows; hover / selected (focused)
 //    styling from the theme; foldable groups;
 //  - blocked agents stand out without re-sorting: a "N need you" chip in the header (click: the
-//    next one), a "!" badge on the folded or unfolded group and on the rail's portrait;
+//    next one), a "!" badge on the folded or unfolded group and on the rail's portrait; a blocked
+//    sub-agent (a Forkling, RowVM.waitingForks) counts too, as herdr's agents list ranks a parent
+//    by its most urgent sub-agent, and a click shows it (terminal.peek when it has no pane);
 //  - a hover pin toggle (terminal.pin) like the agents list's;
 //  - the rail when the sidebar is narrower than 160 px, with the "»" button that unfolds it
 //    (workspace-chrome hides its own toggle on the macOS rail and relies on this one).
@@ -36,6 +38,15 @@
  *                                   a 2 px XP line) with about a third of a full row's elements.
  * @property {string|null} [machine] the machine of a remote agent ("vps" for "vps/t7"), shown as a
  *                                   small dim label like herdr's agents list; null when local.
+ * @property {Array<{key:string, address:string, name:string, tooltip:string}>} [waitingForks]
+ *                                   the hero's sub-agents (Forklings) waiting for the person: each
+ *                                   counts in "N need you" (listed by `name`), puts the "!" on the
+ *                                   group and on the rail portrait (`tooltip`: the badge's hover),
+ *                                   and a click shows it (showTerminal: its pane, else the peek).
+ * @property {{tooltip:string}|null} [mapPin] the hero is pinned to its map (the stage's room
+ *                                   header click): a map-pin glyph (hollow head on a needle, unlike
+ *                                   the terminal pin's filled one) beside the level, always shown
+ *                                   (hovered too, and in slim rows); its tooltip says what it means.
  * RowVM.status is herdr's status word ("working"|"blocked"|"done"|"idle"); RowVM.chips kinds the
  * renderer knows: "blocked" | "boss" | "review" (text pills), "chest" (icon, click claims; text
  * e.g. "×2" optional), "fork" (icon + count; chip.terminal = the sub-agent a click shows: its
@@ -51,15 +62,19 @@
  * @typedef {Object} PartyFooterAdditions
  * gold, snippets and release are display strings ("48.2k", "133", "v2.3"); numbers are shown
  * with String(). sprint: null | { label, have, need } (have/need numbers, shown "7/10").
- * digestDot: boolean (something new in the Herd panel's digest, or an off-duty chest within 4 h
- * of opening Unreviewed: the Digest lists it with an Open button).
+ * digestDot: boolean (something new in the Herd panel's digest, chests that opened Unreviewed
+ * since the Digest was last viewed, or an off-duty chest within 4 h of opening Unreviewed: the
+ * Digest lists it with an Open button). digestTip: null | string, the Herd button's tooltip while
+ * the dot says one of the last two (null: "something new in the digest").
  * PartyVM.save: null | { title, short, tooltip } (game/view saveCue: host.saveStatus()): save
  * trouble is never silent (D§13.1), so the footer shows it above the gold row (the rail: a dot
  * above the Herd button), and a click opens the Herd panel, whose band says the rest (D§13.4).
  *
  * env (renderParty): { width, height, zoom, theme: T(), host, act, ui? } where ui is the role's
- * mutable UI state { toggled:Set<groupKey>, hovered:string|null, size:{w,h}|null }; renderers
- * mutate it from handlers and call cx.notify(). Optional: a fresh state is used when absent.
+ * mutable UI state { toggled:Set<groupKey>, hovered:string|null, size:{w,h}|null,
+ * needYou?:{key, focus} (the "N need you" walk: the entry it showed last and the row focused
+ * after it) }; renderers mutate it from handlers and call cx.notify(). Optional: a fresh state is
+ * used when absent.
  */
 
 import { div, svg, image } from "gpui-kit";
@@ -453,33 +468,79 @@ export function renderParty(vm, env) {
     .child(compact ? railFooter(vm, env, t) : footer(vm, env, t, width));
 }
 
-/** The live rows that wait for the person (herdr's "blocked"), in the order they are drawn. */
-export function blockedRows(vm) {
+/** A row's sub-agents waiting for the person (RowVM.waitingForks; older VMs: none). */
+const forksWaiting = (r) => (Array.isArray(r?.waitingForks) ? r.waitingForks.filter((f) => f && f.address) : []);
+
+/**
+ * Everything that waits for the person, in the order it is drawn: each blocked row, then its
+ * blocked sub-agents (a waiting Forkling of a row that is not blocked itself counts too, as herdr's
+ * agents list ranks a parent by its most urgent sub-agent). Entries: {key, name, row, fork}.
+ */
+export function waitingList(vm) {
   const out = [];
-  for (const g of vm?.groups ?? []) if (!g.offDuty) for (const r of g.rows) if (r.status === "blocked" && r.address) out.push(r);
+  for (const g of vm?.groups ?? []) {
+    if (g.offDuty) continue;
+    for (const r of g.rows) {
+      if (r.status === "blocked" && r.address) out.push({ key: r.key, name: String(r.name ?? ""), row: r, fork: null });
+      for (const f of forksWaiting(r)) out.push({ key: f.key ?? `wf:${f.address}`, name: String(f.name ?? "a sub-agent"), row: r, fork: f });
+    }
+  }
   return out;
 }
 
-/** The blocked row the header chip jumps to: the first, or the one after the focused one. */
-function nextBlocked(list) {
-  const at = list.findIndex((r) => r.focused);
+const focusedKey = (vm) => {
+  for (const g of vm?.groups ?? []) for (const r of g.rows) if (r.focused) return r.key;
+  return null;
+};
+
+/**
+ * The entry the header chip shows next. Repeated clicks walk the list: a row it showed gets the
+ * focus (pane.focus), but a peek (a sub-agent, or an agent without a pane) leaves the focus where
+ * it was, so the chip remembers
+ * what it showed last (ui.needYou) and goes on from there while the focus is still the one that
+ * click left; else (the person focused something else) from the focused row.
+ */
+function nextWaiting(list, vm, ui) {
+  const focus = focusedKey(vm);
+  const last = ui?.needYou;
+  if (last && last.focus === focus) {
+    const at = list.findIndex((x) => x.key === last.key);
+    if (at >= 0) return list[(at + 1) % list.length];
+  }
+  const at = list.findIndex((x) => !x.fork && x.row.focused);
   return list[(at + 1) % list.length];
+}
+
+/** Show one waiting entry: a row as a row click does (markSeen + its pane), a sub-agent by showTerminal. */
+function showWaiting(x, env) {
+  return (e, cx) => {
+    if (x.fork) showTerminal(x.fork.address);
+    else clickRow(x.row, env)(e, cx);
+  };
 }
 
 /**
  * "2 need you" (herdr's status bar words): rows never re-sort (D§11.11), so a blocked hero below
- * the fold is found from here. A click jumps to the next one (clickRow: markSeen + its pane).
+ * the fold is found from here. A click jumps to the next one (a row: clickRow, markSeen + its pane;
+ * a waiting sub-agent: its pane, else herdr's peek).
  */
-function needYouChip(list, t, env, width) {
+function needYouChip(list, t, env, width, vm) {
   const n = list.length;
   const light = isLight(t);
-  const next = nextBlocked(list);
-  const names = list.slice(0, 4).map((r) => String(r.name ?? "")).join(", ") + (n > 4 ? ` and ${n - 4} more` : "");
+  const ui = env.ui ?? null;
+  const next = nextWaiting(list, vm, ui);
+  const names = list.slice(0, 4).map((x) => x.name).join(", ") + (n > 4 ? ` and ${n - 4} more` : "");
   return h_flex().id("party-needyou").flex_none().h(18).px(6).rounded(5).items_center().cursor_pointer()
     .bg(alpha(C.blocked, light ? 0.2 : 0.16)).text_size(10.5).font_semibold().text_color(ink(C.blocked, t)).whitespace_nowrap()
     .hover((s) => s.bg(alpha(C.blocked, light ? 0.32 : 0.28)))
-    .tooltip(`Waiting for you: ${names}\nClick to jump to ${String(next.name ?? "")}`)
-    .on_click((e, cx) => { cx.stop_propagation(); clickRow(next, env)(e, cx); })
+    .tooltip(`Waiting for you: ${names}\nClick to jump to ${next.name}`)
+    .on_click((e, cx) => {
+      cx.stop_propagation();
+      // the focus this click leaves: the row's own (pane.focus), or unchanged by a peek (a
+      // sub-agent, or an agent without a pane: showTerminal peeks it when panes() has none)
+      if (ui) ui.needYou = { key: next.key, focus: next.fork || !next.row.pane ? focusedKey(vm) : next.row.key };
+      showWaiting(next, env)(e, cx);
+    })
     .child(width >= 220 ? `${n} ${n === 1 ? "needs" : "need"} you` : `! ${n}`);
 }
 
@@ -491,12 +552,12 @@ function bangBadge(t) {
 
 function header(t, vm, env, width = 268) {
   const calm = !!vm?.calm;
-  const waiting = vm ? blockedRows(vm) : [];
+  const waiting = vm ? waitingList(vm) : [];
   return h_flex().px(16).h(41).pt(14).pb(5).flex_none().items_center().gap(6)
     .child(div().min_w(0).truncate().text_size(11.5).font_medium().text_color(t.dim).child(String(vm?.title ?? "Party")))
     .when(Boolean(vm), (el) => el.child(div().text_size(11.5).text_color(t.dim).child(String(vm.count))))
     .child(div().flex_1())
-    .when(waiting.length > 0, (el) => el.child(needYouChip(waiting, t, env, width)))
+    .when(waiting.length > 0, (el) => el.child(needYouChip(waiting, t, env, width, vm)))
     // icon-only buttons hover with a background: herdr fixes an svg's colour when it builds the
     // element, so a hover text colour would not reach the icon
     .when(Boolean(vm), (el) => el.child(div().id("party-calm").p(2).rounded(4).cursor_pointer()
@@ -509,9 +570,9 @@ function header(t, vm, env, width = 268) {
 
 function groupHeader(g, folded, ui, t) {
   const top = g.rows.reduce((m, r) => ((RANK[r.status] ?? 0) > (RANK[m] ?? 0) ? r.status : m), null);
-  // blocked: herdr's "!" badge, folded or not (the blocked row may be below the fold); done /
-  // working: a dot on a folded group
-  const bang = !g.offDuty && top === "blocked";
+  // blocked (a row, or a row's sub-agent): herdr's "!" badge, folded or not (the blocked row may
+  // be below the fold); done / working: a dot on a folded group
+  const bang = !g.offDuty && (top === "blocked" || g.rows.some((r) => forksWaiting(r).length > 0));
   const dot = folded && !g.offDuty && top && top !== "idle" && !bang;
   // a folded off-duty group still shows its pending chests (they open Unreviewed after 24 h)
   const chests = folded && g.offDuty ? Math.max(0, Number(g.chests) || g.rows.filter((r) => r.chestPending).length) : 0;
@@ -588,6 +649,7 @@ function heroRow(r, g, vm, env, ui, t, width) {
         .child(h_flex().h(16).gap(6).items_center()
           .child(div().flex_1().min_w(0).truncate().text_size(12.5).font_medium().text_color(dimName ? t.muted : t.fg).child(String(r.name ?? "")))
           .when(Boolean(r.machine), (el) => el.child(div().flex_none().text_size(10).text_color(t.dim).child(String(r.machine))))
+          .when(Boolean(r.mapPin), (el) => el.child(mapPinMark(r, t)))
           .child(right))
         .child(h_flex().h(15).gap(4).items_center()
           .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.muted).child(sub))
@@ -638,6 +700,21 @@ export function chipsThatFit(chips, room, gap) {
   return n;
 }
 
+/** The map-pin glyph's width (its gap is the row's). */
+const MAP_PIN_W = 8;
+
+/**
+ * RowVM.mapPin: the hero is pinned to its map. A hollow head on a needle (herdr's terminal pin, the
+ * hover toggle and the portrait dot, is a filled one), beside the level; the tooltip says why.
+ */
+export function mapPinMark(r, t) {
+  const col = t.muted;
+  return div().id(`pm-${r.key}`).relative().flex_none().w(MAP_PIN_W).h(12)
+    .tooltip(String(r.mapPin?.tooltip ?? "Pinned to its map"))
+    .child(div().absolute().left(0.5).top(0).size(7).rounded_full().border(1.5).border_color(col))
+    .child(div().absolute().left(3.25).top(6.5).w(1.5).h(5).rounded(1).bg(col));
+}
+
 /** The hero's name in a slim row keeps at least this much (about three letters and the ellipsis). */
 const SLIM_NAME = 32;
 
@@ -649,8 +726,8 @@ const SLIM_NAME = 32;
  * @returns {{chips:number, level:boolean}}
  */
 export function slimFit(r, width, hovered) {
-  // list px 8×2, row pl 4 / pr 8, stripe 3 + gap 6, face 28 + gap 6, machine tag + gap
-  const room = width - 16 - 12 - 9 - 34 - SLIM_NAME - (r.machine ? 6 + String(r.machine).length * 6 : 0);
+  // list px 8×2, row pl 4 / pr 8, stripe 3 + gap 6, face 28 + gap 6, machine tag + gap, map pin + gap
+  const room = width - 16 - 12 - 9 - 34 - SLIM_NAME - (r.machine ? 6 + String(r.machine).length * 6 : 0) - (r.mapPin ? 6 + MAP_PIN_W : 0);
   const chips = (r.chips ?? []).slice(0, 2);
   const tail = 6 + (hovered ? (r.address ? 36 : 17) : `Lv ${r.level}`.length * 6.3);
   if (hovered) return { chips: chipsThatFit(chips, room - tail, 6), level: false };
@@ -721,6 +798,7 @@ function slimRow(r, g, vm, env, ui, t, width) {
       div().flex_1().min_w(0).truncate().text_size(12).font_medium().text_color(dimName ? t.muted : t.fg).child(String(r.name ?? "")),
       r.machine ? div().flex_none().text_size(10).text_color(t.dim).child(String(r.machine)) : null,
       ...rowChips(r, env, t, fit.chips, { height: 14 }),
+      r.mapPin ? mapPinMark(r, t) : null,
       hovered ? rowButtons(r, t) : fit.level ? levelText(r, t) : null,
       r.pinned ? div().absolute().left(4 + 3 + 6 + 28 - 5).top(3).size(7).rounded_full().bg(t.accent).border(1.5).border_color(t.chrome) : null,
       // the XP bar: a faint track with the fill on top, so it never reads as an underline
@@ -746,16 +824,24 @@ function pinGlyph(color) {
 
 function railRow(r, g, vm, env, t) {
   const blocked = r.status === "blocked";
-  const pic = portrait(`pp-${r.key}`, r, 28, t, { calm: vm.calm, pinned: r.pinned && !blocked });
+  // a sub-agent waiting for the person marks its parent's portrait too (herdr's agents list ranks
+  // a parent by its most urgent sub-agent); the badge's click shows that sub-agent
+  const fork = blocked ? null : forksWaiting(r)[0] ?? null;
+  const pic = portrait(`pp-${r.key}`, r, 28, t, { calm: vm.calm, pinned: r.pinned && !blocked && !fork });
   // herdr's rail marks a blocked agent with a "!" badge; here it sits on the portrait's corner
   // (where the pin dot goes: the badge is the more urgent of the two)
-  if (blocked) {
+  if (blocked || fork) {
     // light chrome: the rust blocked step with a white "!" (the deepened amber was 2.6:1 against
     // the chrome); dark chrome: the amber with a dark "!"
     const light = isLight(t);
-    pic.child(div().id(`pb-${r.key}`).absolute().left(21).top(-3).size(13).rounded(4).bg(light ? STRIPE.light.blocked : tone(C.blocked, t))
+    let badge = div().id(`pb-${r.key}`).absolute().left(21).top(-3).size(13).rounded(4).bg(light ? STRIPE.light.blocked : tone(C.blocked, t))
       .border(1.5).border_color(t.chrome)
-      .flex().items_center().justify_center().text_size(9).font_bold().line_height(1).text_color(light ? "#ffffff" : "#1c1d21").child("!"));
+      .flex().items_center().justify_center().text_size(9).font_bold().line_height(1).text_color(light ? "#ffffff" : "#1c1d21").child("!");
+    if (fork) {
+      badge = badge.cursor_pointer().tooltip(String(fork.tooltip ?? fork.name ?? "A sub-agent waits for you"))
+        .on_click((_e, cx) => { cx.stop_propagation(); showTerminal(fork.address); });
+    }
+    pic.child(badge);
   }
   return h_flex().id(`pr-${r.key}`).relative().h(40).flex_none().mx(2).rounded(8).justify_center()
     .when(r.focused, (el) => el.bg(t.selected))
@@ -782,7 +868,7 @@ function herdButton(vm, t, compact) {
     .rounded(6).bg(t.raised).text_color(t.muted).cursor_pointer()
     // a background hover: the icon keeps its built colour in herdr, so the label stays with it
     .hover((s) => s.bg(lift(t)))
-    .tooltip(dot ? "Herd panel: something new in the digest" : "Herd panel: upgrades, stash, bosses, roster")
+    .tooltip(dot ? String(vm.footer?.digestTip || "Herd panel: something new in the digest") : "Herd panel: upgrades, stash, bosses, roster")
     .on_click((_e, cx) => { cx.stop_propagation(); openHerd(); })
     .child(svg(art("ui/herd.svg")).w(13).h(13).flex_none())
     .when(!compact, (el) => el.child(div().text_size(11.5).font_medium().child("Herd")))

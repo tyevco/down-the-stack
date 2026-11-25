@@ -15,5 +15,6 @@ tools/mock/elements.mjs
     Copyright 2024 - 2026 Longbridge <https://longbridge.com>.
     Licensed under the Apache License, Version 2.0 (LICENSE-APACHE-2.0 in this folder).
 
-Everything else in this repository is the project's own work under its own licence
-(package.json "license").
+Everything else in tools/mock is the project's own work under the MIT License (LICENSE at the
+repository root). Material adapted from herdr-app elsewhere in the repository is listed beside it:
+mods/down-the-stack/NOTICE (the mod and its layout) and tools/qjs/NOTICE.

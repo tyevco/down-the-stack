@@ -1,0 +1,38 @@
+Down the Stack (this folder, mods/down-the-stack, and the layout installed with it,
+layouts/Down-the-Stack.json)
+Copyright (c) 2026 Tyler Coles. Licensed under the MIT License (LICENSE in this folder).
+
+Some parts are adapted from herdr-app 0.1.17 (https://github.com/herdrdev/herdr-app), whose
+shipped defaults are licensed under the Apache License, Version 2.0 (LICENSE-APACHE-2.0 in this
+folder). Each was changed to fit this mod; the herdr originals are named below.
+
+game/agents.js
+    TITLE_MARK is the title-cleaning regular expression of defaults/mods/agents/main.js
+    (clean()), unchanged. judgeTitle() follows that file's title() "telling" test (the path test
+    and its regular expression; the address, program name and key comparisons). PROCESS_NAMES
+    lists the "shells" and "interpreters" of defaults/programs.json.
+
+ui/party.js
+    Takes the place of the agents list, defaults/mods/agents/main.js: toggleSidebar() (the rail,
+    the shared sidebar.width / sidebar.collapsed keys, the 44 / 76 px rail widths) and the status
+    ranks (RANK) follow it.
+
+host.js
+    snapshot() reads a pane-less sub-agent's status as defaults/mods/agents/main.js kidStatus()
+    does (error counts as blocked, done as idle).
+
+ui/nameplate.js
+    Takes the place of the pane header, defaults/mods/pane/main.js: paneFrame() (unchanged),
+    folder(), the program icon, the plain header's name rule, the frame's border side and the
+    hover buttons that split, zoom and close the pane follow it. Its text spinner is the one
+    defaults/mods/peek/main.js draws. The button icons (art/ui) are this project's own drawings.
+
+game/view/chrome.js
+    AGENT_ICONS records which of the agent programs in defaults/programs.json draw a tinted icon.
+
+layouts/Down-the-Stack.json
+    Derived from defaults/layouts/main.json: the same tree with the agents list replaced by the
+    party, the pane header by the nameplate, and the stage and HUD blocks, colours and preview
+    added.
+
+Everything else here (the game, its art and its text) is this project's own work.

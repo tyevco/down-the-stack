@@ -509,7 +509,10 @@ describe("the emitter (D§11.7) and runtime flags", () => {
     ev.major();
     assert.equal(w.rt.majorAt, T0 + 1000);
     ev.journal("ship", 1, "x", 1);
-    assert.deepEqual(w.state.herd.log.at(-1), [T0 + 1000, "ship", 1, "x", 1]);
+    // the line carries the hero's name (round 4), so a Contractor or a hero let go stays named
+    assert.deepEqual(w.state.herd.log.at(-1), [T0 + 1000, "ship", 1, "x", 1, A.heroById(w, 1).name]);
+    ev.journal("badge", 0, "First Commit", 0);
+    assert.deepEqual(w.state.herd.log.at(-1), [T0 + 1000, "badge", 0, "First Commit", 0], "no hero, no name");
     const v1 = w.rt.version;
     W.command(w, "setting", { key: "calm", value: true }, T0 + 1500);
     assert.equal(w.rt.version, v1 + 1);

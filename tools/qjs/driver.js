@@ -176,13 +176,21 @@ function sizeCopy(copy, root, w, h) {
   }
   return false;
 }
+/** One beat of a copy's repeating timers (main.js's 1 s timer, and any its role arms itself). */
 function runTimer(copy) {
-  enter(copy);
-  const t = copy.timers.find((x) => x.every);
-  if (!t) return false;
-  t.fn(makeCx(copy));
-  return true;
+  const due = copy.timers.filter((x) => x.every);
+  for (const t of due) {
+    enter(copy);
+    t.fn(makeCx(copy));
+  }
+  return due.length > 0;
 }
+
+/**
+ * Repeating 1 s timers a role arms itself, beside main.js's one (ui/herdpanel.js: the Digest's
+ * lossesSeen check, round 4). The reload phase holds every new copy to main.js's timer plus these.
+ */
+const ROLE_TIMERS = { herd: 1 };
 
 function freshHost(world) {
   const host = getHost();
@@ -998,12 +1006,15 @@ drv.reloadCheck = (argJson) => {
   want(h1.pump(RL.now + 5000, true) === false, "the retired host still pumps");
   want(h1.maybeSave(true, RL.now + 5000) == null, "the retired host still saves");
   want(h1.handover(H.__ctl.S.files.get(SAVE_PATH)) === null, "the retired host would hand its world over again");
-  // timers and tasks: the new copies own exactly main.js's (one 1 s timer, the nextCommand loop)
+  // timers and tasks: the new copies own exactly main.js's (one 1 s timer, the nextCommand loop),
+  // plus the 1 s timers their role arms itself (ROLE_TIMERS)
   const built = RL.copies.filter((c) => c.gen === RL.gen);
   const timers = built.map((c) => c.timers.length);
-  const every = built.every((c) => c.timers.length === 1 && c.timers[0].every && c.timers[0].ms === 1000);
+  const roleOf = (c) => (c.props && typeof c.props.role === "string" ? c.props.role : "");
+  const owed = built.map((c) => 1 + (Object.prototype.hasOwnProperty.call(ROLE_TIMERS, roleOf(c)) ? ROLE_TIMERS[roleOf(c)] : 0));
+  const every = built.every((c, i) => c.timers.length === owed[i] && c.timers.every((t) => t.every && t.ms === 1000));
   const tasks = built.map(pending);
-  want(every, `timers per new copy ${JSON.stringify(timers)} (main.js arms one 1 s timer each)`);
+  want(every, `timers per new copy ${JSON.stringify(timers)}, owed ${JSON.stringify(owed)} (main.js arms one 1 s timer each, a role its own: ${JSON.stringify(ROLE_TIMERS)})`);
   want(tasks.every((n) => n === 1), `pending tasks per new copy ${JSON.stringify(tasks)} (the nextCommand loop each; the load task finished)`);
   const released = RL.released.filter((c) => c.gen === RL.prevGen);
   const left = released.map((c) => c.pendingAtRelease);

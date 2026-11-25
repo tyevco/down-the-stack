@@ -70,7 +70,8 @@ describe("gold and Snippets", () => {
     while (s2.heroes.length < 30) addHero(s2, 50, 1);
     H.journal(s2, "hire", 30, "Newcomer", 0, T0 + 999);
     assert.equal(s2.herd.log.length, 60);
-    assert.deepEqual(s2.herd.log[59], [T0 + 999, "hire", 30, "Newcomer", 0]);
+    // the line names its hero as it was when written (round 4: lineName)
+    assert.deepEqual(s2.herd.log[59], [T0 + 999, "hire", 30, "Newcomer", 0, s2.heroes.find((h) => h.id === 30).name]);
     // D§13.3's worst case at the taper's corners (as test/save.test.mjs builds it): heroes in full
     // Release gear with busy counters, 140 stash items, a full journal of 40-character lines
     const worst = (n) => {

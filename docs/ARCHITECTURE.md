@@ -16,7 +16,7 @@ herdr's single QuickJS VM; elements are GPUI builders from `gpui-kit` / `gpui-ba
 
 ```
 layouts/Down-the-Stack.json     the layout. herdr has no display title, so it lists the layout by its
-                                file name; the file is named after the game, not the codename
+                                file name; the file is named after the game
 mods/down-the-stack/            THE MOD (copied verbatim into ~/.config/herdr-app/mods/down-the-stack).
                                 herdr shows the folder name too (§4), so it is named after the game
   mod.json                      {"place":"none", "overlay":{Herd panel dialog}, "palette":[...]}
@@ -53,6 +53,9 @@ mods/down-the-stack/            THE MOD (copied verbatim into ~/.config/herdr-ap
     herdpanel.js                role "herd"    (Herd panel dialog)
   art/                          generated assets (tools/gen-art.mjs). Never hand-edit; regenerate.
   preview.svg                   layout preview for herdr Settings (also generated)
+  LICENSE                       MIT (Tyler Coles), the same text as the repository's root LICENSE
+  NOTICE                        the parts adapted from herdr-app 0.1.17 (Apache-2.0), file by file
+  LICENSE-APACHE-2.0            herdr-app's licence text, for those parts
 tools/
   api-allowlist.json            every valid element method (from herdr source)
   used-methods.txt              the element methods herdr's own shipped mods call (herdr-notes)
@@ -71,16 +74,20 @@ tools/
   reference-sim/                the Python model that produced the design's numbers
 test/                           node:test unit tests (`node --test "test/*.test.mjs"`), helpers/,
                                 fixtures/saves/ (one save text per format this branch has written)
-docs/                           DESIGN.md, ARCHITECTURE.md, BALANCE.md, herdr-notes/
-README.md, RECIPE.md, preview.png, keys.example.json (the optional keys.json section)
+docs/                           DESIGN.md, ARCHITECTURE.md, BALANCE.md, DECISIONS.md (the owner's
+                                product calls, made and open), herdr-notes/
+README.md, RECIPE.md, preview.png, keys.json (the optional keys section herdr's install flow merges
+                                into the person's keys.json), LICENSE (MIT), package.json /
+                                package-lock.json (named down-the-stack)
 package.json                    "type": "module"; scripts: test, check, preview, windows, art, pacing,
                                 qjs; devDependencies only for tools/qjs
 ```
 
 Only `layouts/Down-the-Stack.json` and `mods/down-the-stack/` are installed. Nothing under
 `mods/down-the-stack/` may depend on `tools/` or `test/`. Tests and tools import from
-`mods/down-the-stack/` freely. The repository and `package.json` keep the codename `mapledr`:
-herdr never sees either.
+`mods/down-the-stack/` freely. The repository (github.com/tyevco/down-the-stack) and `package.json`
+are named `down-the-stack` too; the project's earlier codename is gone from every file, folder and
+screen.
 
 ---
 
@@ -273,9 +280,17 @@ Herd  = { name, gold, snip, bld:[6], zone, quota:{[mapId]:kills}, meter, bank, s
           autopilot /*master switch*/, calm, stageH, nums:"all"|"crits"|"off", glow /*loot glow min
           rarity 0..5*/, collapse, collapsed /*host: it hid the stage*/, idleAt /*host: when its
           collapse countdown started, saved as "idle" only while set*/, notify:{boss,lts,principal}},
-          log:[[at, kind, heroId, text, value]...≤60-120], nextUid, nextHeroId, rng, day, lastMs, tick }
+          log:[[at, kind, heroId, text, value, name?]...≤60-120], unseenUnrev /*round 4*/,
+          nextUid, nextHeroId, rng, day, lastMs, tick }
           // journal kinds: ship, unrev (chests opened Unreviewed: text the task, value the count),
-          // level, promo, drop, boss, retire, hire, leave, class, map, deprecate, badge
+          // level, promo, drop, boss, retire, hire, hired (round 4: "Hired: <name> (was a
+          // contractor)", value its level), leave, class, map, deprecate, badge
+          // name (round 4): the hero's name on every line about a hero, through save.js's str
+          // table; herd.lineName reads the roster's name now, else this. Contractor ids in the
+          // journal are written 0 on load (they last one session); older rows without a name load
+          // unchanged
+          // unseenUnrev (round 4): chests opened Unreviewed since the Digest was last viewed
+          // (agents.openChests adds, lossesSeen / digestSeen clear); saved in herd.x by its name
           // fight.ids never hold Contractor ids (negative) after a load (world.js repairLoaded):
           // Contractors are not saved and are numbered afresh, so they rejoin a resumed fight only
           // by standing in its zone (boss.resumeFight)
@@ -289,12 +304,15 @@ world.rt = {                // rebuilt from snapshots; never saved
   dirty, majorAt, lastSaveMs, errors: [],
   tzOffsetMin,              // from the snapshots (tick) or a command's tzOffsetMin argument
   msHeld,                   // milestones raised before the time zone was known (counted at the next tick)
-  firstKeepsake             // {i, name}: a herd-first kill's Keepsake, named in that kill's boss toast
-}
+  firstKeepsake,            // {i, name}: a herd-first kill's Keepsake, named in that kill's boss toast
+  _hireLine                 // round 4: agents.hireOutlook's cache {key, line, room}, once per tick
+}                           // a Contractor (rt.contractors) also carries since: when it arrived, its
+                            // place in the hiring line (promoteContractors: longest-running first)
 
 Live = {                    // per bound, live hero
   address, status, seq, statusSince, state: "questing"|"waiting"|"shipped"|"resting"|"supervising"|"crashed",
   focused, pinned, program, app, title, space, spaceName, tab, tabName, pane, paneName,
+  machine,                  // round 4: agents.machineOf (null: this computer); Rebind keeps it
   task: null|{openTick, workSec, blockedSec, sealAcc, forkSec, spawned, closeCountdown},
   blockedSince, bubbleShown, forklings: [{address, status, title, program}], flap:[ticks],
   hp, maxHp, buffs:[{id, until, ...}], cds:{slot: readyTick}, actionCount, bisect:{target, stacks},
@@ -398,6 +416,26 @@ export function whyOf(world, hero, live) -> Why           // the why line's numb
 export const _internal                                     // test-only (tellingCacheSize)
 export function heroState(live) -> "questing"|"waiting"|...
 export function tellingTitle(raw, who) -> string           // herdr's agents-list title test ("" = says nothing); a task keeps only telling titles
+// round 4: tellingTitle also rejects a title that repeats who's spaceName, tabName or paneName
+// (trimmed, case-insensitive, glyph stripped), except a string exactly equal to the pane's or a
+// named tab's own name (the person's name for the place: chrome.taskLabel's fallback); its cache
+// key holds those names and the strictness. questName (task and chest titles; openChests for an
+// off-duty hero: its last seat, tab and pane, a remote machine suffix stripped) has no exception
+export function seatKey(spaceName, spaceId, programKey, app, machine?) -> string   // D§3.1; a remote
+                                                          // space: "space@machine/program" (local unchanged)
+export function machineOf(agent) -> string|null           // agent.machine, else the "<machine>/" prefix of its
+                                                          // space id or address (herdr mirror.rs qualify)
+export function hiredToday(state) -> number               // hires this game day (D§3.4: 6)
+export function promoteContractors(world, ev, spare?) -> number   // round 4, D§3.4 as built: at every reconcile
+                                                          // before new terminals bind, and on retire; longest-running
+                                                          // live Contractor first while hires are left and makeRoom
+                                                          // finds room (a free slot, else rosterVictim: the least-
+                                                          // recently-seen unbound hero below Lv 10 is let go); spare:
+                                                          // heroes whose terminals ended in this snapshot (a replaced
+                                                          // pane keeps its hero); never on a read-only world
+export function hireOutlook(world, heroOrId) -> null|{when:"soon"|"day"|"slot"|"never", position, ahead,
+       hiresLeft, perDay, room, atMs, days, text}         // when a Contractor is hired (views: chrome.hireLine,
+                                                          // panels hireOf); cached per tick in rt._hireLine
 
 // combat.js
 export function buildRooms(world) -> Room[]
@@ -414,7 +452,12 @@ export function leaveSavedFight(world, heroId, ev) -> boolean   // retire / evic
 
 // herd.js
 export function addGold(state, n) ; export function addSeals(world, n, ev) ; export function buy(state, bIdx)
-export function herdXpBonus(state) -> number ; export function journal(state, kind, heroId, text, value, nowMs)
+export function herdXpBonus(state) -> number ; export function journal(state, kind, heroId, text, value, nowMs, name?)
+export function lineName(state, line, byId?) -> string|null   // round 4: a journal line's hero name: the roster's
+                                                          // name now (a rename shows), else the stored one, else null
+export function unseenLosses(state) -> number             // round 4: herd.unseenUnrev, or (an older save) the journal's
+                                                          // "unrev" lines since digestAt
+export function digestDot(world) -> boolean               // rt.digestDot (back after 30 min away) or unseenLosses > 0
 export function logDrop(world, hero, item, ev, {roomId, milestone}) // notable drops: journal, header note, digest count,
                                                           // pillar (roomId "arena": before the boss) and the "lts"
                                                           // milestone unless milestone:false (a herd-first Keepsake
@@ -440,7 +483,9 @@ export function takeMilestones(world, nowMs) -> [{n, kind, at, title, body}]   /
 ```
 
 `ev` is a small emitter `{ fx(kind, data), note(text, color), banner(text, sub), major(),
-journal(kind, heroId, text, value), milestone(kind, data) }` that `world.tick` creates per tick; it enforces the fx budgets (D§11.7)
+journal(kind, heroId, text, value, name?), milestone(kind, data) }` that `world.tick` creates per tick
+(journal's `name`, round 4: the hero's name, which `emitJournal` and `boss.jot` fill in; leave and
+retire lines pass it because the hero has left the roster); it enforces the fx budgets (D§11.7)
 and marks `rt.version++`. `ev.milestone` (kind `boss` | `lts` | `principal`) passes only on a *live*
 emitter: `world.tick` makes its emitter live unless the call is the VM's first (an app start or a
 reload: chests seen on reopening), the one that settles an offline gap held for the first agent
@@ -477,11 +522,12 @@ promoted to Principal; Junior, Senior and Staff raise nothing).
 | `challenge` | `{kind:"boss"\|"review"\|"backlog", idx, heroId?}` | manual challenge (`backlog`: idx = floor) |
 | `retreat` | `{}` | end the current fight as a Postmortem |
 | `rename` | `{heroId, name}` or `{herd:true, name}` | rename |
-| `retire` | `{heroId}` | Lv 30+ to Hall of Fame; its pending chests open at full value (a click), and it leaves a paused boss fight (`boss.leaveSavedFight`) |
-| `rebind` | `{heroId, address}` | move a live agent onto a benched hero |
+| `retire` | `{heroId}` | Lv 30+ to Hall of Fame; its pending chests open at full value (a click), and it leaves a paused boss fight (`boss.leaveSavedFight`); the freed slot promotes a waiting Contractor at once (round 4, `promoteContractors`) |
+| `rebind` | `{heroId, address}` | move a live agent onto a benched hero (its machine, `live.machine`, goes with it) |
 | `buy` | `{building}` | buy a building level |
 | `setting` | `{key, value}` | herd.cfg.*: calm, nums, stageH, glow (a rarity id or 0..5), collapse, auto (the master switch: `cfg.autopilot`; the systems keep their own values), auto.*, notify.*; and collapsed (the host's note that it hid the stage) |
-| `digestSeen` | `{}` | clears the Herd button's "since you last looked" dot (D§10.7) |
+| `digestSeen` | `{}` | clears the Herd button's "since you last looked" dot (D§10.7) and the unseen-loss count (`herd.unseenUnrev = 0`) |
+| `lossesSeen` | `{}` | round 4: the unseen-loss count to 0 (the Herd panel runs it from its timer while the Digest tab is shown), the Digest's lines kept |
 
 ---
 
@@ -499,12 +545,17 @@ class GameHost {
                   // then cx.spawn(async) load(): the previous build's world (hot reload, §2.3) →
                   // save.json → save.bak (also when save.json is missing) → either file re-signed
                   // when its only fault is the checksum (loadedFrom "unchecked") → a new herd.
-                  // A text that does not load is kept aside create-only: save.broken, then
-                  // save.broken-<ms> (never overwritten; identical texts kept once). A save.json
+                  // A text that does not load is kept aside (keepAside): save.broken the first
+                  // time (created, never overwritten), then save.broken-1, -2, -3 (created while
+                  // free; once all three are taken the oldest gives way: -1 ← -2 ← -3 ← the new
+                  // text, each writeTextFile expecting the text just read; a copy that cannot be
+                  // read is never written over; a text kept under any of the four names is not
+                  // written again). No listing or removal and no program runs: herdr's mod API has
+                  // neither without exec. A save.json
                   // that fails to *read* is read again after 1, 3 and 6 s, then on the 30 s beat
                   // (recoverRead()); when it reads again a herd that started fresh comes back and
-                  // the session's world is kept aside create-only as save.unsaved (then
-                  // save.unsaved-<ms>); a newer version's save found then is opened read-only
+                  // the session's world is kept aside as save.unsaved (then save.unsaved-1..3,
+                  // the same rule); a newer version's save found then is opened read-only
                   // (never written or rotated into save.bak) and this session's world is kept as
                   // save.unsaved; a text this host wrote itself is ours (no rollback).
                   // Until loaded, view() answers null.
@@ -540,6 +591,21 @@ class GameHost {
                   // stage hidden; the Herd panel shows a band under its header (HerdVM.save).
   takeMilestones(nowMs) / post(list)   // D§11.15 notifications (below)
   stageAuto(nowMs, {turnedOn?})        // D§11.15 "collapse the stage when nothing is working" (below)
+  stageInfo()     // round 4: {id, hidden, held} of this mod's stage block found by content (held:
+                  // the collapse hid it, stageHeld(): this window's note, else the saved
+                  // cfg.collapsed before the first stageAuto), or null (no stage, checking(), a
+                  // retired host). For STAGE_WANT_MS (2 s) after stageStrip() it answers the state
+                  // asked for, since herdr runs a mod's run() only after the callback returns and
+                  // layout() lags; cleared as soon as stageAuto acts
+  stageStrip(show?, id?) // round 4, the Herd panel's Stage strip switch and <mod>.stage[:show|:hide]:
+                  // layout.show / layout.hide {id} (true / false; omitted toggles) whoever hid it ->
+                  // {ok, id, hidden, msg?} | {ok:false, error}. Refused while checking(), loading,
+                  // from a retired host or without a stage; a run() that throws is reported, not
+                  // recorded. The stage is the person's then: holdStage(false) clears
+                  // cfg.collapsed and hidStage, and a running countdown is called off (idleSince,
+                  // cfg.idleAt); showing one the collapse had hidden says it hides again a minute
+                  // after work next stops
+  hotkey(name)    // sheet / herd / calm / stage / stage:show / stage:hide, once per window (claim)
   viewError(kind) // a view builder that threw: main.js shows the error chip (the party falls back
                   // to a plain list of herdr's agents()) instead of an endless "loading".
   view(kind, args) // memoised per world version: at most MEMO_MAX (64) view models; when full the
@@ -608,8 +674,11 @@ the next stop of work), and one they hide by hand is never shown by the host. A 
 `run` refuses is not recorded as held. `layout()` is read only while something is due or held;
 never while `checking()`, never for a read-only world, and nothing happens in a layout without this
 mod's stage block. A stage hidden without the host's note (a `.state` file left from an earlier
-install, a lost save) stays hidden until shown by hand (`ctrl-shift-g` with the keys merged, or
-`herdr-app do layout.show --id stage`): see the open decision in `out/VERIFY.md`.
+install, a lost save) stays hidden as far as the collapse goes; the person shows it with the Herd
+panel's Stage strip switch (`stageStrip`, owner decision round 4, docs/DECISIONS.md),
+`ctrl-shift-g` with the keys merged, or `herdr-app do layout.show --id stage`. A stage shown or
+hidden with the switch is the person's like one toggled by hand: the collapse never shows one hidden
+with it, and showing one calls off a running countdown.
 
 ```js
 // main.js (sketch; the integration owner finalises it)
@@ -651,8 +720,14 @@ module. A role reads only
 `host.world`-derived view models via `game/view.js` and herdr live data it needs for chrome
 (e.g. the nameplate reads `panes()` for the real terminal title).
 
-Key commands (`keys.json` section `layout:Down-the-Stack`, optional): `down-the-stack.sheet`
-(focused agent's hero), `down-the-stack.herd`, `down-the-stack.calm`, plus `layout.toggle:stage`.
+Key commands (the repository's `keys.json`, section `layout:Down-the-Stack`, optional; herdr's
+install flow merges it into the person's `keys.json`): `down-the-stack.sheet` (focused agent's
+hero), `down-the-stack.herd`, `down-the-stack.calm`, plus `layout.toggle:stage`. main.js also
+handles `down-the-stack.stage`, `.stage:show` and `.stage:hide` (round 4: the Stage strip switch as
+a command, `host.stageStrip`; herdr's `run_as` hands the mod `"stage:show"` for a
+`down-the-stack.stage:show` key, `window.rs:3088-3112`), bound to no key: `ctrl-shift-g` stays
+`layout.toggle:stage`, which works even with no copy of the mod shown. HOTKEYS is read as own
+properties only, so a command named like an `Object.prototype` member reaches the role.
 `<mod>.<command>` reaches shown copies only, so these work only while this layout shows (keys in a
 `layout:` section apply only there anyway). `mod.json`'s one palette entry, "Down the Stack: Herd
 panel", runs the app command `mod.open {"name": "down-the-stack"}` instead, which works in any
@@ -664,8 +739,8 @@ mode have no palette entry: two `mod.open` entries for one mod would be duplicat
 clicks. There is no "switch to layout" entry: herdr's palette already builds `Layout:
 Down-the-Stack` and drops duplicates.
 herdr shows ids, not our title. These places show the layout file name ("Down-the-Stack") or the
-mod folder name ("down-the-stack"), so both are named after the game and the codename `mapledr`
-appears on no screen; the game's own UI shows neither id (D§1).
+mod folder name ("down-the-stack"), so both are named after the game; the game's own UI shows
+neither id (D§1).
 - Settings layout picker: `LOOKS[name] ?? name` (herdr `defaults/frame/settings/main.js:316`); its
   card picture is the layout's `"preview"` path, loaded, never printed. Settings prints no mod
   folder name in 0.1.17.
@@ -812,7 +887,7 @@ SheetVM / HerdVM typedefs in `ui/sheet.js` / `ui/herdpanel.js` are the full list
   cream pin before its title, 2 elements that go with the stats on bare rooms, detail level 10 and
   up; its tooltip reads "Pinned: … click to unpin"); a pinned hero's tooltip names the header click
   only when its whole room is pinned (`roomGroups(L)` sets `ctx.headerUnpins`), else "Auto on the
-  Career tab's Map card unpins"; `RowVM.mapLabel` ends "(pinned)";
+  Career tab's Map card unpins"; (round 4: `RowVM.mapPin` replaces the "(pinned)" suffix, below);
 - round 3: `PartyVM.groups[].chests` (the folded "Off duty" group's pending chests: a chip "×n";
   older VMs fall back to counting `chestPending` rows); the footer's and `HudVM.digestDot` also
   light while an off-duty chest is within 4 h of opening Unreviewed (`herd.digestDot`); off-duty
@@ -835,6 +910,58 @@ SheetVM / HerdVM typedefs in `ui/sheet.js` / `ui/herdpanel.js` are the full list
   journal kind `unrev`) and the journal line "Chest opened Unreviewed: “…” (half value, no Seals)";
 - round 3: `taskLabel` cuts with `cutText` (never half an emoji), and so does every engine cut of
   outside text; the mock and `npm run qjs` refuse a lone surrogate in any text, as herdr does.
+- round 4 (stage): `MobVM.heroId` (the hero whose lane it is; null for a boss fight's adds); each
+  lane or review mob is kept inside its own slot (`inSlot`: its drawn body, ×1.25 when elite, plus
+  its pacing swing), stepping left instead of spilling into the next slot. The camp chip's tooltip
+  lists at most 12 heroes (waiting, then "· chest waiting", working, resting) and sums up the rest
+  ("…and 18 more (3 with a chest, 15 working)"); its dots follow that order;
+- round 4 (party): `RowVM.waitingForks: [{key, address, name /*"<hero>'s sub-agent"*/, tooltip}]`
+  (`chrome.js waitingForksOf`: blocked sub-agents, with a pane or not): "N need you" lists blocked
+  rows, then these (`ui/party.js waitingList`), a group shows `!` for one, and the rail badge shows
+  for one, with its own click (`showTerminal`, `stop_propagation`). The chip remembers what it
+  showed last (`ui.needYou {key, focus}`), since a peek leaves the focus where it was. Older VMs
+  without the field behave as before. `RowVM.mapPin: null | {tooltip}` (`mapPinMark`: a hollow-head
+  pin beside the level; `slimFit` reserves its 14 px); `mapLabel` no longer ends "(pinned)";
+- round 4 (Herd dot): `PartyVM.footer.digestDot` / `HudVM.digestDot` also light while chests opened
+  Unreviewed since the Digest was last viewed (`herd.digestDot`, `chrome.unseenUnreviewed`), and
+  `footer.digestTip` / `HudVM.digestTip` say why on the Herd button's tooltip;
+- round 4 (Contractors): `chrome.hireLine(world, hero)` (`agents.hireOutlook(...).text`) ends the
+  party row, pane header and stage hero tooltips of a Contractor ("Hired at the next 04:00 game day
+  (today: 0 of 6 hires left)");
+- round 4 (nameplate): `TIERS = {bars: 420, fullBars: 480, name: 360, micro: 200}`, `BAR_PX = {full:
+  {hp: 48, xp: 64}, compact: {hp: 28, xp: 36}}`; `plan()` returns `compact`, and `ui.bars` is
+  `false | "full" | "compact"` (24 px hysteresis, recorded only once the header width is measured).
+  Full bars need the whole title to fit (as round 3); compact ones show from 420 px with the title
+  kept ≥ 40 px (estimated, counting the centre spacer's 8 px gap), the chip in its short form when
+  the full one would cost the title, the name shrinking (≥ 48 px; ≥ 40 px hovered, so the four pane
+  buttons fit). The title's tooltip holds the whole title at every width;
+- round 4 (sheet and Herd panel): `tabs[].tip` (the tab's key and what its badge counts: "Skills · 2
+  skill points to spend · key 2"); `SheetVM.note.tooltip` (a Contractor's banner says when it is
+  hired, `panels hireOf` over `hireOutlook`: "soon" / "day" (today, tomorrow or a date, at 04:00) /
+  "slot" / "never"; the tooltip holds the engine's sentence, what a hire keeps and "Contractors don't
+  get equity."); `sheetView` args `address` and `name`: a Contractor's sheet (negative id) follows
+  its promotion to the hero bound to that terminal with that name (the VM's heroId is the new id;
+  anything else reads "This hero has left the roster."); the header drops a quest that only
+  repeats the space it names; journal kind `hired` has its own line; skill tooltips name a data.js
+  `cue` only when the stage draws it (`DRAWN_CUES`: works_on_my_machine's "404"), and the ladder
+  note says "Capstone passive"; with the master switch off the skills hint reads "Waits: the
+  Autopilot is off in Settings";
+- round 4 (Roster): `RosterVM.groups[].inline` (spaces holding one hero: one block first, no
+  header), `RosterRowVM.space` (that row's space; slim rows draw it in a 118 px first column, 92 px
+  below a 720 px dialog, where the name column narrows 170 → 140 too) and `RosterRowVM.hire: null |
+  {text, tooltip, color}` (a Contractor's moment, which shrinks before the buttons do); the count
+  line ends "· 24 contractors, the next hired tomorrow at 04:00" ("none hired here: this save is
+  read-only");
+- round 4 (Digest): "Opened Unreviewed" first, each line timed ("half value, no Seals · 06:30");
+  `DigestVM.unseen` (`herd.unseenLosses`) and `seen` (an ActionVM for `lossesSeen {}`), which the
+  Herd role runs from a 1 s timer made in init, never in render, only while the Digest tab is shown,
+  once per unseen count (a refused command is not repeated), cancelled in `close()`;
+  `digestDot` / the tab badge read `herd.digestDot`;
+- round 4 (Settings): a row `{key: "stage", label: "Stage strip", chrome: {toggle: "stage"}}` right
+  before the HUD strip row: on while the stage block is shown (`chromeNodes(host)` prefers
+  `host.stageInfo()`, §4, over its own `layout()` walk), a click calls `host.stageStrip(show, id)`
+  and flashes its answer (the switch flips only when ok; without that method it runs
+  `layout.show` / `layout.hide {id}`), disabled with "This layout has no stage" without one.
 
 `sheetView`/`herdView` shapes are owned jointly by the engine-world author and the sheet/herd
 UI author; their exact fields are defined in `game/view.js` JSDoc, which is the source of truth.
@@ -931,7 +1058,16 @@ Built from divs (no image needed): 40×48 at scale 1.
   or show the copies of that mod block), failing with a toast for a node the layout lacks;
   `notify()` records its payload, validates its action and reports a call while `checking()`;
   `checking()` controllable; `readTextFile`/`writeTextFile` against an in-memory FS; a fixture's
-  `runError(name, args)` hook makes a `run()` throw (a refused `layout.hide`).
+  `runError(name, args)` hook makes a `run()` throw (a refused `layout.hide`). `exec` records its
+  calls, rejects a non-positive timeout as herdr's `exec_limit` does, and runs `ls` and `rm` on the
+  in-memory FS (a fixture's `exec` replaces them; throwing makes it reject). The mod itself runs no
+  program (round 4: keepAside rotates instead of listing and removing, §4), so a test can assert
+  `exec` was never called.
+- `tools/mock/gates.mjs` (round 4): `HERDR_SRC` (`$HERDR_SRC`, else a `herdrdev/herdr-app` checkout
+  next to the repository, `config.mjs`), `herdrSource()` / `herdrMissing()`, and `skipGate(t, what,
+  why)`: a test that cannot run (no herdr source, no Playwright, no QuickJS devDependencies) prints
+  one line, `SKIPPED GATE: <what> (<why>); STRICT_GATES=1 makes this a failure`, and skips;
+  `STRICT_GATES=1` fails it instead. Every such gate in the tests goes through it.
 - Per-VM globals: a mod's registered `Symbol.for("<mod>.…")` slots on `globalThis` resolve per
   mock VM through a Proxy in `globalThis`'s prototype chain (to the VM whose copy's code runs,
   following awaits, else the VM entered last), so two windows' hosts never see each other; they
@@ -999,7 +1135,22 @@ review, not pixel-exact.
   disk are exactly the generator's output, and every effect sprite is drawn by the mod. It also
   holds README.md and RECIPE.md to the code: the recipe's section order, the install targets, the
   repo paths they name, the herdr functions the mod imports, the commands it runs, the keys of
-  `keys.example.json`, the save files `host.js` writes and RECIPE's count of generated SVGs.
+  `keys.json`, the save files `host.js` writes and RECIPE's count of generated SVGs. Round 4: it
+  also checks that no mob in the first two zones is a snail, mushroom, slime or pig (originality).
+- layout (`test/layout.test.mjs`): the layout against herdr's shipped `main.json`, and `keys.json`
+  read by a port of herdr's `keys.rs` (`parse`, `tab`, `gone_mod`, `valid_action`, object bindings):
+  no problem, no dropped binding, every action a real command (herdr's from `src/commands.rs` when
+  `HERDR_SRC` has it, else `tools/mock/herdr-commands.md`, cross-checked) or one main.js handles
+  (parsed from HOTKEYS); the package name, the two identical MIT licence files, and the NOTICE's
+  claims (TITLE_MARK still equals herdr's regex when the source is there).
+- end to end (`test/main-e2e.test.mjs`, round 4): main.js and host.js in the mock with live data and
+  the real layout, every role on one graph, for the owner's decisions: a Contractor told when it is
+  hired and promoted at the 04:00 turn; the Stage strip switch (found by content, disabled without
+  a stage); a blocked pane-less sub-agent in "N need you", the group `!` and the rail badge, with
+  `terminal.peek`; compact nameplate bars at 420 px with the title's tooltip.
+- herdr gates: with `HERDR_SRC` missing, the tests that read herdr's source skip with one line each
+  (`gates.mjs`); `STRICT_GATES=1 npm test` makes them fail. `test/fixtures/saves` also holds saves
+  written by `a4ea9ab` (the build the owner ran) and `c041909`.
 - wall-clock bounds hold on a busy machine: the engine tests (`test/helpers/perf.mjs within()`)
   and the stage tests apply their strict bounds only with `PERF=1` (else 10×, and the measured time
   is always printed); the chrome and panels tests judge a render the mock flags by its best of 5,
@@ -1018,7 +1169,9 @@ problem (a throw, an error chip, a render/view/task/host/shim error, a fuzz fail
 mismatch, a failed reload or load, a save round trip that is not identical, an unmapped role, a
 failed phase) or a time past one of herdr's budgets (render 50 ms, callbacks 500 ms, module
 evaluation 500 ms). Half a budget and the tick p95 over the ~5 ms target are warnings (exit 0 unless
-`--strict`). Exit 2 on a usage error: an unknown argument or phase, a missing value, a
+`--strict`). The reload phase allows each copy main.js's one timer, plus the Herd panel's own
+(`ROLE_TIMERS = {herd: 1}`: its Digest `lossesSeen` timer), and `runTimer` fires every repeating
+timer of a copy. The shim's `exec` exists for parity; the mod never calls it. Exit 2 on a usage error: an unknown argument or phase, a missing value, a
 non-positive `--ticks` / `--seconds` / `--long`.
 
 ---
@@ -1089,8 +1242,12 @@ Palette per zone from D§9.2; rarity colours D§8.2; reserved colours D§11.1.
 6. Reduced motion: herdr exposes no OS reduced-motion flag; Calm mode (D§11.15) covers it and
    additionally disables loops.
 7. D§3.4 Contractors are created in memory and never saved (as designed); Rebind is in the sheet.
+   Round 4 (owner decision "promote only", docs/DECISIONS.md): a live Contractor is promoted to a
+   saved hero when hiring reopens (`agents.promoteContractors`, §3.4; D§3.4 as built).
 8. The stage height setting maps to `layout.resize {id, px}` on the layout node whose content is
    this mod's stage (any id, as `host.js stageNode` finds it; disabled in a layout without one).
+   Round 4: the Stage strip switch shows and hides that node (`host.stageStrip`, §4), whoever hid
+   it.
 9. D§5.7 map choice: Power Level is class-biased with the reference kit (Refactorer/Forkbinder
    3–4 below level, Hotfixer 3–6 above), so autopilot picks maps by hero level: the deepest open map
    whose mid level is ≤ L + 1 (by L after a crash in the last 10 minutes; the crash rule still drops
@@ -1106,3 +1263,7 @@ Palette per zone from D§9.2; rarity colours D§8.2; reserved colours D§11.1.
     never starts one); the autopilot master switch keeps the per-system switches, and every
     automatic re-spend of skill points (auto-learn, respec, a class change) obeys it and the
     herd's auto-learn switch.
+13. D§13.1 "`save.broken-<ms>` for later incidents" → round 4: `save.broken-1` to `-3` (and the same
+    for `save.unsaved`) after the first incident's `save.broken`, the oldest giving way (§4
+    `keepAside`). herdr's mod API cannot list or delete files without `exec`, and the mod runs no
+    program, so the bound comes from fixed names.

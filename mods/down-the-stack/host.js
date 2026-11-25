@@ -27,8 +27,9 @@
 //    wrote the file) reloads their save instead of clobbering it, but a text this host wrote
 //    itself (a write that landed while its promise never came back) is recognised as its own;
 //  - nothing the player had is thrown away: a save that does not load is kept aside (save.broken,
-//    then save.broken-<ms>), a save whose only fault is its checksum is loaded anyway, an unreadable
-//    save.json is read again a few times and then on the 30 s beat;
+//    then save.broken-1..3: the first incident and the newest three, keepAside; no program runs), a
+//    save whose only fault is its checksum is loaded anyway, an unreadable save.json is read again a
+//    few times and then on the 30 s beat;
 //  - a world that loaded read-only (a save from a newer version, rt.readOnly) is never written, nor
 //    is such a save found when an unreadable save.json reads again (it is opened read-only then);
 //  - save trouble is shown to the player (saveStatus(): the views get it as args.save);
@@ -38,7 +39,8 @@
 //  - "collapse the stage when nothing is working" (D§11.15) hides and shows the layout's stage
 //    block on transitions only (stageAuto), and shows only a stage it hid itself (this window's
 //    own note, whatever another window saves); a restart or hot reload inside the minute goes on
-//    with the countdown (herd.cfg.idleAt).
+//    with the countdown (herd.cfg.idleAt). The person shows or hides the stage whoever hid it with
+//    the Herd panel's Stage strip switch or <mod>.stage (stageStrip): the stage is theirs then.
 //
 // Public surface (roles and main.js use only these):
 //   getHost()                         the singleton
@@ -48,7 +50,7 @@
 //   host.pump(nowMs) -> boolean       ≥ 900 ms apart: snapshot → world.tick → maybeSave → broadcast
 //   host.broadcast()                  run("down-the-stack.tick"): every shown copy re-renders
 //   host.claim(cmd) -> boolean        the first copy to claim a key command within 300 ms wins
-//   host.hotkey(name)                 down-the-stack.sheet / .herd / .calm, handled once, centrally
+//   host.hotkey(name)                 down-the-stack.sheet / .herd / .calm / .stage[:show|:hide], once, centrally
 //   host.command(name, args)          world.command, then version++ and broadcast; returns {ok,...}
 //   host.view(kind, args)             view model (memoised per world version), null while loading
 //   host.openSheet(heroId, opts) / host.openHerd(tab) / host.toggleSheet / host.toggleHerd /
@@ -59,6 +61,7 @@
 //   host.viewError(kind)              the message of a view builder that threw (else null)
 //   host.mayBeShown()                 can a copy be shown now (layout(), open tab, dialogs)?
 //   host.stageAuto(nowMs)             collapse / restore the stage block (pump and the setting)
+//   host.stageInfo() / host.stageStrip(show?)  the stage block's {id, hidden, held}; show / hide / toggle it
 //   host.debugText() / host.takeUnreported() error counts for the debug tooltip / main.js
 
 import {
@@ -96,6 +99,8 @@ const PREWARM_MAX = 16;       // view models rebuilt in the pump (timer budget) 
 const PREWARM_SKIP_MS = 150;  // ...unless the tick itself was already slow
 const COLLAPSE_AFTER_MS = 60000; // nothing working this long (after something did) collapses the stage
 const RESUME_IDLE_MS = 10000;  // a countdown carried over a restart still waits this long in the new session
+const STAGE_WANT_MS = 2000;    // stageInfo() answers the state stageStrip() asked for until layout() has it
+const KEEP_ASIDE = 3;          // save.broken-1..3 / save.unsaved-1..3: the newest incidents after the first (keepAside)
 const POSTED_KEEP = 32;       // milestone keys this host posted (a second guard against a repeat)
 // The always-visible roles, drawn by many copies every second (a dialog is one copy whose args
 // follow the pointer: it builds its own view in render).
@@ -294,6 +299,7 @@ export class GameHost {
     this.idleSince = null;     // stageAuto: when the stage may collapse (armed by a transition)
     this.idleNoted = undefined; // stageAuto: the idle start last written to herd.cfg.idleAt (undefined: not yet)
     this.hidStage = null;      // stageAuto: this window's stage is hidden by this host (null: from cfg.collapsed)
+    this.stageWant = null;     // stageStrip: {id, hidden, at} asked of herdr, until layout() shows it
   }
 
   /** The world can be shown (loaded, or put in place by a fixture). */
@@ -671,26 +677,53 @@ export class GameHost {
   }
 
   /**
-   * Keep a save that did not load aside without overwriting anything: save.broken the first time
-   * (D§13.1), save.broken-<ms> when an earlier incident's file is there. Each text once.
+   * Keep a save that did not load aside: save.broken the first time (D§13.1), then save.broken-1,
+   * -2 and -3 (keepAside). Each text once.
    */
   async keepBroken(text) {
     return this.keepAside(text, this.paths().broken);
   }
 
+  /**
+   * Keeps a text aside under `stem` (save.broken, save.unsaved) without running a program or
+   * listing the folder: herdr's mod API can do neither without exec, and the mod runs no programs.
+   * The first incident's `<stem>` is only ever created, never overwritten. Later incidents fill
+   * `<stem>-1`, `-2`, `-3` (created, oldest first); once all three hold a text, the oldest is
+   * dropped: -1 takes -2's text, -2 takes -3's and the new text goes to -3, each write checked
+   * against the text just read (writeTextFile replaces a file atomically). So a kind never holds
+   * more than its first incident and the newest three. A text already kept under any of the four
+   * names is not written again. Returns the path the text went to, or null.
+   */
   async keepAside(text, stem) {
     if (this.memoryOnly || typeof text !== "string" || !text) return null;
     if (this.keptAside.includes(text)) return null;
     this.keptAside.push(text);
     if (this.keptAside.length > 8) this.keptAside.shift();
-    const stamp = Date.now();
-    for (const p of [stem, `${stem}-${stamp}`, `${stem}-${stamp}-${this.keptAside.length}`]) {
+    const names = [stem];
+    for (let i = 1; i <= KEEP_ASIDE; i++) names.push(`${stem}-${i}`);
+    const texts = [];
+    for (const p of names) {
+      let t;
+      try { t = await readTextFile(p); } catch (e) { t = undefined; /* unknown: never written over */ }
+      if (t === text) return p;
+      texts.push(t);
+    }
+    for (let i = 0; i < names.length; i++) {
+      if (texts[i] !== null) continue;
       try {
-        await writeTextFile(p, text, null);
-        return p;
+        await writeTextFile(names[i], text, null);
+        return names[i];
+      } catch (e) { /* taken meanwhile: try the next name */ }
+    }
+    const ring = texts.slice(1);
+    if (ring.every((t) => typeof t === "string")) {
+      try {
+        for (let i = 1; i < names.length - 1; i++) await writeTextFile(names[i], texts[i + 1], texts[i]);
+        await writeTextFile(names[names.length - 1], text, texts[names.length - 1]);
+        return names[names.length - 1];
       } catch (e) {
-        // there already (create-only): the same text from an earlier session, or another file
-        try { if ((await readTextFile(p)) === text) return p; } catch (e2) { /* try the next name */ }
+        this.error("keep a damaged save", e);
+        return null;
       }
     }
     this.error("keep a damaged save", `could not keep it aside as ${stem}`);
@@ -1102,6 +1135,12 @@ export class GameHost {
       const r = this.command("setting", { key: "calm", value: !cfg.calm });
       return r && r.ok ? (cfg.calm ? "calm" : "lively") : "none";
     }
+    // down-the-stack.stage (toggle), .stage:show, .stage:hide (keys.json `name:value`: herdr hands
+    // the mod "stage:show", window.rs run_as): the Settings tab's Stage strip switch, as a command
+    if (name === "stage" || name === "stage:show" || name === "stage:hide") {
+      const r = this.stageStrip(name === "stage" ? undefined : name === "stage:show");
+      return r && r.ok ? (r.hidden ? "hidden" : "shown") : "none";
+    }
     return "none";
   }
 
@@ -1399,6 +1438,7 @@ export class GameHost {
     this.noteIdle(world);
     if (hidden) return null; // hidden by hand already: not ours to show later
     if (!this.layoutCmd("layout.hide", node.id)) return null;
+    this.stageWant = null; // what the Stage strip switch asked is history now
     this.holdStage(true);
     return "hidden";
   }
@@ -1425,6 +1465,7 @@ export class GameHost {
 
   showStage(node) {
     if (!this.layoutCmd("layout.show", node.id)) return null;
+    this.stageWant = null;
     this.holdStage(false);
     return "shown";
   }
@@ -1437,7 +1478,7 @@ export class GameHost {
   holdStage(held) {
     this.hidStage = held;
     const cfg = this.world.state.herd.cfg || {};
-    if (!!cfg.collapsed === held) return;
+    if (!!cfg.collapsed === held || this.world.rt.readOnly) return;
     try {
       const r = worldCommand(this.world, "setting", { key: "collapsed", value: held }, Date.now());
       if (r && r.ok) {
@@ -1450,14 +1491,88 @@ export class GameHost {
     }
   }
 
-  layoutCmd(name, id) {
+  layoutCmd(name, id, where) {
     try {
       run(name, { id });
       return true;
     } catch (e) {
-      this.error(`stage collapse (${name})`, e);
+      this.error(`${where || "stage collapse"} (${name})`, e);
       return false;
     }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // The stage strip shown or hidden by the person (owner decision, round 4)
+
+  /**
+   * The layout's stage block as the Settings tab shows it: {id, hidden, held} (held: the collapse
+   * hid it and owes it a layout.show), or null when the layout has none, while checking() or from
+   * a retired host. Found by content (this mod's {role: "stage"}, any id), as stageAuto finds it.
+   * herdr runs a mod's run() after the calling callback returns, so for a moment after
+   * stageStrip() layout() still shows the old state: the state asked for is answered until
+   * layout() has it (at most STAGE_WANT_MS).
+   */
+  stageInfo() {
+    if (this.memoryOnly || this.retired || live(checking, true)) return null;
+    const node = stageNode(live(layout, null));
+    if (!node) return null;
+    let hidden = node.hidden === true;
+    const want = this.stageWant;
+    if (want) {
+      const age = Date.now() - want.at;
+      if (want.id !== node.id || want.hidden === hidden || !(age >= 0 && age < STAGE_WANT_MS)) this.stageWant = null;
+      else hidden = want.hidden;
+    }
+    return { id: node.id, hidden, held: this.stageHeld() };
+  }
+
+  /**
+   * Whether this window's stage is hidden by the collapse, which owes it a layout.show: this
+   * host's note, or before its first stageAuto (right after a start) the saved herd.cfg.collapsed
+   * stageAuto starts from.
+   */
+  stageHeld() {
+    if (this.hidStage != null) return this.hidStage === true;
+    const herd = this.world && this.world.state ? this.world.state.herd : null;
+    return !!(herd && herd.cfg && herd.cfg.collapsed === true);
+  }
+
+  /**
+   * Shows (`show` true) or hides (false) the layout's stage block, or toggles it (no `show`): the
+   * Herd panel's "Stage strip" switch and the `<mod>.stage[:show|:hide]` command. It acts whoever
+   * hid the stage (the collapse, the person, herdr's .state file from an earlier install), on the
+   * node found by content (`id`, what the caller saw, is not needed). Coexists with "collapse the
+   * stage" (D§11.15): a stage shown or hidden here is the person's, so the collapse drops its hold
+   * (herd.cfg.collapsed and this window's note): it never shows a stage hidden here, and a stage
+   * shown here is not hidden again until work next stops (a countdown already running is called
+   * off). Never while checking() or from a retired host; refused while the save loads (the
+   * collapse's saved note is not known yet). Returns {ok, id?, hidden?, msg?, error?}.
+   */
+  stageStrip(show, id) {
+    if (this.memoryOnly || live(checking, true)) return { ok: false, error: "Not while herdr-app check runs" };
+    if (this.retired) return { ok: false, error: "Down the Stack was just reloaded: try again" };
+    if (!this.ready) return { ok: false, error: "Still loading the save" };
+    const info = this.stageInfo();
+    if (!info) return { ok: false, error: "This layout has no stage" };
+    const wantShown = typeof show === "boolean" ? show : info.hidden;
+    const held = this.stageHeld();
+    if (wantShown === info.hidden) {
+      if (!this.layoutCmd(wantShown ? "layout.show" : "layout.hide", info.id, "stage strip")) {
+        return { ok: false, error: `herdr refused to ${wantShown ? "show" : "hide"} the stage` };
+      }
+      this.stageWant = { id: info.id, hidden: !wantShown, at: Date.now() };
+    }
+    // the person's now: no countdown runs on, and nothing is owed a layout.show
+    if (this.idleSince != null) {
+      this.idleSince = null;
+      this.noteIdle(this.world);
+    }
+    this.holdStage(false);
+    const cfg = this.world.state.herd.cfg || {};
+    const msg = wantShown && held && cfg.collapse === true
+      ? "Stage strip shown. “Collapse the stage” hides it again a minute after work next stops."
+      : null;
+    return msg ? { ok: true, id: info.id, hidden: !wantShown, msg } : { ok: true, id: info.id, hidden: !wantShown };
   }
 
   /**

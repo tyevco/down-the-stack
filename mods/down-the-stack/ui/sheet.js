@@ -119,12 +119,14 @@
  * @typedef {Object} SheetVM
  * @property {number} heroId
  * @property {string} tab       the tab this VM fills (falls back when the asked one is not offered)
- * @property {Array<{id:string, label:string, badge:string|null}>} tabs   badge: "2" (SP), "!" …
+ * @property {Array<{id:string, label:string, badge:string|null, tip?:string|null}>} tabs   badge: "2" (SP), "!" …;
+ *                              tip: what the badge means, for the tab's tooltip ("2 skill points to spend")
  * @property {boolean} calm     no blinking face, no bob
  * @property {string|null} [missing]   the hero is gone: only this text and a close button show
  * @property {SheetHeaderVM} header
- * @property {null|{text:string, color:string}} note   a line under the header ("Off duty since
- *                              14:02 · its chests wait", "Contractor: not saved")
+ * @property {null|{text:string, color:string, tooltip?:string|null}} note   a line under the header
+ *                              ("Off duty since 14:02 · its chests wait", "Contractor: hired tomorrow at
+ *                              04:00 · not saved until then; …"); tooltip: the whole story (the line is cut)
  * @property {GearVM|null} gear       only the shown tab's part is filled; the others are null
  * @property {SkillsVM|null} skills
  * @property {StatsVM|null} stats
@@ -449,7 +451,10 @@ function statBar(label, w, frac, color, t, text, tip, extra) {
     .child(div().font_family(MONO).text_size(10.5).text_color(t.muted).whitespace_nowrap().child(text));
 }
 
-/** Tab strip. tabs: [{id, label, badge}], icons: {id: maskPath}. */
+/**
+ * Tab strip. tabs: [{id, label, badge, tip?}], icons: {id: maskPath}. The tooltip names the tab's
+ * key ("Digest · 3 new since you last looked · key 6"): a bare "(6)" beside a badge read as a count.
+ */
 export function tabBar(prefix, tabs, current, t, icons, onPick) {
   return h_flex().flex_none().h(34).px(10).gap(2).items_end().border_b(1).border_color(t.border)
     .children(tabs.map((tb, i) => {
@@ -460,7 +465,7 @@ export function tabBar(prefix, tabs, current, t, icons, onPick) {
       return h_flex().id(`${prefix}-tab-${tb.id}`).relative().h(34).px(10).gap(6).items_center().cursor_pointer().rounded_t(6)
         .text_size(12.5).font_medium().text_color(fg)
         .hover((s) => s.bg(t.hover))
-        .tooltip(`${tb.label} (${i + 1})`)
+        .tooltip([tb.label, tb.badge ? tb.tip : null, `key ${i + 1}`].filter(Boolean).join(" · "))
         .on_click((_e, cx) => { cx.stop_propagation(); onPick(tb.id, cx); })
         .children(kids([
           icons?.[tb.id] ? svg(art(icons[tb.id])).w(13).h(13).flex_none().text_color(fg) : null,
@@ -734,8 +739,9 @@ export function renderSheet(vm, env) {
 
   return root
     .child(header(vm, env, ui, t, close, width))
-    .when(Boolean(vm.note), (e) => e.child(h_flex().flex_none().mx(16).mb(6).px(10).h(24).gap(6).items_center().rounded(6)
+    .when(Boolean(vm.note), (e) => e.child(h_flex().id("sh-note").flex_none().mx(16).mb(6).px(10).h(24).gap(6).items_center().rounded(6)
       .bg(alpha(vm.note.color, t.light ? 0.12 : 0.14)).text_size(11.5).text_color(ink(vm.note.color, t))
+      .when(Boolean(vm.note.tooltip), (x) => x.tooltip(vm.note.tooltip))
       .child(div().truncate().child(vm.note.text))))
     .child(tabBar("sh", vm.tabs ?? [], vm.tab, t, TAB_ICONS, (id, cx) => pickTab(ui, id, cx)))
     .child(body.children(content))
@@ -1240,6 +1246,8 @@ export default class Sheet {
     this.host = host ?? null;
     const p = this.props;
     this.heroId = p.heroId ?? null;
+    this.address = null; // the terminal it plays on (a Contractor's sheet follows its promotion)
+    this.name = null;    // and its name: only a hero of that name there is the promoted Contractor
     this.ui = newUi(SHEET_TABS.includes(p.tab) ? p.tab : LAST.sheet);
     if (Number.isFinite(p.focus)) { this.ui.selected = p.focus; this.ui.tab = "gear"; }
     // After a successful equip / squash, drop selections that no longer exist.
@@ -1269,9 +1277,22 @@ export default class Sheet {
 
   render(cx) {
     const host = this.host;
-    const vm = this.heroId == null ? null
-      : host?.view?.("sheet", { heroId: this.heroId, tab: this.ui.tab, filter: filterArgs(this.ui) }) ?? null;
+    // a Contractor's sheet also sends its terminal and name: promoted to the roster (round 4) it
+    // takes a new hero id, which the VM then carries, and the sheet follows it
+    const args = { heroId: this.heroId, tab: this.ui.tab, filter: filterArgs(this.ui) };
+    if (this.heroId < 0 && this.address) {
+      args.address = this.address;
+      if (this.name) args.name = this.name;
+    }
+    const vm = this.heroId == null ? null : host?.view?.("sheet", args) ?? null;
     if (vm && vm.tab && SHEET_TABS.includes(vm.tab)) this.ui.tab = vm.tab;
+    if (vm && !vm.missing) {
+      if (Number.isInteger(vm.heroId) && vm.heroId !== this.heroId) this.heroId = vm.heroId;
+      const addr = vm.header?.focus?.address;
+      if (typeof addr === "string" && addr) this.address = addr;
+      const name = vm.header?.name;
+      if (typeof name === "string" && name) this.name = name;
+    }
     return renderSheet(vm, {
       width: this.ui.size?.w ?? 760, height: this.ui.size?.h ?? 500, zoom: zoom(), theme: dialogTokens(), host,
       act: (name, args) => host?.command?.(name, args), ui: this.ui, overlay: this.props.overlay ?? null,

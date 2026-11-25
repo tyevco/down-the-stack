@@ -104,6 +104,33 @@ function writeNow(p, text, expected) {
   return Promise.resolve(null);
 }
 
+/**
+ * herdr's exec (a program run with arguments, no shell), as tools/mock/herdr.mjs machineExec:
+ * `ls -1 [--] <dir>` and `rm [-f] [--] <file>...` on the shim's files (the save folder pruning,
+ * host.js prune); any other program answers code 0 and no output. Never runs anything.
+ */
+export function exec(command, args, options) {
+  S.calls.exec = (S.calls.exec || 0) + 1;
+  const t = options && typeof options === "object" ? options.timeout : undefined;
+  if (t != null && !(typeof t === "number" && isFinite(t) && t > 0)) throw new TypeError("timeout must be a positive number of milliseconds");
+  const list = Array.isArray(args) ? args.map(String) : [];
+  const at = list.indexOf("--");
+  const operands = at >= 0 ? list.slice(at + 1) : list.filter((a) => a.charAt(0) !== "-");
+  let r = { code: 0, stdout: "", stderr: "" };
+  if (command === "ls") {
+    const out = [];
+    for (const d of operands) {
+      const prefix = d.replace(/\/+$/, "") + "/";
+      for (const k of S.files.keys()) if (k.startsWith(prefix) && k.indexOf("/", prefix.length) < 0) out.push(k.slice(prefix.length));
+    }
+    out.sort();
+    r = { code: 0, stdout: out.length ? out.join("\n") + "\n" : "", stderr: "" };
+  } else if (command === "rm") {
+    for (const f of operands) S.files.delete(f);
+  }
+  return hostCall(Promise.resolve(r));
+}
+
 export function run(name, args) {
   if (typeof name !== "string") throw new TypeError("run(name, args) expects a command name string");
   S.calls.run++;

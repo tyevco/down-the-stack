@@ -574,6 +574,174 @@ test("collapse never acts while checking(), for a read-only world, or in a layou
   assert.equal(runs("layout.hide").length, 0);
 });
 
+// ---------------------------------------------------------------------------------------------
+// the Stage strip switch (owner decision, round 4): host.stageStrip / stageInfo, <mod>.stage
+
+test("Stage strip: shows a stage the collapse hid and takes it from the collapse; it hides again only after work next stops", async () => {
+  const { host, party, set } = await collapseRig();
+  const t = M.mockNow();
+  host.stageAuto(t);
+  set("resting");
+  host.stageAuto(t + 1000);
+  assert.equal(host.stageAuto(t + 62000), "hidden");
+  assert.deepEqual(host.stageInfo(), { id: "stage", hidden: true, held: true });
+  M.calls().run.length = 0;
+  const r = host.stageStrip(true, "stage");
+  assert.equal(r.ok, true);
+  assert.equal(r.hidden, false);
+  assert.match(r.msg, /hides it again a minute after work next stops/);
+  assert.deepEqual(runs("layout.show").map((c) => c.args), [{ id: "stage" }]);
+  assert.equal(stageNode().hidden, false);
+  assert.equal(host.world.state.herd.cfg.collapsed, false, "nothing owed: the stage is the person's");
+  assert.deepEqual(host.stageInfo(), { id: "stage", hidden: false, held: false });
+  // nothing works still: not hidden again
+  assert.equal(host.stageAuto(t + 63000), null);
+  assert.equal(host.stageAuto(t + 300000), null);
+  assert.equal(runs("layout.hide").length, 0);
+  // the next stop of work
+  set("questing");
+  host.stageAuto(t + 301000);
+  set("resting");
+  host.stageAuto(t + 302000);
+  assert.equal(host.stageAuto(t + 363000), "hidden");
+  assert.deepEqual(party.errors, []);
+});
+
+test("Stage strip: hidden here, the collapse never shows it, even one the collapse had hidden", async () => {
+  const { host, set } = await collapseRig();
+  const t = M.mockNow();
+  // hidden by the switch while heroes work
+  const r = host.stageStrip(false);
+  assert.equal(r.ok, true);
+  assert.equal(r.hidden, true);
+  assert.equal(r.msg, undefined, "the panel's own words");
+  assert.deepEqual(runs("layout.hide").map((c) => c.args), [{ id: "stage" }]);
+  set("resting");
+  host.stageAuto(t + 1000);
+  assert.equal(host.stageAuto(t + 62000), null, "already hidden: not the collapse's");
+  set("questing");
+  assert.equal(host.stageAuto(t + 63000), null);
+  assert.equal(stageNode().hidden, true);
+  assert.equal(runs("layout.show").length, 0);
+  // the collapse hides it; the person says hide (.stage:hide) while it is hidden: no command, the hold goes
+  host.stageStrip(true);
+  set("resting");
+  host.stageAuto(t + 64000);
+  assert.equal(host.stageAuto(t + 125000), "hidden");
+  assert.equal(host.world.state.herd.cfg.collapsed, true);
+  M.calls().run.length = 0;
+  assert.equal(host.stageStrip(false).ok, true);
+  assert.equal(M.calls().run.length, 0, "already hidden");
+  assert.equal(host.world.state.herd.cfg.collapsed, false);
+  set("questing");
+  assert.equal(host.stageAuto(t + 126000), null, "kept hidden: the person asked");
+  assert.equal(stageNode().hidden, true);
+});
+
+test("Stage strip: shown while a countdown runs (the stage hidden by hand), the countdown is called off", async () => {
+  const { host, set } = await collapseRig();
+  const t = M.mockNow();
+  host.stageAuto(t);
+  herdr.run("layout.hide", { id: "stage" }); // by hand (ctrl-shift-g)
+  set("resting");
+  host.stageAuto(t + 1000);
+  assert.ok(host.idleSince != null, "armed: the last hero stopped");
+  assert.equal(host.stageStrip(true).ok, true);
+  assert.equal(host.idleSince, null);
+  assert.equal(host.world.state.herd.cfg.idleAt, undefined, "the saved countdown goes too");
+  assert.equal(host.stageAuto(t + 62000), null, "not hidden a few seconds after the person showed it");
+  assert.equal(stageNode().hidden, false);
+});
+
+test("Stage strip: the stage is found by content (any id); refused without a stage, while checking() or loading; stageInfo answers the asked state until layout() has it", async () => {
+  const { host } = await collapseRig({ collapse: false });
+  const layout = JSON.parse(JSON.stringify(M.fixture().layout));
+  (function rename(n) { if (n.id === "stage") n.id = "dungeon"; for (const k of n.children ?? []) rename(k); })(layout);
+  M.updateFixture({ layout });
+  M.calls().run.length = 0;
+  assert.deepEqual(host.stageInfo(), { id: "dungeon", hidden: false, held: false });
+  assert.equal(host.stageStrip(undefined).hidden, true, "no show: a toggle");
+  assert.deepEqual(M.calls().run.map((c) => [c.name, c.args]), [["layout.hide", { id: "dungeon" }]]);
+  // herdr runs a mod's command after the callback: layout() may still show the old state
+  const after = M.fixture().layout;
+  M.updateFixture({ layout });
+  assert.equal(host.stageInfo().hidden, true, "the state asked for, while layout() catches up");
+  assert.equal(host.stageStrip().hidden, false, "a second toggle goes from the asked state");
+  M.updateFixture({ layout: after });
+  M.setClock(M.mockNow() + 2500);
+  assert.equal(host.stageInfo().hidden, true, "then layout() again");
+  // a refused command is not recorded
+  M.updateFixture({ runError: (name) => (name === "layout.show" ? new Error("no node") : null) });
+  const no = host.stageStrip(true);
+  assert.equal(no.ok, false);
+  assert.match(no.error, /refused/);
+  M.updateFixture({ runError: null });
+  // no stage in this layout
+  M.updateFixture({ layout: { id: "root", type: "row", children: [] } });
+  M.calls().run.length = 0;
+  assert.equal(host.stageInfo(), null);
+  assert.deepEqual(host.stageStrip(true), { ok: false, error: "This layout has no stage" });
+  assert.equal(M.calls().run.length, 0);
+  // checking(): never
+  M.resetState();
+  const chk = await mount({ role: "stage" }, { fixture: FX.demoFixture("mid"), checking: true });
+  const hc = await hostOf(chk);
+  assert.equal(hc.stageInfo(), null);
+  assert.equal(hc.stageStrip(false).ok, false);
+  assert.equal(M.calls().run.length, 0);
+  // still loading: the collapse's saved note is not known yet
+  M.resetState();
+  let hold = true;
+  const slow = await mount({ role: "party" }, { graph: `ld-${++graphN}`, fixture: { ...FX.demoFixture("mid"), readError: () => (hold ? new Error("busy") : null) } });
+  const hl = await hostOf(slow);
+  assert.equal(hl.ready, false);
+  assert.deepEqual(hl.stageStrip(false), { ok: false, error: "Still loading the save" });
+  assert.equal(runs("layout.hide").length, 0);
+  hold = false;
+});
+
+test("Stage strip right after a restart (before the first pump): the collapse's saved hold is known, so showing the stage says it hides again", async () => {
+  const text = saveWith("mid", (w) => Object.assign(w.state.herd.cfg, { collapse: true, collapsed: true }));
+  M.resetState();
+  const layout = JSON.parse(JSON.stringify(FX.demoFixture("mid").layout));
+  (function hide(n) { if (n.id === "stage") n.hidden = true; for (const k of n.children ?? []) hide(k); })(layout);
+  const party = await mount({ role: "party" }, { graph: `sr-${++graphN}`, fixture: { ...FX.demoFixture("mid"), layout }, files: { [SAVE]: text } });
+  const host = await hostOf(party);
+  assert.equal(host.ready, true);
+  assert.equal(host.hidStage, null, "no stageAuto yet");
+  assert.deepEqual(host.stageInfo(), { id: "stage", hidden: true, held: true }, "held: from the saved herd.cfg.collapsed");
+  const r = host.stageStrip(true);
+  assert.equal(r.ok, true);
+  assert.match(r.msg ?? "", /hides it again a minute after work next stops/);
+  assert.equal(host.world.state.herd.cfg.collapsed, false);
+  assert.deepEqual(host.stageInfo(), { id: "stage", hidden: false, held: false });
+  assert.deepEqual(party.errors, []);
+});
+
+test("Stage strip as a command: down-the-stack.stage toggles, .stage:show / .stage:hide set it, handled once by the copies that get it", async () => {
+  const { host, party } = await collapseRig({ collapse: false });
+  M.calls().run.length = 0;
+  await M.sendCommand("stage");
+  assert.deepEqual(M.calls().run.filter((c) => c.name.startsWith("layout.")).map((c) => [c.name, c.args]), [["layout.hide", { id: "stage" }]], "one copy acts (claim)");
+  assert.equal(stageNode().hidden, true);
+  await M.tickAll(400);
+  await M.sendCommand("stage:hide");
+  assert.equal(runs("layout.hide").length, 1, "already hidden");
+  await M.tickAll(400);
+  await M.sendCommand("stage:show");
+  assert.deepEqual(runs("layout.show").map((c) => c.args), [{ id: "stage" }]);
+  assert.equal(stageNode().hidden, false);
+  // keys.json's `name:value` reaches the mod as "stage:hide" (herdr window.rs run_as)
+  await M.tickAll(400);
+  herdr.run("down-the-stack.stage:hide");
+  await M.flush();
+  assert.equal(stageNode().hidden, true);
+  assert.equal(host.hotkey("stage"), "shown");
+  // a command named like an Object.prototype member is no hotkey (it goes to the role)
+  await M.sendCommand("constructor");
+  assert.deepEqual(party.errors, []);
+});
+
 test("a command gives the engine the local time zone, so a milestone a click raises before the first tick counts at once", async () => {
   M.resetState();
   const mod = await mount({ role: "party" }, { fixture: FX.demoFixture("mid"), files: { [SAVE]: saveWith("mid", notifyOn) } });

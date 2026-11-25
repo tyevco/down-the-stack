@@ -125,11 +125,18 @@
  * @property {string} seen      "working 12m" / "seen 3d ago"
  * @property {{colors:object, face:string, programIcon:object|null}} portrait   party.js portrait input
  * @property {ActionVM|null} retire   Lv 30+ only (others null)
+ * @property {string|null} space   the row's space, drawn in the row when its group has no header
+ *                              (a space with one hero, round 4); null under a space's header
+ * @property {null|{text:string, tooltip:string, color:string}} hire   a Contractor: when it joins
+ *                              the roster ("Hired tomorrow 04:00"; owner decision, round 4); else null
  *
  * @typedef {Object} RosterVM
- * @property {string} count     "12 / 30 heroes · 2 hired today (6 a day)"
+ * @property {string} count     "12 / 30 heroes · 2 hired today (6 a day)" (+ " · 3 contractors, the next
+ *                              hired tomorrow at 04:00")
  * @property {boolean} [slim]   many heroes: one-line rows without portraits (render budget)
- * @property {Array<{key:string, name:string, rows:RosterRowVM[]}>} groups   live guilds, then "Off duty"
+ * @property {Array<{key:string, name:string, inline?:boolean, rows:RosterRowVM[]}>} groups   spaces
+ *            with one hero first (inline: no header, each row names its space), then spaces with
+ *            two or more (a header each), then "Off duty"
  * @property {string} emptyText "No heroes yet. …" (shown while the roster has nobody)
  * @property {{title:string, bonus:string, rows:Array<{key:string, name:string, cls:string,
  *            level:string, date:string}>, more?:string|null, emptyText:string}} fame   rows ≤ 10;
@@ -144,6 +151,10 @@
  * @property {string} emptyText "Nothing new since you last looked."
  * @property {ActionVM|null} ack   "Mark as read" (clears the sidebar dot). §3.5 has no digest
  *                              command yet: the samples use cmd "digestSeen" {} (herd.digestAt = now)
+ * @property {number} [unseen]  chests opened Unreviewed since the Digest was last viewed (the Herd dot)
+ * @property {ActionVM|null} [seen]   while `unseen`: cmd "lossesSeen" {}, which the role runs once the
+ *                              Digest tab is on screen (from a timer, never in render): seeing the
+ *                              losses clears the dot; the lines stay until "Mark as read"
  *
  * @typedef {Object} SettingRowVM
  * @property {string} key
@@ -157,7 +168,9 @@
  *                              "nums", "stageH", "glow", "collapse", "auto", "auto.equip",
  *                              "notify.boss", ...); null: chrome only
  * @property {null|{toggle:string}|{resize:string}} chrome   {toggle:"hud"} → run("layout.toggle",
- *                              {id}); {resize:"stage"} → also run("layout.resize", {id, px})
+ *                              {id}); {toggle:"stage"} → show or hide the stage block (host.stageStrip,
+ *                              else run("layout.show" | "layout.hide", {id})); {resize:"stage"} → also
+ *                              run("layout.resize", {id, px})
  * @property {boolean} [wide]   a choice with many options: the control gets its own line
  * @property {boolean} [inactive] the autopilot master switch is off: the row is dimmed and its
  *                              switch does nothing (tooltip says why)
@@ -191,6 +204,12 @@ const TAB_ICONS = {
   roster: "ui/herd.svg", digest: "ui/journal.svg", settings: "ui/gear.svg",
 };
 const STAGE_PX = { min: 64, max: 420 };
+// the slim roster row's space and name columns (one-hero spaces name theirs in the first); a
+// narrow dialog (a small window: herdr fits a dialog to it) narrows both, so the title · where
+// and a Contractor's hire moment keep some room
+const SLIM_COLS = { space: 118, name: 170 };
+const SLIM_COLS_NARROW = { space: 92, name: 140 };
+const SLIM_NARROW_W = 720;
 const STATE_COLOR = { fixed: C.working, door: C.hp, sprint: C.blocked, fighting: C.hp, locked: C.idle };
 
 /**
@@ -527,9 +546,15 @@ function rosterTab(r, env, ui, t, calm) {
   const fame = r.fame;
   const body = v_flex().gap(4).pr(4);
   const rowOf = r.slim ? rosterRowSlim : rosterRow;
+  // slim rows: with a block of one-hero spaces (their rows name the space in a first column),
+  // the rows under a header keep that column empty, so every name lines up
+  const indent = (r.groups ?? []).some((g) => g.inline && (g.rows ?? []).length > 0);
+  const width = ui.size?.w ?? env.width ?? 760;
+  const cols = Object.assign({ indent }, width < SLIM_NARROW_W ? SLIM_COLS_NARROW : SLIM_COLS);
   for (const g of r.groups ?? []) {
-    body.child(sectionTitle(`${g.name} · ${g.rows.length}`, t));
-    body.children(g.rows.map((row) => rowOf(row, env, ui, t, calm)));
+    // a block of spaces with one hero each has no header: each of its rows names its space
+    if (!g.inline) body.child(sectionTitle(`${g.name} · ${g.rows.length}`, t));
+    body.children(g.rows.map((row) => rowOf(row, env, ui, t, calm, cols)));
   }
   // no hero at all (before the first agent): say how one comes, above the Hall of Fame
   if (!(r.groups ?? []).some((g) => (g.rows ?? []).length > 0) && r.emptyText) {
@@ -551,8 +576,25 @@ function rosterTab(r, env, ui, t, calm) {
       .child(v_flex().id("hd-roster").absolute().left(0).top(0).size_full().overflow_y_scroll().child(body)))];
 }
 
+/**
+ * A Contractor's hire moment ("Hired tomorrow 04:00"), coloured, its tooltip the whole story. It
+ * shrinks (truncated) rather than push the row's fixed cells out: in a narrow dialog a slim row's
+ * seen, Retire and Sheet cells would otherwise leave the row. The title · where beside it is
+ * flex_1 (basis 0), so it gives way first.
+ */
+function hireText(row, t) {
+  const h = row.hire;
+  return div().id(`hd-hire-${row.key}`).min_w(0).truncate().text_size(11).font_medium().text_color(ink(h.color ?? C.xp, t))
+    .when(Boolean(h.tooltip), (e) => e.tooltip(h.tooltip)).child(h.text);
+}
+
 function rosterRow(row, env, ui, t, calm) {
   const off = row.status === "off";
+  // line 2: the space (a space with one hero has no header), a Contractor's hire, then title · where
+  const line2 = h_flex().min_w(0).gap(6).items_center()
+    .when(Boolean(row.space), (e) => e.child(div().id(`hd-sp-${row.key}`).min_w(0).max_w(160).truncate().text_size(11).font_medium().text_color(t.muted).child(row.space)))
+    .when(Boolean(row.hire), (e) => e.child(hireText(row, t)))
+    .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(`${row.title} · ${row.where}`));
   return h_flex().id(`hd-${row.key}`).flex_none().h(42).pl(4).pr(8).gap(9).items_center().rounded(8)
     .hover((s) => s.bg(t.hover))
     .child(div().w(3).h(28).flex_none().rounded(2).bg(tone(row.stripe, t)))
@@ -562,7 +604,7 @@ function rosterRow(row, env, ui, t, calm) {
       .child(h_flex().gap(8).items_center()
         .child(div().min_w(0).truncate().text_size(12.5).font_medium().text_color(off ? t.muted : t.fg).child(row.name))
         .child(div().flex_none().font_family(MONO).text_size(10.5).text_color(t.muted).child(row.level)))
-      .child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child(`${row.title} · ${row.where}`)))
+      .child(line2))
     .child(div().w(110).flex_none().text_right().text_size(11).text_color(t.muted).child(row.seen))
     // Retire sits in a fixed-width cell so every row's Sheet button lines up.
     .child(h_flex().w(64).flex_none().justify_end()
@@ -574,7 +616,8 @@ function rosterRow(row, env, ui, t, calm) {
  * The slim roster row (RosterVM.slim, 13+ heroes): one 26 px line of about ten elements, no
  * portrait; the stripe carries the status, the tooltip the rest.
  */
-function rosterRowSlim(row, env, ui, t) {
+function rosterRowSlim(row, env, ui, t, _calm, cols = SLIM_COLS) {
+  const spaceW = cols.space ?? SLIM_COLS.space;
   const off = row.status === "off";
   const r = row.retire;
   const armed = !!r && !!r.confirm && ui.armed === r.key;
@@ -587,12 +630,17 @@ function rosterRowSlim(row, env, ui, t) {
       .on_click((_e, cx) => { cx.stop_propagation(); runAction(r, env, ui, cx); })
       .child(armed ? "Sure?" : r.label)
     : div().w(52).flex_none();
+  const tip = [row.space, row.name, `${row.level} ${row.title}`, row.where, row.seen, row.hire ? row.hire.tooltip : null].filter(Boolean).join(" · ");
   return h_flex().id(`hd-${row.key}`).flex_none().h(26).pl(4).pr(4).gap(8).items_center().rounded(6)
     .hover((s) => s.bg(t.hover))
-    .tooltip(`${row.name} · ${row.level} ${row.title} · ${row.where} · ${row.seen}`)
+    .tooltip(tip)
     .child(div().w(3).h(16).flex_none().rounded(2).bg(tone(row.stripe, t)))
-    .child(div().w(170).flex_none().truncate().text_size(12).font_medium().text_color(off ? t.muted : t.fg).child(row.name))
+    // a space with one hero has no header line: its row names the space (round 4)
+    .when(Boolean(row.space), (e) => e.child(div().id(`hd-sp-${row.key}`).w(spaceW).flex_none().truncate().text_size(11.5).font_medium().text_color(t.muted).child(row.space)))
+    .when(!row.space && !!cols.indent, (e) => e.child(div().w(spaceW).flex_none()))
+    .child(div().w(cols.name ?? SLIM_COLS.name).flex_none().truncate().text_size(12).font_medium().text_color(off ? t.muted : t.fg).child(row.name))
     .child(div().w(42).flex_none().font_family(MONO).text_size(10.5).text_color(t.muted).child(row.level))
+    .when(Boolean(row.hire), (e) => e.child(hireText(row, t)))
     .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(`${row.title} · ${row.where}`))
     .child(div().w(100).flex_none().truncate().text_right().text_size(11).text_color(t.muted).child(row.seen))
     .child(retire)
@@ -696,6 +744,8 @@ function settingRow(row, env, ui, t) {
           .on_click((_e, cx) => { cx.stop_propagation(); if (!on && !noNode) setValue(row, o.id, env, ui, cx); })
           .child(o.label);
       }));
+  } else if (row.chrome?.toggle === "stage") {
+    control = stageSwitch(row, env, ui, t);
   } else if (row.chrome?.toggle) {
     const shown = env.chrome?.hud ?? null;
     control = switchEl(`hd-sw-${row.key}`, shown === true, t, shown == null ? "This layout has no HUD strip" : shown ? "Hide the HUD strip" : "Show the HUD strip", (cx) => {
@@ -709,9 +759,12 @@ function settingRow(row, env, ui, t) {
     control = switchEl(`hd-sw-${row.key}`, on, t, row.inactive ? row.tooltip ?? "Autopilot is off" : row.hint ?? row.label,
       (cx) => setValue(row, !on, env, ui, cx), !!row.inactive);
   }
+  // the Stage strip switch in a layout without a stage says why it does nothing, in its hint line
+  const noStage = row.chrome?.toggle === "stage" && !(env.chrome && env.chrome.stage);
+  const hint = noStage ? "This layout has no stage" : row.hint;
   const text = v_flex().flex_1().min_w(0)
-    .child(div().text_size(12.5).text_color(row.inactive ? t.dim : t.fg).child(row.label))
-    .when(Boolean(row.hint), (e) => e.child(div().text_size(10.5).text_color(t.dim).child(row.hint)));
+    .child(div().text_size(12.5).text_color(row.inactive || noStage ? t.dim : t.fg).child(row.label))
+    .when(Boolean(hint), (e) => e.child(div().text_size(10.5).text_color(t.dim).child(hint)));
   if (row.wide) {
     return v_flex().id(`hd-set-${row.key}`).flex_none().min_h(36).px(4).py(4).gap(5).child(text).child(control);
   }
@@ -719,6 +772,29 @@ function settingRow(row, env, ui, t) {
     .when(Boolean(row.inactive), (e) => e.opacity(0.6).tooltip(row.tooltip ?? "Autopilot is off"))
     .child(text)
     .child(control);
+}
+
+/**
+ * The "Stage strip" switch (owner decision, round 4): on while the layout shows this mod's stage
+ * block (env.chrome.stage, found by content as roleNode does), whoever hid it: the collapse, the
+ * person, herdr's .state from an earlier install. Disabled, saying why, when the layout has none.
+ * A click asks the host (host.stageStrip(show, id): layout.show / layout.hide on that node, and the
+ * collapse's hold dropped, since a stage shown or hidden by hand is the person's, D§11.15); a host
+ * without it gets the herdr command straight (stageAuto drops its hold at its next pump).
+ */
+function stageSwitch(row, env, ui, t) {
+  const st = env.chrome ? env.chrome.stage : null;
+  const shown = st ? st.hidden !== true : null;
+  const tip = shown == null ? "This layout has no stage" : shown ? "Hide the stage strip" : "Show the stage strip";
+  return switchEl(`hd-sw-${row.key}`, shown === true, t, tip, (cx) => {
+    const show = !shown;
+    let r = null;
+    if (typeof env.host?.stageStrip === "function") r = env.host.stageStrip(show, st.id);
+    else run(show ? "layout.show" : "layout.hide", { id: st.id });
+    if (!r || r.ok !== false) st.hidden = !show;
+    flash(ui, r && (r.msg || r.error) ? r : { ok: true, msg: show ? "Stage strip shown." : "Stage strip hidden: the herd keeps playing." }, row.label, cx);
+    cx.notify();
+  }, shown == null);
 }
 
 function herdName(h, env, ui, t) {
@@ -790,16 +866,22 @@ export function roleNode(root, role, depth = 0) {
 /**
  * What the Settings tab's herdr rows act on: the HUD block (shown?, its id) and the stage block
  * ({id, hidden}, or null when this layout has none: the Herd panel opens in any layout, and
- * layout.resize on a missing node toasts "layout.resize failed").
+ * layout.resize on a missing node toasts "layout.resize failed"). With a host that keeps the
+ * stage's state (host.stageInfo(), round 4), its answer: herdr runs a mod's run() after the
+ * callback returns, so right after a Stage strip click layout() still shows the old state.
  */
-export function chromeNodes() {
+export function chromeNodes(host) {
   const root = layout();
   const hud = roleNode(root, "hud") ?? findNode(root, "hud");
-  const stage = roleNode(root, "stage");
-  return {
-    hud: hud ? !hud.hidden : null, hudId: hud ? hud.id : null,
-    stage: stage ? { id: stage.id, hidden: stage.hidden === true } : null,
-  };
+  let stage;
+  if (host && typeof host.stageInfo === "function") {
+    const st = host.stageInfo();
+    stage = st && typeof st.id === "string" ? { id: st.id, hidden: st.hidden === true } : null;
+  } else {
+    const node = roleNode(root, "stage");
+    stage = node ? { id: node.id, hidden: node.hidden === true } : null;
+  }
+  return { hud: hud ? !hud.hidden : null, hudId: hud ? hud.id : null, stage };
 }
 
 export default class HerdPanel {
@@ -830,17 +912,37 @@ export default class HerdPanel {
       this.focus = cx.focus_handle();
       this.focus.focus();
     }
+    // The Digest on screen sees its losses (DigestVM.seen, lossesSeen): run from a timer, since a
+    // command re-renders every copy and render may not do that. Once per unseen count: a refused
+    // command (a read-only save) is not asked again every second. (`herdr-app check` passes props()
+    // null, so no dialog role is ever created there.)
+    this.seen = null;
+    this.seenTried = null;
+    this.seenTimer = cx?.timer?.every?.(1000, () => this.seeLosses()) ?? null;
+  }
+
+  /** Runs the Digest's `seen` command once the tab has been drawn with unseen losses. */
+  seeLosses() {
+    const s = this.seen;
+    if (!s || this.ui.tab !== "digest" || this.seenTried === s.key) return null;
+    this.seenTried = s.key;
+    const r = this.host?.command?.(s.action.cmd, s.action.args) ?? null;
+    this.seen = null;
+    return r;
   }
 
   render(cx) {
     const host = this.host;
     const vm = host?.view?.("herd", { tab: this.ui.tab, filter: filterArgs(this.ui) }) ?? null;
     if (vm && vm.tab && HERD_TABS.includes(vm.tab)) this.ui.tab = vm.tab;
+    const seen = vm && vm.tab === "digest" && vm.digest && vm.digest.seen ? vm.digest.seen : null;
+    this.seen = seen && seen.enabled !== false ? { action: seen, key: `${vm.digest.unseen ?? ""}|${seen.key}` } : null;
+    if (!this.seen && vm && vm.tab === "digest") this.seenTried = null; // seen: a later loss is asked again
     return renderHerd(vm, {
       width: this.ui.size?.w ?? 760, height: this.ui.size?.h ?? 520, zoom: zoom(), theme: dialogTokens(), host,
       act: (name, args) => host?.command?.(name, args), ui: this.ui, overlay: this.props.overlay ?? null,
       inputs: this.inputs, focus: this.focus ?? null, scroll: this.scroll, bossScroll: this.bossScroll,
-      chrome: vm && vm.tab === "settings" ? chromeNodes() : { hud: null, stage: null },
+      chrome: vm && vm.tab === "settings" ? chromeNodes(host) : { hud: null, stage: null },
     });
   }
 
@@ -853,6 +955,7 @@ export default class HerdPanel {
   close() {
     this.inputs?.herdName?.release?.();
     this.bossScroll?.release?.();
+    this.seenTimer?.cancel?.();
   }
 }
 

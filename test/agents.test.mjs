@@ -10,6 +10,7 @@ import * as Hr from "../mods/down-the-stack/game/heroes.js";
 import * as W from "../mods/down-the-stack/game/world.js";
 import * as A from "../mods/down-the-stack/game/agents.js";
 import * as I from "../mods/down-the-stack/game/items.js";
+import * as HerdM from "../mods/down-the-stack/game/herd.js";
 
 const T0 = 1_790_000_000_000; // a Tuesday-ish epoch; the local day is computed with tz 0
 const near = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps;
@@ -205,6 +206,66 @@ describe("seat keys and binding (D§3.1, D§3.2)", () => {
   });
 });
 
+describe("seats on other machines (round 4)", () => {
+  const remote = (extra = {}) => Object.assign({ space: "devbox/s9", space_name: "herdr-app", tab: "devbox/tb9", pane: "devbox/p9" }, extra);
+
+  test("seatKey: a remote space adds its machine; this computer's seats are unchanged", () => {
+    assert.equal(A.seatKey("Herdr-App", "s1", "claude", null), "herdr-app/claude");
+    assert.equal(A.seatKey("Herdr-App", "s1", "claude", null, null), "herdr-app/claude", "byte-identical for local spaces");
+    assert.equal(A.seatKey("Herdr-App", "devbox/s9", "claude", null, "devbox"), "herdr-app@devbox/claude");
+    assert.equal(A.seatKey("", "devbox/s9", "claude", null, "devbox"), "s9@devbox/claude", "the id's own part, not its prefix");
+    assert.equal(A.seatKey("API ", "s", "codex", null, " DevBox "), "api@devbox/codex", "the machine normalised like a space");
+    assert.equal(A.seatKey("", "", null, null, "a/b"), "nospace@a-b/agent", "the program stays after the last slash");
+    assert.equal(A.machineOf({ space: "devbox/s9", address: "devbox/t1" }), "devbox");
+    assert.equal(A.machineOf({ space: "", address: "devbox/t1" }), "devbox", "a pane-less agent: its address");
+    assert.equal(A.machineOf({ space: "s1", address: "t1" }), null);
+    assert.equal(A.machineOf({ space: "s1", address: "t1", machine: "vps" }), "vps", "a machine field from the host wins");
+  });
+
+  test("same-named spaces on two machines keep their own heroes, benched ones included", () => {
+    const sim = new Sim().set("t1", "idle").tick();
+    const local = sim.hero("t1");
+    assert.equal(local.seat, "herdr-app/claude");
+    sim.drop("t1").tick();
+    sim.set("devbox/t2", "idle", remote()).tick();
+    const far = sim.hero("devbox/t2");
+    assert.notEqual(far, local, "the benched local hero stays home");
+    assert.equal(far.seat, "herdr-app@devbox/claude");
+    assert.equal(far.sid, "devbox/s9");
+    assert.equal(sim.live("devbox/t2").machine, "devbox");
+    sim.drop("devbox/t2").tick();
+    sim.set("t3", "idle").tick();
+    assert.equal(sim.hero("t3"), local, "and the local agent gets the local hero back");
+    sim.set("devbox/t4", "idle", remote()).tick();
+    assert.equal(sim.hero("devbox/t4"), far);
+    // off duty, an older chest titled after the remote space still counts as that space's name
+    sim.drop("devbox/t4").tick();
+    far.pend = [{ min: 30, fmin: 0, title: "herdr-app", at: sim.now - 25 * 3600000, sealFactor: 1 }];
+    sim.tick(60);
+    assert.equal(sim.state.herd.log.filter((e) => e[1] === "unrev").at(-1)[3], "", "not a Quest name");
+    sim.set("devbox/t4", "idle", remote()).tick();
+    // Rebind keeps the machine in the seat
+    sim.drop("t3").tick();
+    assert.equal(W.command(sim.w, "rebind", { heroId: local.id, address: "devbox/t4" }, sim.now).ok, true);
+    assert.equal(local.seat, "herdr-app@devbox/claude");
+    noErrors(sim);
+  });
+
+  test("an older save's remote hero (seat without its machine) never goes to a local agent; its own machine re-keys it", () => {
+    const sim = new Sim();
+    sim.tick();
+    const old = Hr.newHero(sim.state, { seat: "herdr-app/claude", sid: "devbox/s9", ord: 0, nowMs: T0 });
+    old.L = 20;
+    sim.state.heroes.push(old);
+    sim.set("t1", "idle").tick();
+    assert.notEqual(sim.hero("t1"), old, "a local agent of the same-named space");
+    sim.set("devbox/t2", "idle", remote()).tick();
+    assert.equal(sim.hero("devbox/t2"), old, "its own space id");
+    assert.equal(old.seat, "herdr-app@devbox/claude", "re-keyed");
+    noErrors(sim);
+  });
+});
+
 describe("roster limits and Contractors (D§3.4)", () => {
   test("at most 6 new heroes per local day; the 7th agent is a Contractor; the next day hires again", () => {
     const sim = new Sim();
@@ -280,6 +341,357 @@ describe("roster limits and Contractors (D§3.4)", () => {
     noErrors(sim);
   });
 });
+
+// Owner decision (round 4, "promote only"): a Contractor whose agent is still live joins the
+// roster when hiring reopens (the 04:00 game day turn) or a roster slot frees, longest-running
+// first, within the day's hires and the rules for a new hire.
+describe("Contractor promotion (round 4)", () => {
+  const DAY = 86400000;
+  // 30 s before a 04:00 game day turn (tz 0)
+  const beforeTurn = () => (W.localDay(T0, 0) + 1) * DAY + 4 * 3600000 - 30000;
+
+  test("the 04:00 day turn promotes 6 of 7 live Contractors, longest-running first, before a newcomer", () => {
+    const sim = new Sim({ now: beforeTurn() - 600000 });
+    for (let i = 0; i < 6; i++) sim.set(`h${i}`, "idle");
+    sim.tick();
+    // 7 Contractors arrive one after another (addresses in reverse, so the line is not the address order)
+    for (let i = 6; i >= 0; i--) sim.set(`c${i}`, "idle").tick(); // resting: no XP while the clock runs
+    const cs = [6, 5, 4, 3, 2, 1, 0].map((i) => sim.hero(`c${i}`));
+    assert.ok(cs.every((c) => c.contractor && c.id < 0));
+    assert.equal(sim.state.heroes.length, 6);
+    cs[0].L = 14; cs[0].xp = 123; cs[0].cls = D.CLASS_IDX.hotfixer;
+    const keep = { name: cs[0].name, L: 14, xp: 123, cls: D.CLASS_IDX.hotfixer, kit: cs[0].eq.map((it) => [it.base, it.ilvl, it.rar, JSON.stringify(it.aff)]) };
+    const before = A.hireOutlook(sim.w, cs[0]);
+    assert.equal(before.when, "day");
+    assert.equal(before.hiresLeft, 0);
+    assert.equal(before.position, 0);
+    assert.equal(before.atMs, beforeTurn() + 30000, "the next 04:00");
+    assert.match(before.text, /next 04:00 game day.*today: 0 of 6 hires left/);
+    assert.equal(A.hireOutlook(sim.w, cs[6]).when, "day");
+    assert.equal(A.hireOutlook(sim.w, cs[6]).days, 2, "the 7th in line waits a second day");
+    assert.equal(A.hireOutlook(sim.w, sim.hero("h0")), null, "a roster hero has no outlook");
+    while (sim.now < beforeTurn()) sim.tick(); // still the same game day: nobody is hired
+    assert.equal(sim.state.heroes.length, 6);
+    // the turn: a newcomer arrives in the same second
+    sim.set("n1", "idle").tick(31);
+    assert.equal(sim.state.heroes.length, 12);
+    assert.equal(A.hiredToday(sim.state), 6);
+    for (const i of [6, 5, 4, 3, 2, 1]) {
+      const h = sim.hero(`c${i}`);
+      assert.ok(!h.contractor && h.id > 0, `c${i} promoted`);
+      assert.equal(sim.w.rt.contractors.has(`c${i}`), false);
+    }
+    assert.ok(sim.hero("c0").contractor, "the 7th Contractor waits for the next day");
+    assert.ok(sim.hero("n1").contractor, "the newcomer does not take a Contractor's hire");
+    const p = sim.hero("c6");
+    assert.equal(p, cs[0], "the same hero object carries on");
+    assert.equal(p.name, keep.name);
+    assert.equal(p.L, 14);
+    assert.equal(p.xp, 123);
+    assert.equal(p.cls, keep.cls);
+    assert.equal(p.addr, "c6", "it keeps its terminal");
+    assert.equal(sim.live("c6").heroId, p.id);
+    assert.equal(sim.live("c6").contractor, false);
+    assert.equal(p.seat, "herdr-app/claude");
+    assert.deepEqual(p.eq.map((it) => [it.base, it.ilvl, it.rar, JSON.stringify(it.aff)]), keep.kit, "the same kit");
+    assert.ok(p.eq.every((it) => it.uid > 0), "real items with saved uids");
+    assert.equal(new Set(p.eq.map((it) => it.uid)).size, 6);
+    const line = sim.state.herd.log.find((e) => e[1] === "hired" && e[2] === p.id);
+    assert.ok(line, "journal line");
+    assert.equal(line[3], `Hired: ${keep.name} (was a contractor)`);
+    assert.equal(line[4], 14);
+    assert.equal(line[5], keep.name);
+    assert.equal(sim.state.herd.log.filter((e) => e[1] === "hire").length, 6, "no Lv 1 hire line for a promotion");
+    // the next ticks change nothing (one promotion each)
+    sim.tick(5);
+    assert.equal(sim.state.heroes.length, 12);
+    assert.equal(sim.state.herd.log.filter((e) => e[1] === "hired").length, 6);
+    noErrors(sim);
+  });
+
+  test("a retire frees a slot: the longest-running Contractor joins at once; Lv 10+ rosters never make room", () => {
+    const sim = new Sim();
+    sim.tick();
+    for (let i = 0; i < 30; i++) {
+      const h = Hr.newHero(sim.state, { seat: "old/agent", ord: i, nowMs: T0 });
+      h.L = i === 0 ? 31 : 12;
+      sim.state.heroes.push(h);
+    }
+    sim.set("t1", "working").tick();
+    sim.set("t2", "working").tick();
+    const c = sim.hero("t1");
+    assert.ok(c.contractor && sim.hero("t2").contractor);
+    const o = A.hireOutlook(sim.w, c);
+    assert.equal(o.when, "slot");
+    assert.equal(o.room, 0);
+    assert.equal(o.hiresLeft, 6);
+    assert.match(o.text, /when a roster slot frees/);
+    assert.equal(A.hireOutlook(sim.w, sim.hero("t2")).position, 1);
+    // a day turn does not help a full roster of Lv 10+ heroes
+    sim.jump(86400000);
+    sim.tick(3);
+    assert.ok(sim.hero("t1").contractor && sim.hero("t2").contractor);
+    assert.equal(sim.state.heroes.length, 30);
+    const veteran = sim.state.heroes[0];
+    const r = W.command(sim.w, "retire", { heroId: veteran.id }, sim.now);
+    assert.equal(r.ok, true);
+    assert.match(r.msg, /a contractor joined the roster/);
+    assert.equal(sim.hero("t1"), c);
+    assert.ok(!c.contractor && c.id > 0, "promoted by the command itself");
+    assert.ok(sim.w.rt.notes.some((n) => n.text === `Hired: ${c.name} (was a contractor)`), "a header note tells the person");
+    assert.ok(sim.state.heroes.includes(c));
+    assert.equal(sim.state.heroes.length, 30);
+    assert.ok(sim.hero("t2").contractor, "one slot, one hire");
+    // the journal: the retiree is named on its line even though it left the roster
+    const ret = sim.state.herd.log.find((e) => e[1] === "retire" && e[2] === veteran.id);
+    assert.equal(ret[5], veteran.name);
+    sim.tick(3);
+    assert.ok(sim.hero("t2").contractor);
+    noErrors(sim);
+  });
+
+  test("a hero below Lv 10 going off duty on a full roster lets the Contractor in (the rules for a new hire)", () => {
+    const sim = new Sim();
+    sim.tick();
+    for (let i = 0; i < 29; i++) {
+      const h = Hr.newHero(sim.state, { seat: "old/agent", ord: i, nowMs: T0 });
+      h.L = 12;
+      sim.state.heroes.push(h);
+    }
+    sim.set("low", "idle").tick(); // the 30th hero, Lv 1, playing
+    const low = sim.hero("low");
+    assert.ok(!low.contractor);
+    sim.set("t1", "idle").tick();
+    assert.ok(sim.hero("t1").contractor, "the low hero is playing: no room");
+    sim.drop("low").tick();
+    // the snapshot its terminal ended in spares it (a replacement terminal there takes it back: below)
+    assert.ok(sim.state.heroes.includes(low), "not let go in the snapshot its terminal ended in");
+    assert.ok(sim.hero("t1").contractor);
+    sim.tick();
+    assert.ok(!sim.state.heroes.includes(low), "let go to make room");
+    assert.ok(!sim.hero("t1").contractor);
+    assert.ok(sim.state.herd.log.some((e) => e[1] === "leave" && e[2] === low.id && e[5] === low.name));
+    noErrors(sim);
+  });
+
+  test("a pane replaced within one snapshot keeps its hero while a Contractor waits (D§3.2 step 2 before a hire)", () => {
+    // reconcile's step 1 takes ended terminals off duty first so that a replacement in the same
+    // snapshot can take over their hero; a waiting Contractor must not let that hero go first
+    const sim = new Sim();
+    sim.tick();
+    for (let i = 0; i < 29; i++) {
+      const h = Hr.newHero(sim.state, { seat: "old/agent", ord: i, nowMs: T0 });
+      h.L = 12;
+      sim.state.heroes.push(h);
+    }
+    sim.set("low", "idle", { pane_name: "main" }).tick();
+    const low = sim.hero("low");
+    low.L = 5;
+    sim.set("c1", "idle", { program: prog("codex"), app: "codex" }).tick();
+    const c = sim.hero("c1");
+    assert.ok(c.contractor, "a full roster: the newcomer waits as a Contractor");
+    assert.equal(A.hiredToday(sim.state), 1, "hires are left today");
+    sim.drop("low").set("low2", "idle", { pane_name: "main" }).tick();
+    assert.equal(sim.hero("low2"), low, "the replacement terminal takes its hero back");
+    assert.ok(sim.state.heroes.includes(low));
+    assert.ok(!sim.state.herd.log.some((e) => e[1] === "leave"), "nobody let go");
+    assert.ok(sim.hero("c1").contractor, "no room: the Contractor keeps waiting");
+    sim.tick(3);
+    assert.equal(sim.hero("low2"), low);
+    assert.ok(sim.hero("c1").contractor);
+    noErrors(sim);
+  });
+
+  test("a promoted hero survives save and load (level, XP, class, kit) and is never promoted twice", () => {
+    const sim = new Sim({ now: beforeTurn() - 60000 });
+    for (let i = 0; i < 6; i++) sim.set(`h${i}`, "idle");
+    sim.tick();
+    sim.set("c1", "idle", { tab_name: "api", pane_name: "left" }).tick();
+    const c = sim.hero("c1");
+    c.L = 22; c.xp = 456; c.cls = D.CLASS_IDX.refactorer; c.sp = Hr.autoRanks(c.cls, 22, true);
+    sim.tick(90);
+    assert.ok(!c.contractor);
+    const id = c.id;
+    const kit = JSON.stringify(c.eq);
+    const hired = A.hiredToday(sim.state);
+    assert.equal(hired, 1);
+    // a save and a reload (hot reload or a restart): the agent is still there
+    const text = W.serialize(sim.w);
+    const { world } = W.loadWorld(text, { nowMs: sim.now });
+    const h = world.state.heroes.find((x) => x.id === id);
+    assert.ok(h, "saved");
+    assert.equal(h.name, c.name);
+    assert.equal(h.L, 22);
+    assert.equal(h.xp, 456);
+    assert.equal(h.cls, D.CLASS_IDX.refactorer);
+    assert.equal(JSON.stringify(h.eq), kit, "the kit, item for item");
+    assert.equal(h.addr, "c1");
+    assert.equal(h.lastTab, "api");
+    assert.equal(h.lastPane, "left");
+    assert.ok(!("contractor" in h) && !("since" in h));
+    const sim2 = new Sim({ world, now: sim.now });
+    for (const [k, a] of sim.agents) sim2.agents.set(k, Object.assign({}, a));
+    sim2.tick(3);
+    assert.equal(sim2.hero("c1"), h, "the same terminal binds its hero again");
+    assert.equal(world.rt.contractors.size, 0);
+    assert.equal(world.state.heroes.length, 7);
+    assert.equal(A.hiredToday(world.state), 1, "no second hire");
+    assert.equal(world.state.herd.log.filter((e) => e[1] === "hired").length, 1);
+    assert.equal(world.state.herd.log.filter((e) => e[1] === "hire").length, 6);
+    noErrors(sim2);
+  });
+
+  test("a promoted Contractor's fight and journal lines follow it; a read-only world never promotes", () => {
+    const sim = new Sim({ now: beforeTurn() - 60000 });
+    for (let i = 0; i < 6; i++) sim.set(`h${i}`, "idle");
+    sim.tick();
+    sim.set("c1", "working").tick();
+    const c = sim.hero("c1");
+    const old = c.id;
+    sim.state.herd.log.push([sim.now, "ship", old, "Fix it", 1, c.name]);
+    sim.w.rt.fights.push({ kind: "boss", heroIds: [3, old], helpers: [old], result: null });
+    sim.state.herd.fight = { k: "b", i: 0, ids: [old, 2], hl: [old], t: 1, ph: 1, p: [], m: {}, pool: 1, dl: 0, sq: 0 };
+    sim.w.rt.readOnly = true;
+    sim.tick(90);
+    assert.ok(c.contractor, "read-only: never hired");
+    assert.equal(A.hireOutlook(sim.w, c).when, "never");
+    assert.equal(A.promoteContractors(sim.w, null), 0);
+    sim.w.rt.readOnly = false;
+    sim.state.herd.hired = [sim.state.herd.day, 5]; // one hire left today
+    assert.equal(A.promoteContractors(sim.w, null), 1);
+    assert.ok(c.id > 0);
+    assert.deepEqual(sim.w.rt.fights[0].heroIds, [3, c.id]);
+    assert.deepEqual(sim.w.rt.fights[0].helpers, [c.id]);
+    assert.deepEqual(sim.state.herd.fight.ids, [c.id, 2]);
+    assert.deepEqual(sim.state.herd.fight.hl, [c.id]);
+    assert.ok(sim.state.herd.log.some((e) => e[1] === "ship" && e[2] === c.id && e[3] === "Fix it"));
+    assert.ok(!sim.state.herd.log.some((e) => e[2] === old));
+  });
+});
+
+describe("journal lines name their hero (round 4)", () => {
+  test("a Contractor's and a let-go hero's lines keep their names for the Digest; a reload keeps the names, not the ids", () => {
+    const sim = new Sim();
+    sim.state.herd.digestAt = 0;
+    for (let i = 0; i < 6; i++) sim.set(`h${i}`, "idle");
+    sim.tick();
+    sim.set("c1", "working", { title: "Port the CLI" }).tick(200).set("c1", "idle").tick(10);
+    const c = sim.w.rt.contractors.get("c1");
+    assert.ok(c && c.contractor);
+    const ship = sim.state.herd.log.find((e) => e[1] === "ship" && e[2] === c.id);
+    assert.equal(ship[5], c.name);
+    const H = sim.state.herd;
+    let d = await_digest(sim);
+    assert.equal(d.shipped.find((x) => x.text === "Port the CLI").name, c.name, "the Digest names the Contractor");
+    sim.drop("c1").tick(); // the Contractor's agent leaves: it is gone for good
+    assert.equal(A.heroById(sim.w, c.id), null);
+    assert.equal(await_digest(sim).shipped.find((x) => x.text === "Port the CLI").name, c.name, "still named");
+    // an evicted hero's Unreviewed chest names it
+    const low = sim.state.heroes[0];
+    sim.drop("h0").tick();
+    low.pend = [{ min: 20, fmin: 0, title: "Old task", at: sim.now, sealFactor: 1 }];
+    while (sim.state.heroes.length < 30) {
+      const h = Hr.newHero(sim.state, { seat: "x/y", ord: sim.state.heroes.length, nowMs: sim.now });
+      h.L = 12;
+      sim.state.heroes.push(h);
+    }
+    H.hired = [H.day, 0];
+    sim.set("n1", "idle", { program: prog("codex"), app: "codex" }).tick(); // another seat: no free hero of its own
+    assert.ok(!sim.state.heroes.includes(low), "let go to make room");
+    d = await_digest(sim);
+    const u = d.unreviewed.find((x) => x.text === "Old task");
+    assert.equal(u.name, low.name, "the Digest names the hero that left");
+    assert.ok(sim.state.herd.log.some((e) => e[1] === "leave" && e[5] === low.name));
+    // a reload: the Contractor's id was this session's only; its lines keep the name
+    const { world } = W.loadWorld(W.serialize(sim.w), { nowMs: sim.now });
+    const line = world.state.herd.log.find((e) => e[1] === "ship" && e[3] === "Port the CLI");
+    assert.equal(line[2], 0, "no stale Contractor id");
+    assert.equal(line[5], c.name);
+    assert.ok(!world.state.herd.log.some((e) => e[2] < 0));
+    const H2 = W.loadWorld(W.serialize(sim.w), { nowMs: sim.now }).world;
+    assert.equal(HerdM.digest(H2.state).shipped.find((x) => x.text === "Port the CLI").name, c.name);
+    noErrors(sim);
+  });
+
+  test("lineName: the roster's name now, else the stored one, else null (an older save's line)", () => {
+    const sim = new Sim().set("t1", "idle").tick();
+    const h = sim.hero("t1");
+    const state = sim.state;
+    assert.equal(HerdM.lineName(state, [0, "ship", h.id, "x", 1]), h.name, "an older line: the roster has it");
+    h.name = "Renamed";
+    assert.equal(HerdM.lineName(state, [0, "ship", h.id, "x", 1, "Old name"]), "Renamed", "a rename shows");
+    assert.equal(HerdM.lineName(state, [0, "ship", 999, "x", 1, "Gone"]), "Gone");
+    assert.equal(HerdM.lineName(state, [0, "ship", -3, "x", 1, "Contractor"]), "Contractor");
+    assert.equal(HerdM.lineName(state, [0, "ship", 999, "x", 1]), null);
+    assert.equal(HerdM.lineName(state, [0, "ship", 999, "x", 1, 7]), null, "a stray value is no name");
+  });
+});
+
+describe("chests lost Unreviewed stay in sight (round 4)", () => {
+  test("a header note at the moment a chest opens Unreviewed; the Herd dot stays lit until the Digest is viewed", () => {
+    const sim = new Sim().set("t1", "working").set("t2", "working", { program: prog("codex"), app: "codex" }).tick(600);
+    const h = sim.hero("t1");
+    sim.drop("t1").tick(2); // off duty with its chest
+    assert.equal(h.pend.length, 1);
+    assert.equal(HerdM.unseenLosses(sim.state), 0);
+    assert.equal(HerdM.digestDot(sim.w), false);
+    h.pend[0].at = sim.now - 24 * 3600000 - 1000; // a day later (the person stays, the other hero works)
+    let noted = null;
+    for (let i = 0; i < 61 && !noted; i++) {
+      sim.tick();
+      noted = sim.w.rt.notes.find((n) => /opened Unreviewed/.test(n.text));
+    }
+    assert.ok(noted, "a header note at the moment of the loss");
+    assert.equal(noted.text, `${h.name}: a chest opened Unreviewed (half value)`);
+    assert.equal(h.pend.length, 0);
+    assert.equal(HerdM.unseenLosses(sim.state), 1);
+    assert.equal(HerdM.digestDot(sim.w), true, "the dot lights at the loss, not dark");
+    assert.equal(sim.w.rt.digestDot, false, "(the away dot is not what lights it)");
+    sim.tick(600);
+    assert.equal(HerdM.digestDot(sim.w), true, "still lit");
+    // saved: a reload keeps the count
+    const { world } = W.loadWorld(W.serialize(sim.w), { nowMs: sim.now });
+    assert.equal(HerdM.unseenLosses(world.state), 1);
+    assert.equal(HerdM.digestDot(world), true);
+    // the Digest viewed: lossesSeen (the digest keeps its lines until marked read)
+    const r = W.command(sim.w, "lossesSeen", {}, sim.now);
+    assert.equal(r.ok, true);
+    assert.equal(r.msg, "1 Unreviewed chest seen");
+    assert.equal(HerdM.unseenLosses(sim.state), 0);
+    assert.equal(HerdM.digestDot(sim.w), false);
+    assert.equal(HerdM.digest(sim.state).unreviewed.length, 1);
+    // a Contractor leaving with a chest: told and counted too; "Mark as read" (digestSeen) clears it
+    for (let i = 0; i < 6; i++) sim.set(`h${i}`, "idle");
+    sim.tick();
+    sim.set("c1", "idle", { program: prog("pi"), app: "pi" }).tick();
+    const c = sim.hero("c1");
+    assert.ok(c.contractor);
+    c.pend = [{ min: 12, fmin: 0, title: "Spike", at: sim.now, sealFactor: 1 }, { min: 30, fmin: 0, title: "Spike 2", at: sim.now, sealFactor: 1 }];
+    sim.drop("c1").tick();
+    assert.ok(sim.w.rt.notes.some((n) => n.text === `${c.name}: 2 chests opened Unreviewed (half value)`));
+    assert.equal(HerdM.unseenLosses(sim.state), 2);
+    assert.equal(HerdM.digest(sim.state).unseenLosses, 2);
+    assert.equal(W.command(sim.w, "digestSeen", {}, sim.now).ok, true);
+    assert.equal(HerdM.unseenLosses(sim.state), 0);
+    assert.equal(HerdM.digestDot(sim.w), false);
+    noErrors(sim);
+  });
+
+  test("a save from before the count counts the journal's Unreviewed lines since the last read", () => {
+    const sim = new Sim().set("t1", "idle").tick();
+    const st = sim.state;
+    st.herd.digestAt = sim.now - 5000;
+    st.herd.log.push([sim.now - 9000, "unrev", 1, "old", 3], [sim.now - 1000, "unrev", 1, "", 2], [sim.now - 500, "ship", 1, "x", 1]);
+    delete st.herd.unseenUnrev;
+    assert.equal(HerdM.unseenLosses(st), 2);
+    st.herd.unseenUnrev = 0;
+    assert.equal(HerdM.unseenLosses(st), 0, "a saved count wins");
+  });
+});
+
+function await_digest(sim) {
+  return HerdM.digest(sim.state);
+}
 
 describe("seq gating (D§2.3, D§2.10)", () => {
   test("status is re-read only when seq changes", () => {
@@ -374,6 +786,55 @@ describe("tasks and the 8-tick close (D§2.3)", () => {
     A.openChests(sim.w, h, { reason: "click" }, null);
     const ships = sim.state.herd.log.filter((e) => e && e[1] === "ship").map((e) => e[3]);
     assert.deepEqual(ships.slice(-2), ["Refactor the webhook sender so  retries", "Commit"]);
+    noErrors(sim);
+  });
+
+  test("a title that only repeats the agent's space, tab or pane name tells nothing (round 4)", () => {
+    // Claude Code titles its terminal after the folder, and herdr names the space after it too
+    const who = { address: "t1", program: { key: "claude", name: "Claude Code" }, app: "claude-code", spaceName: "ref-client", tabName: "api", paneName: "left" };
+    assert.equal(A.tellingTitle("ref-client", who), "");
+    assert.equal(A.tellingTitle("✳ Ref-Client  ", who), "", "trimmed, any case, after the status glyph");
+    assert.equal(A.questName("⠋ ref-client", who), "");
+    assert.equal(A.questName("API", who), "", "the tab's name");
+    assert.equal(A.questName("✳ left", who), "", "the pane's name");
+    assert.equal(A.tellingTitle("✳ API", who), "");
+    assert.equal(A.tellingTitle("Fix ref-client login", who), "Fix ref-client login", "more than the name tells");
+    // the person's own name for the pane or tab, asked about as itself (chrome.taskLabel's fallback)
+    assert.equal(A.tellingTitle("left", who), "left");
+    assert.equal(A.tellingTitle("api", who), "api");
+    assert.equal(A.tellingTitle("2", Object.assign({}, who, { tabName: "2" })), "", "a tab's bare position is no name");
+    assert.equal(A.questName("left", who), "", "the engine never takes a place name for a task");
+    // the answer depends on the places: the cache must not hand one place's answer to another
+    for (let round = 0; round < 2; round++) {
+      assert.equal(A.tellingTitle("rnd-qa", Object.assign({}, who, { spaceName: "rnd-qa" })), "");
+      assert.equal(A.tellingTitle("rnd-qa", Object.assign({}, who, { spaceName: "web" })), "rnd-qa");
+      assert.equal(A.tellingTitle("api", Object.assign({}, who, { tabName: "web" })), "api");
+      assert.equal(A.tellingTitle("✳ api", who), "");
+      assert.equal(A.tellingTitle("✳ api", Object.assign({}, who, { tabName: "main" })), "api");
+      assert.equal(A.questName("left", Object.assign({}, who, { paneName: null })), "left");
+    }
+  });
+
+  test("an agent titled after its space: its task, chest and journal never carry the space's name", () => {
+    const sim = new Sim().set("t1", "working", { title: "✳ herdr-app" }).tick(200);
+    assert.equal(sim.live("t1").task.title, "", "the space's name is no Quest name");
+    sim.set("t1", "working", { title: "Fix the flaky test" }).tick();
+    assert.equal(sim.live("t1").task.title, "Fix the flaky test");
+    sim.set("t1", "working", { title: "herdr-app" }).tick(); // back to the folder name: the task keeps its title
+    assert.equal(sim.live("t1").task.title, "Fix the flaky test");
+    sim.set("t1", "idle").tick(10); // watched: opens once the 8-tick close has run
+    const ship = sim.state.herd.log.filter((e) => e[1] === "ship").at(-1);
+    assert.equal(ship[3], "Fix the flaky test");
+    // a task that only ever had the space's name: the journal says "Commit"
+    sim.set("t1", "working", { title: "herdr-app" }).tick(200).set("t1", "idle").tick(10);
+    assert.equal(sim.state.herd.log.filter((e) => e[1] === "ship").at(-1)[3], "Commit");
+    // an older chest that recorded the space's name (an earlier build), opened while off duty
+    const h = sim.hero("t1");
+    sim.drop("t1").tick();
+    h.pend = [{ min: 30, fmin: 0, title: "herdr-app", at: sim.now - 25 * 3600000, sealFactor: 1 }];
+    sim.tick(60);
+    const unrev = sim.state.herd.log.filter((e) => e[1] === "unrev").at(-1);
+    assert.equal(unrev[3], "", "off duty: the hero's last space still counts");
     noErrors(sim);
   });
 

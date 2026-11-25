@@ -375,6 +375,115 @@ test("party: blocked heroes stand out without re-sorting: 'N need you' jumps to 
   assertClean(rail.m, "rail");
 });
 
+test("party: a waiting sub-agent counts in 'N need you', puts '!' on its group and the rail portrait, and a click peeks it", async () => {
+  const vm = P.scenarios.forkWaits;
+  const { m, host, view } = await mount("party", vm);
+  assertClean(m, "forkWaits");
+  // Rue (blocked) and Pax's pane-less sub-agent (Pax itself is working)
+  assert.equal(textUnder(m.node("party-needyou")), "2 need you");
+  const tip = () => m.node("party-needyou").methods.find((x) => x[0] === "tooltip")[1][0];
+  assert.equal(tip(), "Waiting for you: Rue Two-Spaces, Pax the Rebased's sub-agent\nClick to jump to Rue Two-Spaces");
+  // api-gateway has no blocked row: its "!" is the sub-agent's
+  assert.ok(textUnder(m.node("pg-g:s2")).includes("!"));
+  // the walk: Rue (her pane, marked seen), then the sub-agent (herdr's peek: it has no pane)
+  m.fire("party-needyou");
+  assert.deepEqual(host.commands, [["markSeen", { heroId: 2 }]]);
+  assert.deepEqual(runs("pane.focus").map((c) => c.args), [{ pane: "p2" }]);
+  const rueFocused = structuredClone(vm);
+  for (const r of rueFocused.groups.flatMap((g) => g.rows)) r.focused = r.heroId === 2;
+  host.vm = rueFocused;
+  m.render();
+  assert.match(tip(), /Click to jump to Pax the Rebased's sub-agent$/);
+  m.fire("party-needyou");
+  assert.deepEqual(runs("terminal.peek").map((c) => c.args), [{ terminal: "t5.1" }]);
+  assert.equal(runs("pane.focus").length, 1, "a peek, never 'no such pane'");
+  assert.equal(host.commands.length, 1);
+  // the peek leaves the focus on Rue: the next click goes on (back to Rue), never stuck on the sub-agent
+  m.render();
+  assert.match(tip(), /Click to jump to Rue Two-Spaces$/);
+  m.fire("party-needyou");
+  assert.deepEqual(runs("pane.focus").at(-1).args, { pane: "p2" });
+  // the amber fork chip peeks the waiting one too
+  m.fire("pc-c:5:fork");
+  assert.deepEqual(runs("terminal.peek").at(-1).args, { terminal: "t5.1" });
+  assert.ok(view);
+  // the rail: the "!" badge on Pax's portrait; its click peeks the sub-agent, the row's click focuses Pax
+  const rail = await mount("party", P.scenarios.forkRail, { width: 52 });
+  assertClean(rail.m, "forkRail");
+  assert.ok(textUnder(rail.m.node("pp-h:5")).includes("!"));
+  assert.match(rail.m.node("pb-h:5").methods.find((x) => x[0] === "tooltip")[1][0], /^A sub-agent of Pax the Rebased waits for you on “Ask about the schema” · click to show it$/);
+  rail.m.fire("pb-h:5");
+  assert.deepEqual(runs("terminal.peek").map((c) => c.args), [{ terminal: "t5.1" }]);
+  assert.deepEqual(rail.host.commands, [], "the badge does not also click the row");
+  rail.m.fire("pr-h:5");
+  assert.deepEqual(runs("pane.focus").at(-1).args, { pane: "p5" });
+  // a kept sub-agent (it has a pane): the badge shows its pane, as the agents list does
+  const kept = await mount("party", P.scenarios.forkRail, { width: 52, fixture: { panes: [{ ...N.panes.focused, pane: "p51", terminal: "t5.1" }] } });
+  kept.m.fire("pb-h:5");
+  assert.deepEqual(runs("pane.focus").map((c) => c.args), [{ terminal: "t5.1" }]);
+  // older VMs (no waitingForks): only blocked rows count, as before
+  const old = structuredClone(vm);
+  for (const r of old.groups.flatMap((g) => g.rows)) delete r.waitingForks;
+  const o = await mount("party", old);
+  assert.equal(textUnder(o.m.node("party-needyou")), "1 needs you");
+  assert.ok(!textUnder(o.m.node("pg-g:s2")).includes("!"));
+});
+
+test("party: 'N need you' walks on past a blocked agent without a pane (herdr's peek leaves the focus where it was)", async () => {
+  // Rue's agent has no pane: a click peeks it (showTerminal), so the focus stays on Kip, and the
+  // next click must go on to Pax's sub-agent instead of showing Rue again
+  const vm = structuredClone(P.scenarios.forkWaits);
+  const rue = vm.groups.flatMap((g) => g.rows).find((r) => r.heroId === 2);
+  rue.pane = null;
+  const { m, host } = await mount("party", vm, { fixture: { panes: [] } });
+  const tip = () => m.node("party-needyou").methods.find((x) => x[0] === "tooltip")[1][0];
+  assert.match(tip(), /Click to jump to Rue Two-Spaces$/);
+  m.fire("party-needyou");
+  assert.deepEqual(host.commands, [["markSeen", { heroId: 2 }]]);
+  assert.deepEqual(runs("terminal.peek").map((c) => c.args), [{ terminal: String(rue.address) }]);
+  m.render();
+  assert.match(tip(), /Click to jump to Pax the Rebased's sub-agent$/);
+  m.fire("party-needyou");
+  assert.deepEqual(runs("terminal.peek").map((c) => c.args), [{ terminal: String(rue.address) }, { terminal: "t5.1" }]);
+  m.render();
+  assert.match(tip(), /Click to jump to Rue Two-Spaces$/);
+});
+
+test("party: a hero pinned to its map shows a map-pin glyph beside the level, always in view (narrow, hovered, slim), its reason as tooltip", async () => {
+  const six = P.scenarios.six;
+  const ori = six.groups.flatMap((g) => g.rows).find((r) => r.mapPin);
+  assert.ok(ori, "the six sample has a map-pinned row");
+  for (const width of [160, 200, 268, 420]) {
+    const { m } = await mount("party", six, { width });
+    assertClean(m, `six @${width}`);
+    const pin = m.node(`pm-${ori.key}`);
+    assert.ok(pin, `@${width}: the glyph`);
+    assert.equal(pin.methods.find((x) => x[0] === "tooltip")[1][0], ori.mapPin.tooltip);
+    // on line 1 with the name and the level (line 2's career · map truncates first)
+    const line1 = pin.parent;
+    assert.ok(textUnder(line1).includes(String(ori.name)) && textUnder(line1).includes(`Lv ${ori.level}`), textUnder(line1));
+    assert.ok(!m.text().includes("(pinned)"));
+    m.hover(`pr-${ori.key}`);
+    m.render();
+    assert.ok(m.node(`pm-${ori.key}`) && m.node(`pn-${ori.key}`), `@${width} hovered: the glyph and the row buttons`);
+  }
+  // rows without a pin draw none
+  const { m } = await mount("party", six);
+  assert.equal(m.findAll((n) => typeof n.id === "string" && n.id.startsWith("pm-")).length, 1);
+  // slim rows: the glyph stays and slimFit leaves it room (the level drops first, then a chip)
+  const crowded = P.scenarios.crowded;
+  const pinned = crowded.groups.flatMap((g) => g.rows).filter((r) => r.mapPin);
+  assert.ok(pinned.length >= 2);
+  for (const width of [160, 268]) {
+    const c = await mount("party", crowded, { width });
+    assertClean(c.m, `crowded @${width}`);
+    for (const r of pinned) assert.ok(c.m.node(`pm-${r.key}`), `${r.key} @${width}`);
+  }
+  const r = { key: "h:9", heroId: 9, address: "t9", level: 57, machine: null, chips: [{ key: "c:9:boss", kind: "boss", text: "BOSS 23%", color: "#FF5A5F" }] };
+  assert.deepEqual(PartyMod.slimFit(r, 210, false), { chips: 1, level: true });
+  assert.deepEqual(PartyMod.slimFit({ ...r, mapPin: { tooltip: "x" } }, 210, false), { chips: 1, level: false }, "the pin's 14 px come off the level first");
+});
+
 test("blocked cues read on light chrome, win98's too (light chrome under a black background): one family with the stripe", async () => {
   // herdr's win98 theme as settings.rs resolve() gives it: its palette (background #ffffff, as
   // paper's) derives the chrome, then its colors overrides: background and foreground black
@@ -856,55 +965,76 @@ test("nameplate: shows the hero and herdr's own terminal title; narrow panes kee
   assert.ok(contractor.m.text().includes("(contractor)"));
 });
 
-test("nameplate: plan() drops the bars and the career so the terminal title keeps its room", () => {
+test("nameplate: plan() drops the full bars and the career so the terminal title keeps its room", () => {
   const vm = N.scenarios.long;
   const wide = PlateMod.plan(vm, 1400, false, "short title");
-  assert.ok(wide.career && wide.bars && !wide.tiny);
-  // 760 px and a long title: the whole title does not fit beside the bars, so they go (D§11.12)
+  assert.ok(wide.career && wide.bars && !wide.compact && !wide.tiny);
+  // 760 px and a long title: the whole title does not fit beside the full bars, so the compact
+  // ones show (a split, owner decision round 4) and the title truncates (its tooltip has it all)
   const mid = PlateMod.plan(vm, 760, false, N.panes.long.title);
-  assert.ok(!mid.bars, JSON.stringify(mid));
-  // a short title fits beside them
-  assert.equal(PlateMod.plan(vm, 760, false, "Fix flaky auth test").bars, true);
+  assert.ok(mid.bars && mid.compact, JSON.stringify(mid));
+  // a short title fits beside the full ones
+  const short = PlateMod.plan(vm, 760, false, "Fix flaky auth test");
+  assert.ok(short.bars && !short.compact);
   const small = PlateMod.plan(vm, 400, false, N.panes.long.title);
   assert.ok(!small.bars && !small.tiny, JSON.stringify(small));
   const tiny = PlateMod.plan(vm, 220, true, N.panes.long.title);
   assert.ok(tiny.tiny && !tiny.chip, "hovered tiny header gives the chip's room to the buttons");
 });
 
-test("nameplate: the bars never cost the title its room; equal panes match whatever the name or status; a retitle does not flicker them", () => {
+test("nameplate: the full bars never cost the title its room, the compact ones keep its floor; equal panes match whatever the name or status; a retitle does not flicker them", () => {
   const est = (s, px) => String(s ?? "").length * px;
-  const titles = ["Bump deps and fix types in the router", "Fix flaky auth test", "Split the router", "Add dark mode", "zsh"];
+  const titles = ["Bump deps and fix types in the router", "Fix flaky auth test", "Split the router", "Add dark mode", "zsh", ""];
   const heroes = [
-    ["Pim Null-Safe", "! waiting"], ["Echo the Idempotent", "fighting 3-3"], ["Tamsin the Composable", "fighting 1-1"],
-    ["Tamsin the Composable", "BOSS 94%"], ["Xan", "! waiting 59m"], ["Rue", "shipped · chest ready"],
+    ["Pim Null-Safe", "! waiting", "!"], ["Echo the Idempotent", "fighting 3-3", "3-3"], ["Tamsin the Composable", "fighting 1-1", "1-1"],
+    ["Tamsin the Composable", "BOSS 94%", "BOSS 94%"], ["Xan", "! waiting 59m", "! 59m"], ["Rue", "shipped · chest ready", "shipped"],
+    ["Tamsin of the Long Uptime", "supervising 2 Forklings", "supervising"],
   ];
-  for (let W = 480; W <= 1000; W += 10) {
+  const base = 138; // padding, icon, face, "Lv 88", the hero's gaps, the centre's gaps and divider
+  const BARS = { full: 11 + 3 + 48 + 6 + 11 + 3 + 64 + 8, compact: 11 + 3 + 28 + 6 + 11 + 3 + 36 + 8 };
+  for (let W = 400; W <= 1000; W += 10) {
     for (const title of titles) {
-      const plans = heroes.map(([name, chip]) => PlateMod.plan({ ...N.scenarios.long, name, careerTitle: "", chip: { text: chip, color: "#8A8F98" } }, W, false, title));
-      // the same width and title: the same decision for every name and status chip (the bug:
-      // 'Echo' had none beside 'Pim' with them; 'fighting 1-1' → 'BOSS 94%' toggled them)
-      assert.equal(new Set(plans.map((p) => p.bars)).size, 1, `${W} px "${title}": ${plans.map((p) => p.bars)}`);
-      // shown, they leave the whole title its room (names up to 170 px, chips up to 100 px)
-      if (plans[0].bars) {
-        for (const [i, [name, chip]] of heroes.entries()) {
-          if (est(name, 7.2) > 170 || est(chip, 5.4) + 20 > 100) continue;
-          const used = 130 + est(name, 7.2) + est(chip, 5.4) + 20 + 154;
-          assert.ok(W - used >= Math.min(est(title, 6.2), 220) - 0.01, `${W} px ${name}: title "${title}" cut beside the bars (plan ${i})`);
-        }
+      const plans = heroes.map(([name, text, short]) => PlateMod.plan({ ...N.scenarios.long, name, careerTitle: "", chip: { text, short, color: "#8A8F98" } }, W, false, title));
+      // the same width and title: the same decision for every name and status chip (round 3's
+      // bug: 'Echo' had none beside 'Pim' with them; 'fighting 1-1' → 'BOSS 94%' toggled them)
+      assert.equal(new Set(plans.map((p) => `${p.bars}/${p.compact}`)).size, 1, `${W} px "${title}": ${plans.map((p) => `${p.bars}/${p.compact}`)}`);
+      // a split shows them: the compact bars from 420 px whatever the title (owner decision round 4)
+      assert.equal(plans[0].bars, W >= 420, `${W} px "${title}"`);
+      for (const [i, [name, text, short]] of heroes.entries()) {
+        const p = plans[i];
+        if (!p.bars) continue;
+        const chipW = p.chip ? est(p.short ? short : text, 5.4) + 20 : 0;
+        const nameW = Math.min(est(name, 7.2), p.nameMax);
+        const room = W - (base + nameW + chipW + (p.compact ? BARS.compact : BARS.full));
+        // full bars leave the whole title its room (names up to 170 px, chips up to 100 px);
+        // compact ones leave it at least 40 px (it truncates sooner; its tooltip has it all)
+        if (!p.compact && est(name, 7.2) <= 170 && est(text, 5.4) + 20 <= 100) assert.ok(room >= Math.min(est(title, 6.2), 220) - 0.01, `${W} px ${name}: title "${title}" cut beside the full bars`);
+        if (p.compact) assert.ok(room >= 40 - 0.01, `${W} px ${name} (${p.short ? short : text}, name ${Math.round(nameW)}): ${Math.round(room)} px for the title beside the compact bars`);
+        // beside compact bars the chip takes its short form only when its full text would cost the title
+        if (p.compact && !p.short) assert.ok(W - (base + Math.min(est(name, 7.2), 72) + est(text, 5.4) + 20 + BARS.compact) >= 100 - 0.01);
       }
     }
   }
-  // hysteresis: bars shown stay through a slightly longer title, and go when it clearly needs the room
+  // hysteresis: full bars shown stay through a slightly longer title, and give way to the compact
+  // ones when it clearly needs the room
   const vm = N.scenarios.long;
   const W = 700;
-  const fits = "x".repeat(Math.floor((W - 554) / 6.2));
-  assert.equal(PlateMod.plan(vm, W, false, fits).bars, true);
+  const fits = "x".repeat(Math.floor((W - (base + 170 + 100 + BARS.full)) / 6.2));
+  const kind = (p) => (p.bars ? (p.compact ? "compact" : "full") : "none");
+  assert.equal(kind(PlateMod.plan(vm, W, false, fits)), "full");
   const longer = fits + "xx";
-  assert.equal(PlateMod.plan(vm, W, false, longer, "", false).bars, false, "off: a title that does not fit keeps them off");
-  assert.equal(PlateMod.plan(vm, W, false, longer, "", true).bars, true, "on: a retitle 2 characters longer keeps them");
-  assert.equal(PlateMod.plan(vm, W, false, fits + "x".repeat(6), "", true).bars, false, "and they go when it is clearly longer");
+  assert.equal(kind(PlateMod.plan(vm, W, false, longer, "", false)), "compact", "off: a title that does not fit beside the full bars gets the compact ones");
+  assert.equal(kind(PlateMod.plan(vm, W, false, longer, "", "full")), "full", "on: a retitle 2 characters longer keeps them");
+  assert.equal(kind(PlateMod.plan(vm, W, false, longer, "", true)), "full", "(prevBars true means full, as round 3 passed it)");
+  assert.equal(kind(PlateMod.plan(vm, W, false, fits + "x".repeat(6), "", "full")), "compact", "and they go when it is clearly longer");
+  // the compact bars at the split's edge: from 420 px, and once shown down to 396 (24 px)
+  const t = N.panes.long.title;
+  assert.equal(kind(PlateMod.plan(vm, 419, false, t)), "none");
+  assert.equal(kind(PlateMod.plan(vm, 420, false, t)), "compact");
+  assert.equal(kind(PlateMod.plan(vm, 396, false, t, "", "compact")), "compact", "a drag 24 px narrower keeps them");
+  assert.equal(kind(PlateMod.plan(vm, 395, false, t, "", "compact")), "none");
   // a hover never toggles them
-  for (const t of titles) assert.equal(PlateMod.plan(vm, 700, true, t).bars, PlateMod.plan(vm, 700, false, t).bars, t);
+  for (const W2 of [420, 520, 700, 900]) for (const t2 of titles) assert.equal(kind(PlateMod.plan(vm, W2, true, t2)), kind(PlateMod.plan(vm, W2, false, t2)), `${W2} "${t2}"`);
 });
 
 test("nameplate: below 360 px plan() keeps the terminal title, drops the level before it, and goes short below 200", () => {
@@ -923,13 +1053,58 @@ test("nameplate: below 360 px plan() keeps the terminal title, drops the level b
   assert.ok(!big.tiny && big.name && big.level && big.icon && big.title && !big.short);
 });
 
-test("nameplate: hovered, the chip makes way so the pane buttons stay inside the header", () => {
+test("nameplate: hovered, the chip (then the name) makes way so the pane buttons stay inside the header, bars or not", () => {
   // Measured in Chromium: without this, close (and zoom) were clipped at 360–440 px when hovered.
   const long = N.scenarios.long, title = N.panes.long.title;
   for (const W of [360, 400, 440]) assert.equal(PlateMod.plan(long, W, true, title).chip, false, `long hovered ${W}`);
   assert.equal(PlateMod.plan(long, 400, false, title).chip, true, "not hovered: the chip stays");
   assert.equal(PlateMod.plan(long, 760, true, title).chip, true, "wide and hovered: room for both");
-  assert.equal(PlateMod.plan(N.scenarios.blocked, 420, true, N.panes.blocked.title).chip, true);
+  assert.equal(PlateMod.plan(N.scenarios.blocked, 410, true, N.panes.blocked.title).chip, true, "no bars at 410: room for the chip");
+  // every hovered header's fixed parts fit: the hero (its name at nameMax), the bars, the chip and
+  // the four buttons (the title takes what is left, down to nothing)
+  const est = (s, px) => String(s ?? "").length * px;
+  const BARS = { full: 154, compact: 106 };
+  for (const [name, vm] of Object.entries(N.scenarios)) {
+    if (!vm) continue;
+    for (let W = 360; W <= 1000; W += 4) {
+      for (const prev of [false, "compact", "full"]) {
+        const p = PlateMod.plan(vm, W, true, N.panes[name]?.title ?? "", "", prev);
+        const chipW = p.chip ? est(p.short ? vm.chip.short ?? vm.chip.text : vm.chip.text, 5.4) + 20 : 0;
+        const used = 138 + Math.min(est(vm.name, 7.2), p.nameMax) + chipW + (p.bars ? BARS[p.compact ? "compact" : "full"] : 0) + 112
+          + (p.career ? est(vm.careerTitle, 5.6) + 6 : 0) + (p.contractor ? 78 : 0);
+        assert.ok(used <= W + 0.01, `${name} @${W} (prev ${prev}): ${Math.round(used)} px`);
+      }
+    }
+  }
+});
+
+test("nameplate: HP / XP bars in a split (owner decision round 4): compact from about 420 px, the title truncating sooner, its whole text in a tooltip", async () => {
+  const bars = (m, pane) => m.node(`np-bars-${pane}`);
+  const barWidths = (n) => n.children.flatMap((g) => g.children).filter((x) => x.type !== "text" && x.methods.some((y) => y[0] === "rounded"))
+    .map((x) => x.methods.find((y) => y[0] === "w")[1][0]);
+  for (const name of ["focused", "long", "blocked", "contractor", "shipped"]) {
+    const pane = N.panes[name];
+    for (const W of [420, 600, 1200]) {
+      const { m } = await mount("nameplate", N.scenarios[name], plateOpts(name, { width: W }));
+      assertClean(m, `${name} @${W}`);
+      const b = bars(m, pane.pane);
+      assert.ok(b, `${name} @${W}: the bars`);
+      const p = PlateMod.plan(N.scenarios[name], W, false, pane.name || pane.title);
+      assert.deepEqual(barWidths(b), p.compact ? [28, 36] : [48, 64], `${name} @${W}`);
+      // the terminal title keeps its text (it truncates) and says all of it on hover
+      const title = m.findAll((n) => n.type !== "text" && n.methods.some((x) => x[0] === "tooltip" && x[1][0] === (pane.name || pane.title)));
+      assert.equal(title.length, 1, `${name} @${W}: the title's tooltip`);
+    }
+    // a narrower split: none below 420 px (the title keeps what is left)
+    const { m } = await mount("nameplate", N.scenarios[name], plateOpts(name, { width: 400 }));
+    assert.equal(bars(m, pane.pane), null, `${name} @400`);
+  }
+  // 1200 px with a short title: the full bars
+  const wide = await mount("nameplate", N.scenarios.focused, plateOpts("focused", { width: 1200 }));
+  assert.deepEqual(barWidths(bars(wide.m, N.panes.focused.pane)), [48, 64]);
+  // a narrow header (below 360 px) keeps the title's tooltip too
+  const narrow = await mount("nameplate", N.scenarios.narrow, plateOpts("narrow", { width: 300 }));
+  assert.ok(narrow.m.findAll((n) => n.type !== "text" && n.methods.some((x) => x[0] === "tooltip" && x[1][0] === N.panes.narrow.title)).length === 1);
 });
 
 test("party: the footer drops release, then the Herd label, then Snippets, so Herd never leaves the sidebar", async () => {

@@ -35,6 +35,11 @@ import { TUNING as T, PALETTE, MAP_BY_ID, BOSSES, REVIEWS, RARITIES, SKILL_BY_ID
 import { fmtNum, fmtDuration, need, K, gap as gapMult, cutText, autoOn } from "../formulas.js";
 import { careerOf, stats } from "../heroes.js";
 import { liveHeroes, chestInfo, unblockedActive, unblockedLeft, tellingTitle } from "../agents.js";
+// agents.hireOutlook (round 4, owner decision "promote only") is read through the namespace, so a
+// build without it still loads (a missing named import is a link error) and the line is left out
+import * as Agents from "../agents.js";
+// herd.unseenLosses (round 4, item E4) the same way
+import * as Herd from "../herd.js";
 import { releaseInfo, sprintTarget, digestDot, freshEyesCapMin } from "../herd.js";
 import { heroCtx } from "../combat.js";
 import { fnv1a32 } from "../rng.js";
@@ -300,14 +305,54 @@ function sprintOf(world) {
   return null;
 }
 
-function footerOf(world, idx) {
+/**
+ * Chests that opened Unreviewed (D§2.4: 24 h unopened, half value, no Seals) since the person last
+ * viewed the Digest: a loss they may not have seen, so the Herd button's dot stays lit until they
+ * do (round 4). Counted from the journal's "unrev" lines (value: the chests) newer than
+ * herd.digestAt, which the Digest's digestSeen command moves on. The engine's saved count
+ * (herd.unseenLosses: herd.unseenUnrev, cleared by digestSeen / lossesSeen) is used when the build
+ * has it; the journal count is the fallback (it keeps its newest 60-120 lines, so a very busy
+ * absence may undercount).
+ */
+export function unseenUnreviewed(world) {
+  const herd = world && world.state && world.state.herd;
+  if (!herd) return 0;
+  if (typeof Herd.unseenLosses === "function") return Herd.unseenLosses(world.state);
+  if (Number.isFinite(herd.unseenUnrev)) return Math.max(0, Math.floor(herd.unseenUnrev));
+  const since = num(herd.digestAt);
+  let n = 0;
+  for (const e of herd.log || []) {
+    if (!Array.isArray(e) || e[1] !== "unrev" || !(num(e[0]) > since)) continue;
+    n += Math.max(1, Math.floor(num(e[4], 1)));
+  }
+  return n;
+}
+
+/**
+ * The Herd button's dot and its tooltip (party footer and HUD): the digest's own dot (back after
+ * 30 min away), chests opened Unreviewed not yet seen in the Digest, or an off-duty chest within
+ * 4 h of opening Unreviewed (`expiring`, from the caller). digestTip: null for the plain "something
+ * new" wording.
+ */
+function digestCue(world, expiring) {
+  const lost = unseenUnreviewed(world);
+  const dot = digestDot(world) || lost > 0 || !!expiring;
+  let tip = null;
+  if (lost > 0) tip = `Herd panel: ${lost} ${plural(lost, "chest")} opened Unreviewed (half value, no Seals): the Digest lists ${lost === 1 ? "it" : "them"}`;
+  else if (expiring) tip = "Herd panel: a chest off duty opens Unreviewed within 4 h: the Digest lists it with an Open button";
+  return { dot, tip, lost };
+}
+
+function footerOf(world, idx, expiring) {
   const herd = world.state.herd;
+  const cue = digestCue(world, expiring);
   return {
     gold: fmtNum(num(herd.gold)),
     snippets: fmtNum(num(herd.snip)),
     release: str(releaseInfo(world.state).label, "v0.0"),
     sprint: idx.sprint ? Object.assign({}, idx.sprint) : null,
-    digestDot: digestDot(world),
+    digestDot: cue.dot,
+    digestTip: cue.tip,
   };
 }
 
@@ -501,6 +546,17 @@ function buffLine(live) {
   return parts.length ? `Buffs: ${parts.join(" · ")}` : "";
 }
 
+/**
+ * When a Contractor joins the roster (agents.hireOutlook, owner decision round 4: "promote only"):
+ * "Hired at the next 04:00 game day (today: 0 of 6 hires left)"; "" for a roster hero, or a build
+ * without hireOutlook. Shared with the stage's hero tooltip (view/stage.js).
+ */
+export function hireLine(world, hero) {
+  if (!hero || !hero.contractor || typeof Agents.hireOutlook !== "function") return "";
+  const o = Agents.hireOutlook(world, hero);
+  return o && typeof o.text === "string" ? o.text : "";
+}
+
 function headLine(hero, f, live) {
   const contractor = hero.contractor ? " (contractor)" : "";
   const machine = live ? machineOf(live.address) : null;
@@ -577,10 +633,46 @@ function rowTooltip(world, idx, hero, live, f) {
   else if (f.chest) lines.push("Click the chest to open it");
   const drop = idx.drops.get(hero.id);
   if (drop) lines.push(`New ${(RARITIES[drop.rar] || RARITIES[4]).name} drop: ${drop.text}`);
+  const pin = mapPinOf(world, hero, live);
+  if (pin) lines.push(pin.tooltip);
   const forks = forkLine(live);
   if (forks) lines.push(forks);
-  if (hero.contractor) lines.push("Contractors don't get equity.");
+  if (hero.contractor) {
+    lines.push("Contractors don't get equity.");
+    const hire = hireLine(world, hero);
+    if (hire) lines.push(hire);
+  }
   return lines.join("\n");
+}
+
+/**
+ * RowVM.mapPin: the hero is pinned to the map it is on (the stage's room header click, D§11.16):
+ * the party draws a map-pin glyph beside the level, always in view (a "(pinned)" after the map on
+ * line 2 was cut off at the default sidebar width), and its tooltip says what it means.
+ */
+function mapPinOf(world, hero, live) {
+  if (!mapPinned(hero, live)) return null;
+  return { tooltip: `Pinned to ${mapLabelOf(world, live)}: the autopilot keeps it on this map (Auto on the Career tab's Map card unpins it)` };
+}
+
+/**
+ * RowVM.waitingForks: the hero's sub-agents (Forklings, D§2.7) waiting for the person, in herdr's
+ * order. They count in the party's "N need you", its group "!" and the rail's "!" badge, as
+ * herdr's agents list ranks a parent by its most urgent sub-agent; a click shows the one waiting
+ * (its pane when it has one, else herdr's peek: ui/party.js showTerminal). name: how "N need you"
+ * lists it; tooltip: the rail badge's hover.
+ */
+function waitingForksOf(hero, live) {
+  const out = [];
+  for (const x of live.forklings || []) {
+    if (x.status !== "blocked" || x.address == null) continue;
+    const title = tellingTitle(x.title, x);
+    out.push({
+      key: `wf:${x.address}`, address: str(x.address), name: `${str(hero.name, "Termling")}'s sub-agent`,
+      tooltip: `A sub-agent of ${str(hero.name, "Termling")} waits for you${title ? ` on “${title}”` : ""} · click to show it`,
+    });
+  }
+  return out;
 }
 
 function liveRow(world, idx, hero, live, slim) {
@@ -591,12 +683,12 @@ function liveRow(world, idx, hero, live, slim) {
   return {
     key: `h:${hero.id}`, heroId: hero.id, address: str(live.address), pane: live.pane ? str(live.pane) : null,
     name: str(hero.name, "Termling"), level: hero.L, careerTitle: f.career.title, clsName: f.career.clsName,
-    mapLabel: mapLabelOf(world, live) + (mapPinned(hero, live) ? " (pinned)" : ""), status: f.status, stripe: STATUS_COLOR[f.status] || COL.idle,
+    mapLabel: mapLabelOf(world, live), mapPin: mapPinOf(world, hero, live), status: f.status, stripe: STATUS_COLOR[f.status] || COL.idle,
     face: faceOf(f.state), programIcon: programIconOf(live.program), focused: !!live.focused, pinned: !!live.pinned,
     hpFrac: f.hpFrac, xpFrac: f.xpFrac, feFrac: f.feFrac,
     chips: liveChips(world, idx, hero, live, f), tooltip: rowTooltip(world, idx, hero, live, f),
     chestPending: !!f.chest, colors: termlingColors(hero, programKey, f.state),
-    levelUpAge: lu === 0 || lu === 1 ? lu : null, slim: !!slim, machine,
+    levelUpAge: lu === 0 || lu === 1 ? lu : null, slim: !!slim, machine, waitingForks: waitingForksOf(hero, live),
   };
 }
 
@@ -640,10 +732,11 @@ function offDutyRow(world, idx, hero, nowMs, slim) {
   return {
     key: `h:${hero.id}`, heroId: hero.id, address: null, pane: null,
     name: str(hero.name, "Termling"), level: hero.L, careerTitle: f.career.title, clsName: f.career.clsName,
-    mapLabel: "Off duty", status: "idle", stripe: COL.idle, face: faceOf("off"),
+    mapLabel: "Off duty", mapPin: null, status: "idle", stripe: COL.idle, face: faceOf("off"),
     programIcon: programIconOf(idx.programs.get(key) || shippedProgram(key)), focused: false, pinned: false,
     hpFrac: f.hpFrac, xpFrac: f.xpFrac, feFrac: f.feFrac, chips, tooltip: lines.join("\n"),
     chestPending: !!f.chest, colors: termlingColors(hero, key, "off"), levelUpAge: null, slim: !!slim, machine: null,
+    waitingForks: [],
   };
 }
 
@@ -739,8 +832,7 @@ export function partyView(world, args = {}) {
     groups.push({ key: "g:off", name: "Off duty", offDuty: true, chests: offChests, rows: off.map((h) => offDutyRow(world, idx, h, nowMs, slimOff)) });
   }
   const herd = world.state.herd;
-  const footer = footerOf(world, idx);
-  if (expiring) footer.digestDot = true;
+  const footer = footerOf(world, idx, expiring);
   const vm = {
     compact, title: str(herd.name).trim() || "The Herd", count: liveN + off.length, version: num(rt.version),
     calm: !!(herd.cfg && herd.cfg.calm), groups, footer, agentOrder, save,
@@ -802,7 +894,11 @@ function plateTooltip(world, hero, live, f) {
   const forks = forkLine(live);
   if (forks) lines.push(forks);
   if (f.chest) lines.push(`${f.chest.n} ${plural(f.chest.n, "chest")} waiting · ${f.chest.seals.toFixed(1)} Seals`);
-  if (hero.contractor) lines.push("Contractors don't get equity.");
+  if (hero.contractor) {
+    lines.push("Contractors don't get equity.");
+    const hire = hireLine(world, hero);
+    if (hire) lines.push(hire);
+  }
   lines.push("Click for the character sheet");
   return lines.join("\n");
 }
@@ -863,7 +959,6 @@ export function hudView(world, args = {}) {
   const minute = Math.floor(nowMs / 60000);
   if (HUD && HUD.rt === rt && HUD.version === rt.version && HUD.saveKey === saveKey && HUD.minute === minute) return HUD.vm;
   const idx = indexOf(world);
-  const f = footerOf(world, idx);
   const herd = world.state.herd;
   // as the party's Herd button: an off-duty chest near opening Unreviewed lights the dot
   let expiring = false;
@@ -872,10 +967,11 @@ export function hudView(world, args = {}) {
     const left = unreviewedLeftMs(h, nowMs);
     if (left != null && left <= EXPIRY_CUE_MS) { expiring = true; break; }
   }
+  const f = footerOf(world, idx, expiring);
   const vm = {
     gold: f.gold, snippets: f.snippets, release: f.release, sprint: f.sprint,
-    working: idx.counts.working, blocked: idx.counts.blocked, shipped: idx.counts.done, digestDot: f.digestDot || expiring,
-    calm: !!(herd.cfg && herd.cfg.calm), save,
+    working: idx.counts.working, blocked: idx.counts.blocked, shipped: idx.counts.done, digestDot: f.digestDot,
+    digestTip: f.digestTip, calm: !!(herd.cfg && herd.cfg.calm), save,
   };
   HUD = { rt, version: rt.version, saveKey, minute, vm };
   return vm;

@@ -14,7 +14,8 @@
 //                             [--quick] [--json] [--no-ref] [--seed N]
 //
 // --quick: day 1 only for every persona. Exit code 1 when a milestone is more than 15% off the
-// design (D§12.1 hours, or days for bosses past day 1; pacing4.py's unrounded hours, see DESIGN).
+// design (D§12.1 hours, or days for bosses past day 1; pacing4.py's unrounded hours, see DESIGN),
+// in --json mode too (its output carries each verdict and "bad"); 2 on an unknown argument.
 //
 //   node tools/pacing-sim.mjs --sweep [--seed N] [--json]
 //
@@ -555,6 +556,9 @@ function printTable(title, head, rows) {
 // CLI
 // ---------------------------------------------------------------------------------------------
 
+class UsageError extends Error {}
+const USAGE = "usage: node tools/pacing-sim.mjs [--persona casual|solo|typical|heavy|bot|all] [--days N] [--long] [--quick] [--json] [--no-ref] [--seed N] [--sweep]";
+
 function parseArgs(argv) {
   const o = { persona: "all", days: null, long: false, quick: false, json: false, ref: true, seed: 1, sweep: false };
   for (let i = 0; i < argv.length; i++) {
@@ -567,7 +571,11 @@ function parseArgs(argv) {
     else if (a === "--no-ref") o.ref = false;
     else if (a === "--seed") o.seed = Number(argv[++i]);
     else if (a === "--sweep") o.sweep = true;
+    else throw new UsageError(`unknown argument ${a}`);
   }
+  if (o.persona !== "all" && o.persona !== "bot" && !Object.prototype.hasOwnProperty.call(PERSONAS, o.persona)) throw new UsageError(`unknown persona ${o.persona}`);
+  if (o.days != null && !(o.days > 0)) throw new UsageError("--days needs a positive number");
+  if (!Number.isFinite(o.seed)) throw new UsageError("--seed needs a number");
   return o;
 }
 
@@ -592,10 +600,14 @@ async function main() {
     const p = PERSONAS[id];
     const days = o.quick ? 1 : o.days || p.days;
     const res = simPersona(p, { days, seed: o.seed, until: ["B9", "L100"] });
-    out.personas[id] = { events: res.events, days: res.days, ticks: res.ticks, ms: res.ms, final: res.final };
+    // the verdicts count in every output mode (--json too), so the exit code always tells
+    const t = table(id, res, ref);
+    bad += t.bad;
+    out.personas[id] = {
+      events: res.events, days: res.days, ticks: res.ticks, ms: res.ms, final: res.final, bad: t.bad,
+      verdicts: t.rows.map((r) => ({ milestone: r[0], design: r[1], engine: r[3], dev: r[4], verdict: r[5] || null })),
+    };
     if (!o.json) {
-      const t = table(id, res, ref);
-      bad += t.bad;
       printTable(
         `== ${p.name}: ${p.agents} agent(s) x ${p.hours} h/day, ${p.taskMin}-min tasks — ${res.days} day(s) simulated in ${(res.ms / 1000).toFixed(1)} s (${res.ticks} ticks)`,
         ["milestone", "design D§12.1", "pacing4.py", "real engine", "dev", ""], t.rows,
@@ -606,23 +618,28 @@ async function main() {
   if (o.persona === "all" || o.persona === "bot") {
     const want = o.quick ? [1] : o.long ? [1, 7, 30, 90] : [1, 7, 30];
     const res = simBot(Math.max(...want), { seed: o.seed });
-    out.bot = { levels: res.levels, ms: res.ms };
+    const rows = want.map((d) => {
+      const L = res.levels[d];
+      const D = BOT_DESIGN[d];
+      const ok = Math.abs(L - D) <= Math.max(1, Math.round(D * TOL));
+      if (!ok) bad++;
+      return [`day ${d}`, `Lv ${D}`, ref && ref.bot ? `Lv ${ref.bot[d] ?? ""}` : "", `Lv ${L}`, ok ? "ok" : "OFF"];
+    });
+    out.bot = { levels: res.levels, ms: res.ms, verdicts: want.map((d, i) => ({ day: d, design: BOT_DESIGN[d], engine: res.levels[d], verdict: rows[i][4] })) };
     if (!o.json) {
-      const rows = want.map((d) => {
-        const L = res.levels[d];
-        const D = BOT_DESIGN[d];
-        const ok = Math.abs(L - D) <= Math.max(1, Math.round(D * TOL));
-        if (!ok) bad++;
-        return [`day ${d}`, `Lv ${D}`, ref && ref.bot ? `Lv ${ref.bot[d] ?? ""}` : "", `Lv ${L}`, ok ? "ok" : "OFF"];
-      });
       printTable(`== Bot (D§12.2): always working, never seen — ${(res.ms / 1000).toFixed(1)} s`, ["when", "design", "pacing4.py", "real engine", ""], rows);
     }
   }
+  out.bad = bad;
   if (o.json) console.log(JSON.stringify(out, null, 1));
   else console.log(bad ? `\n${bad} milestone(s) more than ${TOL * 100}% off the design.` : `\nAll milestones within ${TOL * 100}% of the design.`);
   process.exitCode = bad ? 1 : 0;
 }
 
 if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch((e) => { console.error(e); process.exitCode = 2; });
+  main().catch((e) => {
+    if (e instanceof UsageError) console.error(`${e.message}\n${USAGE}`);
+    else console.error(e);
+    process.exitCode = 2;
+  });
 }

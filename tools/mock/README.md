@@ -86,6 +86,8 @@ mod.errors; mod.warnings; mod.stats;  // [{level, code, message, phase, copy}], 
   (one new module scope for every copy of the VM, new instances, old tasks and timers cancelled,
   no `close()`); `mod.reload()` reloads one copy alone; `mod.close()`. `globalThis[Symbol.for(
   "<mod>.…")]` is per VM: it survives a reload, not a fresh graph (another window or a restart).
+  A read or write resolves to the VM of the copy whose code runs (its async context follows a
+  load's awaits), so a task that sleeps across another VM's reload still sees its own VM's value.
 - `mod.hide()` / `mod.hide(false)`: a hidden copy (a hidden block) keeps its timers but does not
   render and gets no `<mod>.<command>`; with no shown copy, `run("<mod>.x")` is an error
   (`no-mod-copy`: herdr shows a "<mod>.x failed" toast) and lands in `M.calls().toasts`.
@@ -96,7 +98,7 @@ mod.errors; mod.warnings; mod.stats;  // [{level, code, message, phase, copy}], 
   `bad-command` error and a "<cmd> failed" toast.
 - IO trouble: fixture `readError(absPath)` → an Error (or text) rejects that read;
   `hangAfterWrite(absPath)` → true lands that write but never settles its promise (the calling
-  copy went away mid-write).
+  copy went away mid-write); `runError(name, args)` → an Error (or text) is thrown by that `run()`.
 - `setFixture()` replaces live data, `updateFixture()` merges (marks copies that read those keys
   dirty), `setChecking(true)` = `herdr-app check` behaviour, `setClock(ms)` freezes `Date.now()`.
   `Date.now()` follows the mock clock (`tick` advances it); `new Date()` stays real time.

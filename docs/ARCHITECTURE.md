@@ -95,17 +95,38 @@ herdr never sees either.
    The game must be able to resume from the save file at any moment. Never store anything only in
    memory that must survive.
    - A hot reload keeps the VM (and `globalThis`), and herdr evaluates the new code once for all
-     copies (`quickjs/mod.rs:2348-2352`). The host registers itself, inside `load()` and never at
-     top level, at `globalThis[Symbol.for("<mod>.live.v1")]`. The next build's `load()` asks it for
-     its world (`handover(fileText)`); it answers only when its last written text is the file just
-     read, so the new host continues that world (`loadedFrom: "reload"`) instead of rolling back
-     up to 30 s. The old host is retired and never writes again.
-   - The new host retires the previous build's host once it has loaded, whether or not that host
-     handed its world over: one writer per VM, since a copy whose reload fails keeps running the
-     old build. A retired host never starts or finishes a load, never registers at the symbol and
-     never pumps, saves or posts; a save it still has in flight stands down when answered
-     (`retire()` bumps its save generation). Left open: a reload that lands while the old host is
-     still loading (it registers only once loaded) next to a copy whose reload fails.
+     copies (`quickjs/mod.rs:2348-2352`). A host registers itself at
+     `globalThis[Symbol.for("<mod>.live.v1")]` when its load starts (`ensure()` → `register()`,
+     never at top level), and remembers the host registered before it (`pred`). The next build's
+     `load()` walks that chain to the newest host that finished loading (`giver()`; back-to-back
+     reloads can leave the build right before it still loading) and asks it for its world with
+     `handover(fileText, {unreadable})`. That host answers with its world as save text plus what the
+     new build needs to decide (`continues`, `lastText`/`lastGood`/`ownTexts`, `ioBlocked`, `origin`,
+     the save cue and the collapse countdown), unless it is still loading, retired, checking or
+     read-only. The new build then decides (`load()`):
+     - **the old world goes on** (`loadedFrom: "reload"`, no rollback to the save) when the file
+       is the one it continues, when the file cannot be read (the read error is carried over and
+       the file is never written), when it is missing (the next save creates it), or when it is
+       garbage another program wrote (kept aside as `save.broken`, then replaced);
+     - **the file is loaded** when another window wrote a valid save since (as `conflict()` does);
+     - when the file reads again after the old host could never read it, `recoverRead()`'s rule:
+       the file is loaded and the old world kept aside as `save.unsaved` when the old host started
+       a fresh herd or the file is a newer version (opened read-only); otherwise the old world goes
+       on and the file becomes `save.bak` on the next save.
+
+     The cue (`origin`, the restore note, the warning, `loadedAt`, failed writes, a dismissed
+     notice) and the stage's collapse countdown carry over too. A one-argument `handover(text)`
+     call (an older build's load) is answered only when the world continues that very file, as
+     before.
+   - The new host then retires every earlier build's host (`retire()` walks `pred`), whether or not
+     one handed its world over: one writer per VM, since a copy whose reload fails keeps running
+     the old build, and a host still loading never finishes. A retired host never starts or
+     finishes a load and never pumps, saves or posts; a save it still has in flight stands down
+     when answered (`retire()` bumps its save generation).
+   - Each hot reload keeps the old build's module code, which QuickJS cannot free (about
+     2–2.7 MiB a reload in the wasm harness; herdr restarts the VM at 75 % of its 256 MiB heap).
+     After a few dozen reloads in one session GC pauses grow with it: a one-frame error banner on
+     a copy then is a GC pause inside a render, not a mod bug, and restarting herdr clears it.
    - `npm run qjs -- --only reload` runs the handover in QuickJS-ng the way herdr does (the module
      graph evaluated again as `<file>?v=<n>` in the same context, the old copies' timers and tasks
      released after the new ones start, no `close()`). A new VM has no such host and loads the file.
@@ -154,10 +175,12 @@ herdr never sees either.
    `` `${ASSETS}/art/...` `` with `ASSETS = "mods/down-the-stack"` (one constant, in `ui/kit.js`,
    so `mod.clone` can rewrite it). The mod's own name is spelled only in forms `clone_mod_at`
    rewrites (`mods.rs:247-257`): `"mods/down-the-stack…"` paths and `mod: "down-the-stack"` keys.
-   `host.js` reads `MOD` from `const SELF = { mod: "down-the-stack" }`, so a clone broadcasts
-   `<clone>.tick`, opens its own dialogs and saves under `data/<clone>/`. `mod.json`'s palette
-   commands (`down-the-stack.sheet` …) are not rewritten by herdr; a clone must edit them by hand
-   (herdr's palette drops an entry whose prefix is not the mod's own name). Always set both `.w()`
+   `host.js` reads `MOD` from `const SELF = { mod: "down-the-stack" }` (and `ui/herdpanel.js`
+   spells its own `SELF` the same way), so a clone broadcasts `<clone>.tick`, opens its own
+   dialogs, finds its own stage and HUD blocks and saves under `data/<clone>/`. `mod.json`'s one
+   palette entry, `mod.open {"name": "down-the-stack"}`, is not rewritten by herdr (its
+   `"name": …` is neither form): a clone must edit it by hand, or its entry is a duplicate of the
+   original's and herdr's palette drops it (`palette/main.js` `entryId`). Always set both `.w()`
    and `.h()`; fit is always "contain"; no flip, no tint, no rotation. `svg(path)` is a one-colour mask tinted by `.text_color()` and also
    needs explicit size. SVG files must not use `<text>` (fonts are not guaranteed): draw glyphs as
    paths, or overlay real text with a div.
@@ -248,8 +271,14 @@ Herd  = { name, gold, snip, bld:[6], zone, quota:{[mapId]:kills}, meter, bank, s
           bt:[9], badges:[...ids], stash:[Item...], fame:[...], backlog:{floor, kills},
           digestAt, cfg:{auto:{equip,deprecate,learn,polish,buildings,maps,boss,farm,calls,career},
           autopilot /*master switch*/, calm, stageH, nums:"all"|"crits"|"off", glow /*loot glow min
-          rarity 0..5*/, collapse, collapsed /*host: it hid the stage*/, notify:{boss,lts,principal}},
-          log:[[at, kind, heroId, text, value]...≤60], nextUid, nextHeroId, rng, day, lastMs, tick }
+          rarity 0..5*/, collapse, collapsed /*host: it hid the stage*/, idleAt /*host: when its
+          collapse countdown started, saved as "idle" only while set*/, notify:{boss,lts,principal}},
+          log:[[at, kind, heroId, text, value]...≤60-120], nextUid, nextHeroId, rng, day, lastMs, tick }
+          // journal kinds: ship, unrev (chests opened Unreviewed: text the task, value the count),
+          // level, promo, drop, boss, retire, hire, leave, class, map, deprecate, badge
+          // fight.ids never hold Contractor ids (negative) after a load (world.js repairLoaded):
+          // Contractors are not saved and are numbered afresh, so they rejoin a resumed fight only
+          // by standing in its zone (boss.resumeFight)
 
 world.state = { v, gen, herd: Herd, heroes: [Hero...] }
 
@@ -257,7 +286,10 @@ world.rt = {                // rebuilt from snapshots; never saved
   tick, nowMs, version,     // version++ whenever anything visible changed this tick
   bind: Map<address, heroId>, live: Map<heroId, Live>, contractors: Map<address, Hero>,
   rooms: Room[], fights: Fight[], fx: Fx[], notes: Note[], banner: null|Banner,
-  dirty, majorAt, lastSaveMs, errors: []
+  dirty, majorAt, lastSaveMs, errors: [],
+  tzOffsetMin,              // from the snapshots (tick) or a command's tzOffsetMin argument
+  msHeld,                   // milestones raised before the time zone was known (counted at the next tick)
+  firstKeepsake             // {i, name}: a herd-first kill's Keepsake, named in that kill's boss toast
 }
 
 Live = {                    // per bound, live hero
@@ -324,6 +356,10 @@ export function hashKey(str) -> uint32              // alias used by renderers f
 export const g, refHit, refHP, refArmor, refDPS, mobHP, mobATK, mobXP, gold, K, need, gap, DR, itemTier,
        weaponDmg, armorPiece, itemPower, polishCost, buildingCost, releaseSeals, fmtNum, fmtDuration
 export function autoOn(state, key) -> boolean       // an autopilot system: its switch AND the master switch
+export function cutText(s, n) -> string             // at most n UTF-16 units, never half a surrogate pair
+export function wellFormed(s, repl = "\uFFFD") -> string  // lone surrogates replaced (or dropped with "")
+// herdr's bridge refuses a string with a lone surrogate (rquickjs's UTF-8 conversion): every cut of
+// outside text (titles, seats, task labels) goes through cutText
 export function mobStats(mobDef, level, {elite, bossMult}) -> {hp, atk, xp, gold}
 
 // items.js
@@ -344,14 +380,22 @@ export function stats(hero, ctx) -> Stats   // cached by (L, eq uids/pol, sp, cl
 export function grantXP(state, hero, amount, ev) -> {levels:int}      // level-ups emit fx via ev
 export function careerOf(hero) -> {title, tier}
 export function classSignature(hero) -> {recommended, median, bph, sub, n}
-export function autoLearn(hero) ; export function learn(hero, slot) ; export function respec(hero, nowMs)
+export function autoLearn(hero) ; export function learn(hero, slot) ; export function respec(hero, nowMs, {herd})
+export function setClass(state, hero, cls) ; export function recordTask(hero, task, {learn})
+// respec, setClass and a provisional switch (recordTask) re-spend refunded points only while
+// autoOn(state, "learn") (the herd's switch and the master switch; recordTask's opts.learn, which
+// agents.closeTask passes); points left unspent are spent by the next autopilot pass
 export function skillValue(hero, slot) -> {def, rank, coef, cd, ...}  // rank-resolved skill numbers
 // (the D§7.1 rotation itself lives in combat.js, which owns the action loop)
 
 // agents.js
 export function reconcile(world, snapshot, ev) -> void   // bind/unbind, seq-gated status, forklings, contractors, seen
 export function stepStatus(world, hero, live, ev) -> void // per tick: tasks, 8 s close, chests, unblocked, flap, shift
-export function openChests(world, hero, {reason}, ev) -> void
+export function openChests(world, hero, {reason}, ev) -> void  // reason "unreviewed": one "unrev" journal line
+export function questName(raw, who) -> string              // a task's name: telling title, glyph stripped, cutText to 40
+export function whyOf(world, hero, live) -> Why           // the why line's numbers; why.gap is the level gap as
+                                                          // combat.kill applies it (none below ×1 in the Backlog)
+export const _internal                                     // test-only (tellingCacheSize)
 export function heroState(live) -> "questing"|"waiting"|...
 export function tellingTitle(raw, who) -> string           // herdr's agents-list title test ("" = says nothing); a task keeps only telling titles
 
@@ -365,10 +409,16 @@ export function canChallenge(world, kind, idx) -> {ok, estimate, label}
 export function startFight(world, kind, idx, heroIds, ev) -> Fight
 export function stepFight(world, fight, ev) -> "running"|"won"|"lost"|"suspended"
 export function estimate(world, kind, idx, heroIds) -> number
+export function leaveSavedFight(world, heroId, ev) -> boolean   // retire / eviction: out of the paused fight
+                                                          // (herd.fight); one nobody is left in ends as a Postmortem
 
 // herd.js
 export function addGold(state, n) ; export function addSeals(world, n, ev) ; export function buy(state, bIdx)
 export function herdXpBonus(state) -> number ; export function journal(state, kind, heroId, text, value, nowMs)
+export function logDrop(world, hero, item, ev, {roomId, milestone}) // notable drops: journal, header note, digest count,
+                                                          // pillar (roomId "arena": before the boss) and the "lts"
+                                                          // milestone unless milestone:false (a herd-first Keepsake
+                                                          // while the boss toast names it)
 export function checkBadges(world, ev) ; export function bugTrackerKill(state, zone, elite)
 
 // autopilot.js
@@ -376,12 +426,14 @@ export function autopilot(world, ev) -> void              // every 60 ticks and 
 
 // world.js
 export function createWorld({nowMs, seed}) -> World
-export function loadWorld(text, {nowMs}) -> {world, warning:null|string}
+export function loadWorld(text, {nowMs}) -> {world, warning:null|string}   // repairLoaded mends an older build's
+                                                          // half-emoji seats, chest titles and journal texts, and drops
+                                                          // Contractor ids from the paused fight
 export function serialize(world) -> string                // JSON with crc; a held offline gap (rt.offlineHold) is
                                                           // written as not yet seen (lastMs − the held gap), so a
                                                           // restart or hot reload during the hold finds it again (§2.3)
 export function tick(world, snapshot) -> {advanced:boolean, ticks:int}   // D§2.11; uses snapshot.nowMs
-export function command(world, name, args, nowMs) -> {ok:boolean, error?:string, msg?:string}
+export function command(world, name, args, nowMs, tzOffsetMin?) -> {ok:boolean, error?:string, msg?:string}
 export function raiseMilestone(world, kind, {title, body}) -> boolean   // D§11.15, via ev.milestone
 export function takeMilestones(world, nowMs) -> [{n, kind, at, title, body}]   // the host drains them
 // World = { state, rt }
@@ -396,8 +448,14 @@ listing (`rt.offlineHold`), an offline gap or a clock behind, and turns it off w
 offline gap; `world.command` is live (a person's own action). `raiseMilestone` then
 queues it in `herd.milestones` only when `herd.cfg.notify[kind]` is on and fewer than 3 were raised
 this local day (the D§2.9 day, 04:00 local, from `rt.nowMs` and `rt.tzOffsetMin`; a clock that went
-back a day keeps the later day's count, one more than a day back counts afresh). Hooks: `world.bossKills` (a herd-first kill of a zone boss),
-`herd.logDrop` (an LTS or Keepsake drop), `heroes.grantXP` (a roster hero promoted to Principal).
+back a day keeps the later day's count, one more than a day back counts afresh). A milestone raised
+before the time zone is known (a click within a second of a load or hot reload, with no
+`tzOffsetMin` passed to `command`) waits in `rt.msHeld` and is counted toward its own local day at
+the next tick; the host passes the time zone with every command, so this is a fallback. Hooks:
+`world.bossKills` (a herd-first kill of a zone boss; it names that kill's Keepsake, `rt.firstKeepsake`,
+while "boss" is on), `herd.logDrop` (an LTS or Keepsake drop, including a boss's Keepsake: a
+repeat kill's always, a herd-first kill's only while "boss" is off), `heroes.grantXP` (a roster hero
+promoted to Principal; Junior, Senior and Staff raise nothing).
 
 ### 3.5 Commands (UI → engine), all via `GameHost.command(name, args)` → `world.command`
 
@@ -412,14 +470,14 @@ back a day keeps the later day's count, one more than a day back counts afresh).
 | `squash` | `{uids:[3]}` | Squash Merge (CI Forge 3) |
 | `reroll` | `{uid, affix}` | Reroll (CI Forge 5) |
 | `learn` | `{heroId, slot}` | spend 1 SP |
-| `autoLearn` | `{heroId, on}` | toggle |
+| `autoLearn` | `{heroId, on}` | toggle; spends at once only while `autoOn(state, "learn")`, else its msg says the herd's switch or the Autopilot is off |
 | `respec` | `{heroId}` | D§7.1 |
 | `setClass` | `{heroId, cls}` | D§4.2 override / career change |
 | `pinMap` | `{heroId, mapId\|null}` | stay here / auto |
 | `challenge` | `{kind:"boss"\|"review"\|"backlog", idx, heroId?}` | manual challenge (`backlog`: idx = floor) |
 | `retreat` | `{}` | end the current fight as a Postmortem |
 | `rename` | `{heroId, name}` or `{herd:true, name}` | rename |
-| `retire` | `{heroId}` | Lv 30+ to Hall of Fame |
+| `retire` | `{heroId}` | Lv 30+ to Hall of Fame; its pending chests open at full value (a click), and it leaves a paused boss fight (`boss.leaveSavedFight`) |
 | `rebind` | `{heroId, address}` | move a live agent onto a benched hero |
 | `buy` | `{building}` | buy a building level |
 | `setting` | `{key, value}` | herd.cfg.*: calm, nums, stageH, glow (a rarity id or 0..5), collapse, auto (the master switch: `cfg.autopilot`; the systems keep their own values), auto.*, notify.*; and collapsed (the host's note that it hid the stage) |
@@ -437,14 +495,18 @@ export function getHost() { if (!HOST) HOST = new GameHost(); return HOST; }
 class GameHost {
   constructor() { /* no herdr calls */ this.world = null; this.loading = null; this.version = 0; ... }
   ensure(cx)      // first call: if checking(): world = createWorld(…) in memory, no IO.
-                  // else cx.spawn(async) load(): the previous build's world (hot reload, §2.3) →
+                  // else register() (§2.3: the next build finds this host even while it loads),
+                  // then cx.spawn(async) load(): the previous build's world (hot reload, §2.3) →
                   // save.json → save.bak (also when save.json is missing) → either file re-signed
                   // when its only fault is the checksum (loadedFrom "unchecked") → a new herd.
                   // A text that does not load is kept aside create-only: save.broken, then
                   // save.broken-<ms> (never overwritten; identical texts kept once). A save.json
-                  // that fails to *read* is read again after 1, 3 and 6 s, then on the 30 s beat;
-                  // when it reads again a herd that started fresh comes back and the session's
-                  // world is kept aside create-only as save.unsaved (then save.unsaved-<ms>).
+                  // that fails to *read* is read again after 1, 3 and 6 s, then on the 30 s beat
+                  // (recoverRead()); when it reads again a herd that started fresh comes back and
+                  // the session's world is kept aside create-only as save.unsaved (then
+                  // save.unsaved-<ms>); a newer version's save found then is opened read-only
+                  // (never written or rotated into save.bak) and this session's world is kept as
+                  // save.unsaved; a text this host wrote itself is ours (no rollback).
                   // Until loaded, view() answers null.
   pump(nowMs)     // if now - lastPumpMs < 900 → return false. Build Snapshot from herdr live data
                   // (agents(), terminals(), spaces(), focused(), window()) and call tick(world, snap).
@@ -467,7 +529,10 @@ class GameHost {
                   // lifecycle.rs:104-114): drops it, reads save.json and writes over it when it
                   // holds a text of ours. Every write carries a generation; a superseded one stops.
   saveStatus()    // null, or {readOnly, notSaving, restoredFrom: null|"bak"|"fresh"|"unchecked",
-                  // title, message, detail, since}: save trouble the player must see (D§13.1,
+                  // title, message, detail, since}, read from host.origin (save|bak|fresh|unchecked|
+                  // new; a hot reload carries origin, the note, the warning, loadedAt, failed
+                  // writes and a dismissed notice, while stats.loadedFrom says "reload" for
+                  // diagnostics): save trouble the player must see (D§13.1,
                   // D§13.4). The stage, party, hud and herd views get it as args.save (not in the
                   // memo key: a change moves host.version). main.js draws a dismissable chip in the
                   // stage's sky; the party footer (a dot on the rail) and the HUD show an amber cue
@@ -477,6 +542,9 @@ class GameHost {
   stageAuto(nowMs, {turnedOn?})        // D§11.15 "collapse the stage when nothing is working" (below)
   viewError(kind) // a view builder that threw: main.js shows the error chip (the party falls back
                   // to a plain list of herdr's agents()) instead of an endless "loading".
+  view(kind, args) // memoised per world version: at most MEMO_MAX (64) view models; when full the
+                  // oldest go first, pane headers and dialogs before stage, party and HUD (which
+                  // the next pump prewarms), so a frame of many pane headers never empties the memo.
 }
 // save path: `${appHome()}/data/down-the-stack/save.json` (writeTextFile creates parent dirs; data/ is
 // not watched). herdr keeps the copies' localStorage files (store*.json) in the same folder.
@@ -492,6 +560,13 @@ write landed:
   loses to another writer drops them (that window posts its own, or, when it wrote this very text,
   holds them taken: `conflict()` answers `"same"`); a write that never settles (its copy closed)
   posts nothing: at most once, never twice;
+- the one way a milestone is posted twice is a rollback of the save: a cold restart that finds
+  `save.json` garbage loads `save.bak`, which may predate the save that took it (D§13.1). Two
+  windows on one save plus another program deleting or garbling `save.json` within seconds of a kill
+  can also repeat one (the `conflict()` paths load the other window's world, which lacks the kill).
+  herdr 0.1.17 runs one window per app home (`main.rs` `raise_running`, `control.rs` "One Herdr per
+  home"), so two windows on one save arise only from two homes sharing `data/`, or from an old
+  VM's `close()` racing a VM restart (`window.rs` `restart_mods`). A hot reload never rolls back (§2.3);
 - a retired host (a hot reload took over) never posts; nothing happens while `checking()` (the host
   has no IO then, and `post` checks `checking()` again), for a read-only world, or for a milestone
   older than 10 minutes; `postedKeys` is a last guard against a repeat;
@@ -509,17 +584,32 @@ It finds the layout node whose content is this mod's `{role: "stage"}` (any id) 
 transitions only:
 - something quested (a crashed hero, between respawns, counts as questing) or supervised and now
   nothing does: after 60 s of that it runs `layout.hide {id}` (unless the stage is already hidden)
-  and records `herd.cfg.collapsed`;
-- a hero quests or supervises again (or the setting is turned off) while `collapsed`: `layout.show`;
-- turning the setting on while nothing works collapses at once.
+  and records that it holds the stage hidden;
+- a hero quests or supervises again (or the setting is turned off) while it holds the stage:
+  `layout.show`;
+- turning the setting on (here, or in a save another window wrote) while nothing works collapses
+  at once.
+
+The countdown's start is saved as `herd.cfg.idleAt` (encoded `idle`, present only while set),
+written only when this host's countdown changes, so two windows never overwrite each other's value.
+A hot reload hands the countdown over (§2.3); a restart inside the minute goes on with the saved
+start, but gives the new session at least 10 s of its own idling (`RESUME_IDLE_MS`: herdr may not
+have reported the agents' work yet). A start or reload while nothing works and no countdown is
+saved never collapses: it is not a transition.
 
 herdr's `layout.toggle` / `.show` / `.hide` set the node's `hidden` (`window.rs:3646-3654`) and
-`save()` keeps it in the layout's click state across restarts (`layouts/.state`). So
-`cfg.collapsed` is saved too: after a restart the host still knows the hidden stage is its own and
-shows it at the first work. A stage the person shows by hand clears `collapsed` (it is not re-hidden
-until the next stop of work), and one they hide by hand is never shown by the host. `layout()` is
-read only while something is due or held; never while `checking()`, never for a read-only world, and
-nothing happens in a layout without this mod's stage block.
+`save()` keeps it in the layout's click state across restarts (`layouts/.state/<layout>.json`,
+`window.rs:1236-1256`; `layout_sync.rs` re-applies it unless the layout file's own field changed).
+So the host keeps two notes: `herd.cfg.collapsed` (saved, so after a restart it still knows the
+hidden stage is its own and shows it at the first work) and `hidStage`, this window's own, which
+starts from `cfg.collapsed` at the first `stageAuto` and is never changed by a save another window
+wrote (a conflict reload). A stage the person shows by hand clears both (it is not re-hidden until
+the next stop of work), and one they hide by hand is never shown by the host. A `layout.hide` that
+`run` refuses is not recorded as held. `layout()` is read only while something is due or held;
+never while `checking()`, never for a read-only world, and nothing happens in a layout without this
+mod's stage block. A stage hidden without the host's note (a `.state` file left from an earlier
+install, a lost save) stays hidden until shown by hand (`ctrl-shift-g` with the keys merged, or
+`herdr-app do layout.show --id stage`): see the open decision in `out/VERIFY.md`.
 
 ```js
 // main.js (sketch; the integration owner finalises it)
@@ -562,11 +652,17 @@ module. A role reads only
 (e.g. the nameplate reads `panes()` for the real terminal title).
 
 Key commands (`keys.json` section `layout:Down-the-Stack`, optional): `down-the-stack.sheet`
-(focused agent's hero), `down-the-stack.herd`, `down-the-stack.calm`. `mod.json` adds palette
-entries for the same (herdr lists every mod's palette entries in every layout: used while another
-layout shows, they fail with a "down-the-stack.sheet failed" toast, because `<mod>.<command>`
-reaches shown copies only). There is no "switch to layout" entry: herdr's palette already builds
-`Layout: Down-the-Stack` and drops duplicates.
+(focused agent's hero), `down-the-stack.herd`, `down-the-stack.calm`, plus `layout.toggle:stage`.
+`<mod>.<command>` reaches shown copies only, so these work only while this layout shows (keys in a
+`layout:` section apply only there anyway). `mod.json`'s one palette entry, "Down the Stack: Herd
+panel", runs the app command `mod.open {"name": "down-the-stack"}` instead, which works in any
+layout: it opens `mod.json`'s `"overlay"` (the Herd panel on its Digest tab) and closes it when run
+again (herdr's palette lists every mod's entries in every layout, and a `<mod>.<command>` entry
+picked elsewhere failed with a "down-the-stack.sheet failed" toast). The character sheet and calm
+mode have no palette entry: two `mod.open` entries for one mod would be duplicates (`palette/main.js`
+`entryId` drops them); they stay on the keys, the Herd panel's Roster and Settings tabs, and
+clicks. There is no "switch to layout" entry: herdr's palette already builds `Layout:
+Down-the-Stack` and drops duplicates.
 herdr shows ids, not our title. These places show the layout file name ("Down-the-Stack") or the
 mod folder name ("down-the-stack"), so both are named after the game and the codename `mapledr`
 appears on no screen; the game's own UI shows neither id (D§1).
@@ -712,6 +808,33 @@ SheetVM / HerdVM typedefs in `ui/sheet.js` / `ui/herdpanel.js` are the full list
   records the task's real name; Forkling and chest titles from older saves go through
   `tellingTitle` where they are shown. `tellingTitle` remembers its answers (a bounded map keyed by
   title, terminal, program and app): its regexes cost ~20 µs a call in QuickJS, ~2.5 µs from the map.
+- round 3: `StageVM.rooms[].pin.pinned` (every hero in the room is pinned: the header draws a
+  cream pin before its title, 2 elements that go with the stats on bare rooms, detail level 10 and
+  up; its tooltip reads "Pinned: … click to unpin"); a pinned hero's tooltip names the header click
+  only when its whole room is pinned (`roomGroups(L)` sets `ctx.headerUnpins`), else "Auto on the
+  Career tab's Map card unpins"; `RowVM.mapLabel` ends "(pinned)";
+- round 3: `PartyVM.groups[].chests` (the folded "Off duty" group's pending chests: a chip "×n";
+  older VMs fall back to counting `chestPending` rows); the footer's and `HudVM.digestDot` also
+  light while an off-duty chest is within 4 h of opening Unreviewed (`herd.digestDot`); off-duty
+  row tooltips say when its chest opens Unreviewed;
+- round 3: `chrome.whyLine(why, {shift, level})`: with the hero's level, a part
+  "1-1 is 31 levels below: ×0.03" (`gapPart` / `gapText`) whenever the level gap is below ×1 (never
+  in the Backlog); the sheet's XP breakdown carries it as part key `gap`. `Why.gap` (agents.whyOf)
+  is the gap as combat applies it;
+- round 3: the Herd panel's env carries `chrome: {hud, hudId, stage: null|{id, hidden}}`
+  (`ui/herdpanel.js chromeNodes()`: the HUD and stage blocks found by content, this mod and role,
+  as host.js `stageNode` does; the Stage height row is disabled when the layout has no stage, and a
+  hidden stage is still resized), and a `bossScroll` ScrollHandle: the Bosses tab's fighting row
+  is revealed with `scroll_to_item` once per fight and per visit (rows are direct children of the
+  scroll area);
+- round 3: the autopilot rows' hints read their thresholds from `T.boss.autoAt` / `farmAt`; the
+  "career" switch is labelled "Promotion reviews" (Senior and Staff Reviews at ≥ 90 %); the skills
+  tab's `autoLearn.hint`, the skill-point tooltip, the respec tooltip and the party's unspent-points
+  star follow `autoOn(state, "learn")` as well as the hero's own switch;
+- round 3: the digest has an "Opened Unreviewed" section (`herd.digest().unreviewed`, from the
+  journal kind `unrev`) and the journal line "Chest opened Unreviewed: “…” (half value, no Seals)";
+- round 3: `taskLabel` cuts with `cutText` (never half an emoji), and so does every engine cut of
+  outside text; the mock and `npm run qjs` refuse a lone surrogate in any text, as herdr does.
 
 `sheetView`/`herdView` shapes are owned jointly by the engine-world author and the sheet/herd
 UI author; their exact fields are defined in `game/view.js` JSDoc, which is the source of truth.
@@ -757,7 +880,8 @@ them, which animate the scaled value (`materialize.rs:3183-3197`).
 | Movement | positions change between ticks → `.transition("left", {duration: 900, easing: "ease-out"})` with a stable `.id(key)` |
 | Damage number | `age 0`: render at (x, y), `.opacity(1)`; `age 1`: same `.id`, (x+dx, y−28), `.opacity(0)`, `.transition("top", 900)`, `.transition("opacity", 900)`; dropped at age 2 |
 | Poof / coin / loot | same two-tick pattern (coin/loot: age 1 moves to the hero and fades) |
-| Level-up column | cyan div, `age 0..1`, `.loop("opacity", {from:0.3, to:0.9, period: 400})` |
+| Level-up column | cyan div, `age 0..1`, `.loop("opacity", {from:0.3, to:0.9, period: 1600})` (one pulse over its 1.6 s: a period is a whole there-and-back, `materialize.rs:3092`, and nothing flashes faster than 1 Hz); it starts at y ≥ 18 (below the header band on short stages) and its label at y ≥ 20 |
+| Loot pillar | 48 px column in the rarity colour, no handler (its click is a transparent box under the heroes); the rarity name sits on a nearly opaque dark plate painted after every other effect, so a damage number never covers it |
 | Blocked bubble | `.loop("top", {…3 px…, period: 1400})`; clickable `div` wrapper → `showTerminal(address)` (`ui/party.js`: `pane.focus {terminal}` with a pane, else `terminal.peek`; D§2.7) |
 | Face | `.frames([">_", "> "], 530)` while questing (blinking cursor); static glyph otherwise |
 | Campfire | SVG + flame glyph `.frames(["^", "*", "^", "~"], 200)`… or opacity loop on a glow div |
@@ -806,7 +930,16 @@ Built from divs (no image needed): 40×48 at scale 1.
   `layout.toggle` / `.show` / `.hide` / `.resize` act on the fixture's layout copy-on-write (and hide
   or show the copies of that mod block), failing with a toast for a node the layout lacks;
   `notify()` records its payload, validates its action and reports a call while `checking()`;
-  `checking()` controllable; `readTextFile`/`writeTextFile` against an in-memory FS.
+  `checking()` controllable; `readTextFile`/`writeTextFile` against an in-memory FS; a fixture's
+  `runError(name, args)` hook makes a `run()` throw (a refused `layout.hide`).
+- Per-VM globals: a mod's registered `Symbol.for("<mod>.…")` slots on `globalThis` resolve per
+  mock VM through a Proxy in `globalThis`'s prototype chain (to the VM whose copy's code runs,
+  following awaits, else the VM entered last), so two windows' hosts never see each other; they
+  are never own properties of `globalThis` (a `delete` of one is therefore a no-op in the mock;
+  the mod writes `null` instead).
+- The bridge refuses text herdr would refuse: an unpaired UTF-16 surrogate in a text child, an
+  `.id()`, a tooltip or any other string argument throws (`validate.mjs checkBridgeable`; herdr
+  converts every string with rquickjs's UTF-8 conversion). The `tools/qjs` shim does the same.
 - Budgets (render 50 ms, handler / timer / init 500 ms, module evaluation 500 ms) are judged by
   `state.mjs stopwatch()`: the lower of wall time and process CPU time over the call, so a busy
   machine waiting for a CPU never fails a render, while real work still counts
@@ -827,8 +960,12 @@ Built from divs (no image needed): 40×48 at scale 1.
    roster). Each runs at its role's widths (the stage at check's default 360/960/1600, the late
    stage also at 3200, the 30-hero stage at 960/1600/3200) and zooms 1/2: init + render, then
    per zoom and width a resize + render, 3 simulated ticks and a re-render, then close. Must produce zero validator errors, keep render time < 50 ms (the lower of wall and CPU time, §7.1), and keep
-   every stage render within 400 elements and 150 animated nodes (§6.1).
-3. Exit non-zero with a precise error list.
+   every stage render within 400 elements and 150 animated nodes (§6.1). The `*-emoji-cut` roles
+   (stage, party, nameplate, sheet, herd) put an emoji across unit 40 of a title and a pane name
+   and across unit 32 of a tab and a space name, and load a save an older build cut through an
+   emoji (seats, a journal line): any half emoji reaching herdr fails them.
+3. Exit 1 with a precise error list; exit 2 (INCOMPLETE, usage line) on an unknown argument, a
+   missing value, bad `--widths` / `--zooms`, or a `--role` that matches nothing.
 
 ### 7.3 `tools/preview/`
 Converts recorded trees to HTML/CSS (flex, absolute, sizes, colors, text, images, svg masks,
@@ -869,7 +1006,20 @@ review, not pixel-exact.
   each at min(wall, CPU), and time their perf checks as the best of several batches. Run `PERF=1
   npm test` on an idle machine for the strict numbers.
 `tools/pacing-sim.mjs` reproduces D§12.1 milestones for the four personas within ±15% and the
-bot plateau (D§12.2); it is run in CI-like `npm run pacing`.
+bot plateau (D§12.2); it is run in CI-like `npm run pacing`. Its exit code is 1 when a milestone or
+the bot is off, in `--json` mode too (the JSON carries each verdict and `bad`), and 2 on an unknown
+argument. `test/pacing.test.mjs` simulates its whole games in `before()` hooks.
+
+### 7.5 `tools/qjs/` (`npm run qjs`)
+The mod in QuickJS-ng (wasm interpreter) with herdr's limits and sandbox prelude; phases and
+options in `tools/qjs/README.md`. It splits findings into failures and warnings and prints
+`RESULT:`; `results.json` carries `failures` and `warnings`. Exit 1 on a failure: a correctness
+problem (a throw, an error chip, a render/view/task/host/shim error, a fuzz failure, a diff
+mismatch, a failed reload or load, a save round trip that is not identical, an unmapped role, a
+failed phase) or a time past one of herdr's budgets (render 50 ms, callbacks 500 ms, module
+evaluation 500 ms). Half a budget and the tick p95 over the ~5 ms target are warnings (exit 0 unless
+`--strict`). Exit 2 on a usage error: an unknown argument or phase, a missing value, a
+non-positive `--ticks` / `--seconds` / `--long`.
 
 ---
 
@@ -939,7 +1089,8 @@ Palette per zone from D§9.2; rarity colours D§8.2; reserved colours D§11.1.
 6. Reduced motion: herdr exposes no OS reduced-motion flag; Calm mode (D§11.15) covers it and
    additionally disables loops.
 7. D§3.4 Contractors are created in memory and never saved (as designed); Rebind is in the sheet.
-8. The stage height setting maps to `layout.resize {id:"stage", px}`.
+8. The stage height setting maps to `layout.resize {id, px}` on the layout node whose content is
+   this mod's stage (any id, as `host.js stageNode` finds it; disabled in a layout without one).
 9. D§5.7 map choice: Power Level is class-biased with the reference kit (Refactorer/Forkbinder
    3–4 below level, Hotfixer 3–6 above), so autopilot picks maps by hero level: the deepest open map
    whose mid level is ≤ L + 1 (by L after a crash in the last 10 minutes; the crash rule still drops
@@ -951,4 +1102,7 @@ Palette per zone from D§9.2; rarity colours D§8.2; reserved colours D§11.1.
     `docs/BALANCE.md`; every changed number carries a `// balance:` comment in `game/data.js`.
 12. D§11.15 as built (DESIGN §11.15 notes): notifications count the D§2.9 game day (04:00 local),
     come from live ticks only and are posted after the save that took them; the stage collapses a
-    minute after the last hero stops; the autopilot master switch keeps the per-system switches.
+    minute after the last hero stops (a restart or reload continues a countdown, an idle start
+    never starts one); the autopilot master switch keeps the per-system switches, and every
+    automatic re-spend of skill points (auto-learn, respec, a class change) obeys it and the
+    herd's auto-learn switch.

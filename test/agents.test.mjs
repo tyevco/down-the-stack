@@ -157,6 +157,52 @@ describe("seat keys and binding (D§3.1, D§3.2)", () => {
     assert.equal(sim.id("t2"), id);
     assert.equal(sim.hero("t2").seat, "renamed repo/claude");
   });
+
+  test("another program started in a terminal binds like a new terminal of its own seat: the old hero keeps its seat and its unseen chest", () => {
+    // herdr keeps a terminal's address while its agent exits; the terminal leaves agents() while only
+    // the shell runs and comes back with the next program (D§3.1: a seat is space + program)
+    const codex = { app: "codex", program: prog("codex"), title: "" };
+    const sim = new Sim().set("t1", "working").tick(600).set("t1", "done").tick(10);
+    const claude = sim.hero("t1");
+    claude.L = 3;
+    assert.equal(claude.pend.length, 1, "a chest nobody has seen");
+    const seals = sim.state.herd.seals;
+    sim.drop("t1").tick(3); // claude exits: the chest waits (closing is not acknowledgment, D§2.4)
+    sim.set("t1", "idle", Object.assign({ seq: 1 }, codex)).tick(3);
+    const other = sim.hero("t1");
+    assert.notEqual(other, claude, "codex gets a hero of its own");
+    assert.equal(other.seat, "herdr-app/codex");
+    assert.equal(claude.seat, "herdr-app/claude", "the claude hero keeps its seat");
+    assert.equal(claude.pend.length, 1, "and its chest, still unseen");
+    assert.equal(sim.state.herd.seals, seals, "no Seals were credited");
+    sim.set("t2", "working").tick();
+    assert.equal(sim.hero("t2"), claude, "the next claude terminal carries the claude hero on");
+
+    // a benched hero of the new program is the one that comes back
+    const sim2 = new Sim().set("t1", "idle").set("t9", "idle", codex).tick(2);
+    const [c1, x1] = [sim2.hero("t1"), sim2.hero("t9")];
+    sim2.drop("t1").drop("t9").tick();
+    sim2.set("t1", "idle", Object.assign({ seq: 1 }, codex)).tick();
+    assert.equal(sim2.hero("t1"), x1, "the benched codex hero");
+    assert.equal(c1.seat, "herdr-app/claude");
+    assert.equal(sim2.state.heroes.length, 2, "no hire");
+    noErrors(sim);
+    noErrors(sim2);
+  });
+
+  test("a space name cut to 32 units never ends in half an emoji (herdr rejects a lone surrogate)", () => {
+    const name = "Payments platform rewrite 2026 \u{1F680} next"; // the emoji spans units 31-32
+    assert.equal(A.normSeat(name), "payments platform rewrite 2026 ");
+    assert.equal(A.normSeat("x".repeat(31) + "\u{1F680}"), "x".repeat(31), "the pair is dropped whole");
+    assert.equal(A.normSeat("x".repeat(30) + "\u{1F680}"), "x".repeat(30) + "\u{1F680}", "a pair that fits stays");
+    const sim = new Sim().set("t1", "idle", { space_name: name }).tick();
+    const h = sim.hero("t1");
+    assert.equal(h.seat, "payments platform rewrite 2026 /claude");
+    assert.ok(h.seat.isWellFormed());
+    sim.drop("t1").tick();
+    sim.set("t2", "idle", { space_name: name, space: "s2" }).tick();
+    assert.equal(sim.hero("t2"), h, "the seat still matches its space");
+  });
 });
 
 describe("roster limits and Contractors (D§3.4)", () => {
@@ -214,9 +260,13 @@ describe("roster limits and Contractors (D§3.4)", () => {
       sim.state.heroes.push(h);
     }
     const victim = sim.state.heroes[4];
+    // the victim was the last one in a paused boss fight: it leaves with the hero (a Postmortem)
+    sim.state.herd.fight = { k: "b", i: 0, ids: [victim.id], t: 10, ph: 1, p: [[0, 100, 500]], m: {}, pool: 500, dl: 100, sq: 0 };
     sim.set("n1", "idle").tick();
     assert.equal(sim.state.heroes.length, 30);
     assert.ok(!sim.state.heroes.includes(victim));
+    assert.equal(sim.state.herd.fight, null, "the paused fight it was alone in closed");
+    assert.ok(sim.state.herd.log.some((e) => e[1] === "boss" && /Postmortem/.test(e[3])));
     assert.ok(!sim.hero("n1").contractor);
     assert.ok(sim.state.herd.stash.some((it) => it.uid === 9004), "the Beta hat went to the stash");
     assert.ok(sim.state.herd.log.some((e) => e[1] === "leave" && e[2] === victim.id));
@@ -308,6 +358,8 @@ describe("tasks and the 8-tick close (D§2.3)", () => {
     }
     sim.set("t1", "working", { title: "⠋ Refactor the webhook sender so retries back off exponentially" }).tick(2);
     assert.equal(sim.live("t1").task.title, "Refactor the webhook sender so retries b", "a telling retitle wins, cut to 40 characters (D§2.3)");
+    sim.set("t1", "working", { title: "Refactor the webhook sender, so retries back off" }).tick(2);
+    assert.equal(sim.live("t1").task.title, "Refactor the webhook sender, so retries", "a cut that ends on a space is trimmed");
     sim.set("t1", "working", { title: "Refactor the webhook sender so  retries" }).tick(2);
     sim.set("t1", "working", { title: "zsh" }).tick(2);
     sim.set("t1", "done").tick(8);
@@ -327,17 +379,25 @@ describe("tasks and the 8-tick close (D§2.3)", () => {
 
   test("tellingTitle remembers its answers per title and terminal, never across programs or terminals", () => {
     const codex = { address: "t1", program: { key: "codex", name: "Codex" }, app: "codex" };
+    const codex2 = { address: "t2", program: { key: "codex", name: "Codex" }, app: "codex" };
     const claude = { address: "t2", program: { key: "claude", name: "Claude Code" }, app: "claude-code" };
     for (let round = 0; round < 2; round++) { // the second round answers from the cache
       assert.equal(A.tellingTitle("✳ Codex", codex), "");
       assert.equal(A.tellingTitle("✳ Codex", claude), "Codex");
       assert.equal(A.tellingTitle("t1", codex), "");
       assert.equal(A.tellingTitle("t1", claude), "t1");
+      // the same program in another terminal: only the address tells them apart
+      assert.equal(A.tellingTitle("t1", codex2), "t1", "another terminal's id is a title like any other");
+      assert.equal(A.tellingTitle("t2", codex2), "");
       assert.equal(A.tellingTitle("Claude Code", null), "Claude Code");
       assert.equal(A.tellingTitle("Claude Code", claude), "");
     }
     // past its size the cache starts afresh; answers stay the same
-    for (let i = 0; i < 1200; i++) assert.equal(A.tellingTitle(`⠋ Task ${i}`, codex), `Task ${i}`);
+    for (let i = 0; i < 1200; i++) {
+      assert.equal(A.tellingTitle(`⠋ Task ${i}`, codex), `Task ${i}`);
+      assert.ok(A._internal.tellingCacheSize() <= A._internal.TELLING_MAX, "the cache stays bounded");
+    }
+    assert.ok(A._internal.tellingCacheSize() > 0);
     assert.equal(A.tellingTitle("✳ Codex", codex), "");
     assert.equal(A.tellingTitle("", codex), "");
     assert.equal(A.tellingTitle(null, codex), "");
@@ -395,6 +455,23 @@ describe("tasks and the 8-tick close (D§2.3)", () => {
     assert.equal(sim.live("t1").bubbleShown, true);
   });
 
+  test("a Quest name cut to 40 units never ends in half an emoji (herdr rejects a lone surrogate)", () => {
+    // the emoji starts at unit 39: a plain cut would keep its high surrogate alone
+    const sim = new Sim().set("t1", "working", { title: "✳ Wire the release checklist into CI now \u{1F680} and tag it" }).tick(120);
+    const title = sim.live("t1").task.title;
+    assert.equal(title, "Wire the release checklist into CI now");
+    sim.set("t1", "done").tick(8);
+    const h = sim.hero("t1");
+    assert.equal(h.pend[0].title, "Wire the release checklist into CI now", "the chest records the whole characters");
+    assert.equal(A.questName("Fix the login flow for the mobile apps \u{1F680} and more", null), "Fix the login flow for the mobile apps");
+    assert.equal(A.questName("Fix the login flow for the mobile app \u{1F680} and more", null), "Fix the login flow for the mobile app \u{1F680}", "a pair that fits stays");
+    for (let k = 30; k < 45; k++) {
+      const t = A.questName("x".repeat(k) + "\u{1F680}".repeat(10), null);
+      assert.ok(t.isWellFormed() && t.length <= 40, `emoji from unit ${k}`);
+    }
+    noErrors(sim);
+  });
+
   test("closing records the task on the class signature", () => {
     const sim = new Sim().set("t1", "working").tick(240).set("t1", "done").tick(8);
     const h = sim.hero("t1");
@@ -417,6 +494,29 @@ describe("tasks and the 8-tick close (D§2.3)", () => {
     A.closeTask(sim.w, h, live, "done", null);
     assert.equal(h.cls, D.CLASS_IDX.hotfixer, "switched for free (D§4.2)");
     assert.ok(sim.w.rt.apGear.has(h.id), "the targeted equip sweep runs this tick");
+  });
+
+  test("a provisional switch re-spends the refunded points only while the herd's auto-learn is on (and the autopilot master switch)", () => {
+    for (const mode of ["on", "learn off", "master off", "hero off"]) {
+      const sim = new Sim().set("t1", "working").tick(30);
+      const h = sim.hero("t1");
+      const live = sim.live("t1");
+      Object.assign(h, { L: 12, cls: D.CLASS_IDX.refactorer, prov: 1, sp: [0, 0, 0, 0, 0, 0, 0], spFree: 11 });
+      h.sig = { tm: [3, 3, 3, 3, 3], tb: [0, 0, 0, 0, 0], ts: [0, 0, 0, 0, 0], blocks: 0, workMin: 15, subTasks: 0, n: 5 };
+      const cfg = sim.state.herd.cfg;
+      if (mode === "learn off") cfg.auto.learn = false;
+      if (mode === "master off") cfg.autopilot = false;
+      if (mode === "hero off") h.autoLearn = false;
+      live.task.workSec = 180;
+      A.closeTask(sim.w, h, live, "done", null);
+      assert.equal(h.cls, D.CLASS_IDX.hotfixer, `${mode}: switched`);
+      const spent = h.sp.reduce((a, b) => a + b, 0);
+      assert.equal(spent + h.spFree, 11, `${mode}: nothing lost`);
+      assert.equal(spent, mode === "on" ? 11 : 0, `${mode}: ${mode === "on" ? "re-spent at once" : "the points wait for the person"}`);
+      sim.tick(70); // an autopilot pass: it spends nothing while a switch is off either
+      assert.equal(h.sp.reduce((a, b) => a + b, 0), mode === "on" ? 11 : 0, `${mode}: after an autopilot pass`);
+      noErrors(sim);
+    }
   });
 });
 
@@ -536,7 +636,7 @@ describe("Commit Chests and seen (D§2.4)", () => {
     assert.ok(near(long.state.herd.seals, 20 * 12 + 3, 1e-6));
   });
 
-  test("a terminal that ends closes its task into a pending chest; after 24 h it opens Unreviewed", () => {
+  test("a terminal that ends closes its task into a pending chest; after 24 h it opens Unreviewed", async () => {
     const sim = new Sim().set("t1", "working").tick(600);
     const h = sim.hero("t1");
     sim.drop("t1").tick();
@@ -550,6 +650,15 @@ describe("Commit Chests and seen (D§2.4)", () => {
     assert.equal(sim.state.herd.seals, 0, "Unreviewed chests give no Seals");
     assert.ok(sim.state.herd.gold > gold0, "half gold");
     assert.ok(!sim.state.herd.log.some((e) => e[1] === "ship"));
+    // where the chest went: one journal line, and the digest lists it
+    const lines = sim.state.herd.log.filter((e) => e[1] === "unrev");
+    assert.equal(lines.length, 1, "one 'opened Unreviewed' journal line");
+    assert.equal(lines[0][2], h.id);
+    assert.equal(lines[0][3], "Fix the flaky test", "it names the task");
+    assert.equal(lines[0][4], 1, "the count");
+    const dg = (await import("../mods/down-the-stack/game/herd.js")).digest(sim.state, 0);
+    assert.equal(dg.unreviewed.length, 1);
+    assert.equal(dg.empty, false);
     noErrors(sim);
   });
 
@@ -784,6 +893,22 @@ describe("first sight, shift and the why tooltip", () => {
     assert.equal(A.whyOf(w, h1, l1).banner, D.TUNING.party.banner);
     assert.deepEqual(keys(A.whyOf(w, h1, l1)), keys(fresh(h1, l1)));
     for (const [h, l] of pairs) assert.deepEqual(A.whyOf(w, h, l), fresh(h, l), h.name);
+  });
+
+  test("live.why reports the level gap as combat.kill applies it: none in the Backlog (D§9.8)", async () => {
+    const { makeWorld } = await import("./helpers/engine.mjs");
+    // the Backlog's mobs are level 100 and heroes stop at Lv 100, so the clamp binds only past the
+    // cap (a hand-edited save); the test keeps whyOf in step with combat.kill all the same
+    const w = makeWorld({ heroes: [{ cls: "refactorer", L: 100, mapId: "1-1" }, { cls: "refactorer", L: 106 }] });
+    const [[h1, l1], [h2, l2]] = A.liveHeroes(w);
+    l2.mapId = D.BACKLOG.id;
+    l2.floor = 1;
+    const low = A.whyOf(w, h1, l1);
+    assert.ok(low.gap < 1, `1-1 is far below Lv 100: ×${low.gap}`);
+    const bl = A.whyOf(w, h2, l2);
+    assert.equal(bl.gap, 1, "the Backlog has no gap penalty");
+    assert.ok(bl.xpPerMin > 0);
+    assert.equal(bl.xpPerMin, Math.round(D.TUNING.refKillsPerMin * F.mobXP(D.BACKLOG.level) * (1 + bl.xpPct) * bl.freshEyes * bl.shiftKill * bl.crowding * bl.working));
   });
 
   test("live.why refreshes every 5 ticks, heroes taking turns (a fifth of the herd a tick), and at once on a state change", async () => {

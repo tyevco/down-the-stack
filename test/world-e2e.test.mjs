@@ -10,6 +10,7 @@ import * as Dm from "../mods/down-the-stack/game/demo.js";
 import { saveSize } from "../mods/down-the-stack/game/save.js";
 import { TUNING as T, BOSSES } from "../mods/down-the-stack/game/data.js";
 import { within } from "./helpers/perf.mjs";
+import * as V from "../mods/down-the-stack/game/view.js";
 
 const T0 = 1_790_000_000_000; // a Tuesday, 2026-09-21 13:46 UTC
 const MIN = 60;
@@ -316,6 +317,44 @@ describe("days, nights and restarts", () => {
     assert.equal(w.state.herd.fight, null);
     assert.ok(w.state.herd.wounds["3"], "Wounds kept");
     assert.equal(W.command(w, "retreat", {}, w.state.herd.lastMs).ok, false);
+  });
+
+  test("a hand-edited save whose string-table indexes are out of range decodes them as empty text; every view still builds", () => {
+    // a save with an empty crc loads with a warning only, so a hand edit reaches the string table
+    const { world } = Dm.demoWorld("late", T0);
+    const obj = JSON.parse(W.serialize(world));
+    assert.ok(Array.isArray(obj.str) && obj.str.length, "the save has a string table");
+    const bad = obj.str.length + 50;
+    let n = 0;
+    for (const h of obj.heroes) for (const r of Array.isArray(h.pend) ? h.pend : []) if (Array.isArray(r) && typeof r[1] === "number") { r[1] = bad; n++; }
+    // the shared strings (seat, space id, pane and tab names) are indexes into the same table
+    let m = 0;
+    for (const h of obj.heroes.slice(1)) for (const k of ["s", "sid", "lp", "lt"]) if (typeof h[k] === "number") { h[k] = bad; m++; }
+    assert.ok(m > 0, "shared-string indexes were rewritten");
+    for (const r of obj.herd.log && obj.herd.log.d ? obj.herd.log.d : []) {
+      if (typeof r[1] === "number") { r[1] = bad; n++; }
+      if (typeof r[3] === "number") { r[3] = bad; n++; }
+    }
+    assert.ok(n > 0, "indexes were rewritten");
+    obj.crc = "";
+    const l = W.loadWorld(JSON.stringify(obj), { nowMs: T0 });
+    assert.match(String(l.warning), /checksum/);
+    for (const h of l.world.state.heroes) {
+      for (const p of h.pend || []) assert.ok(p.title == null || typeof p.title === "string", "a pending title is text");
+      for (const k of ["seat", "sid", "lastPane", "lastTab"]) assert.ok(h[k] == null || typeof h[k] === "string", `${k} is text`);
+    }
+    for (const e of l.world.state.herd.log) {
+      assert.equal(typeof e[1], "string", "journal kind is text");
+      assert.equal(typeof e[3], "string", "journal text is text");
+    }
+    const now = l.world.state.herd.lastMs + 1000;
+    W.tick(l.world, Dm.demoSnapshot(l.world, now));
+    const hero = l.world.state.heroes[0];
+    for (const tab of ["digest", "stash", "roster", "tracker", "bosses", "upgrades", "settings"]) V.herdView(l.world, { tab, nowMs: now });
+    for (const tab of ["career", "journal", "gear", "skills"]) V.sheetView(l.world, hero.id, { tab, nowMs: now });
+    V.stageView(l.world, { width: 960, height: 200, nowMs: now });
+    V.partyView(l.world, { nowMs: now });
+    assertClean(l.world, "after the bad indexes");
   });
 });
 

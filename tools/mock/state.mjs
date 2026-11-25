@@ -135,42 +135,73 @@ export function setChecking(on) {
 // Per-VM globals. herdr runs one QuickJS VM per window: globalThis survives a hot reload (a mod
 // may hand state to its next build through it) but not a VM restart, and two windows never see
 // each other's. Node has one globalThis, so the mock keeps `globalThis[Symbol.for("<mod>.…")]`
-// (registered symbols named after the mod) per VM: a mount on a fresh graph starts with none; a
-// reload, or a mount into an existing graph, sees that VM's own. The harness swaps them at mount
-// and reload, which is when a mod reads them (a read from a later timer sees the VM mounted last).
-// What globalThis holds belongs to the VM entered last: a value set later (a host that registers
-// when its load finishes, after the mount returned) is that VM's, and is kept for it when another
-// VM is entered.
+// (registered symbols named after a mounted mod) per VM. A proxy in globalThis's prototype chain
+// answers reads and writes of those symbols (they are never own properties of globalThis) from the
+// VM of the copy whose code is running: the async context (`als`, which follows a load's awaits
+// across timers and other VMs' work), else the VM entered last (mount, reload: module evaluation).
+// A mount on a fresh graph starts with none; a reload, or a mount into an existing graph, sees that
+// VM's own. The mock's own `Symbol.for("<mod>.mock.…")` hooks stay ordinary globals.
 
-const VM_GLOBALS = new Map(); // vm -> Map(symbol -> value)
+const VM_STORE = new Map(); // `${mod}|${vm}` -> Map(symbol -> value)
 const VM_MODS = new Set();
-const VM_SHOWN = new Map(); // modName -> the vm whose globals globalThis holds now
-// (the mock's own `Symbol.for("<mod>.mock.…")` hooks are not the mod's)
-const vmSymbols = (modName) => Object.getOwnPropertySymbols(globalThis).filter((sym) => {
-  const k = Symbol.keyFor(sym);
-  if (typeof k !== "string" || !k.startsWith(`${modName}.`) || k.startsWith(`${modName}.mock.`)) return false;
-  return Object.getOwnPropertyDescriptor(globalThis, sym)?.configurable !== false;
-});
-/** Make globalThis show VM `vm`'s per-VM globals of mod `modName` (none for a new VM). */
+const VM_SHOWN = new Map(); // modName -> the VM entered last (module evaluation, no copy running)
+/** The mounted mod a registered symbol belongs to, or null (not per VM). */
+function vmModOf(key) {
+  if (typeof key !== "symbol") return null;
+  const k = Symbol.keyFor(key);
+  if (typeof k !== "string") return null;
+  for (const mod of VM_MODS) if (k.startsWith(`${mod}.`) && !k.startsWith(`${mod}.mock.`)) return mod;
+  return null;
+}
+/** The per-VM store a read or write of `mod`'s symbol goes to now. */
+function vmStore(mod) {
+  const copy = als.getStore();
+  const h = copy && copy.modName === mod ? copy.handle : null;
+  const vm = h ? h.vm ?? h.graph : VM_SHOWN.get(mod);
+  const key = `${mod}|${vm}`;
+  let m = VM_STORE.get(key);
+  if (!m) VM_STORE.set(key, (m = new Map()));
+  return m;
+}
+const vmProto = Object.getPrototypeOf(globalThis);
+Object.setPrototypeOf(globalThis, new Proxy(vmProto, {
+  get(t, k, r) { const mod = vmModOf(k); return mod ? vmStore(mod).get(k) : Reflect.get(t, k, r); },
+  set(t, k, v, r) {
+    const mod = r === globalThis ? vmModOf(k) : null;
+    if (!mod) return Reflect.set(t, k, v, r);
+    vmStore(mod).set(k, v);
+    return true;
+  },
+  has(t, k) { const mod = vmModOf(k); return mod ? vmStore(mod).has(k) : Reflect.has(t, k); },
+}));
+/** Own properties a mod defined directly (Object.defineProperty) move into the VM shown now. */
+function adoptOwn(mod) {
+  for (const sym of Object.getOwnPropertySymbols(globalThis)) {
+    if (vmModOf(sym) !== mod) continue;
+    const d = Object.getOwnPropertyDescriptor(globalThis, sym);
+    if (!d || d.configurable === false) continue;
+    const v = globalThis[sym];
+    delete globalThis[sym];
+    vmStore(mod).set(sym, v);
+  }
+}
+/** Code with no copy running (module evaluation) sees VM `vm`'s per-VM globals of mod `modName`. */
 export function enterVm(vm, modName) {
   VM_MODS.add(modName);
-  const cur = VM_SHOWN.get(modName);
-  if (VM_SHOWN.has(modName) && cur === vm) return; // already this VM's, late writes included
-  if (VM_SHOWN.has(modName)) leaveVm(cur, modName);
-  for (const sym of vmSymbols(modName)) delete globalThis[sym];
-  const saved = VM_GLOBALS.get(`${modName}|${vm}`);
-  if (saved) for (const [sym, v] of saved) globalThis[sym] = v;
   VM_SHOWN.set(modName, vm);
+  adoptOwn(modName);
 }
-/** Remember what VM `vm` left in its per-VM globals. */
+/** (Kept for callers: the per-VM store needs no copying when a mount or reload is done.) */
 export function leaveVm(vm, modName) {
-  const m = new Map();
-  for (const sym of vmSymbols(modName)) m.set(sym, globalThis[sym]);
-  VM_GLOBALS.set(`${modName}|${vm}`, m);
+  if (VM_SHOWN.get(modName) === vm) adoptOwn(modName);
 }
 function resetVmGlobals() {
-  for (const mod of VM_MODS) for (const sym of vmSymbols(mod)) delete globalThis[sym];
-  VM_GLOBALS.clear();
+  for (const mod of VM_MODS) {
+    for (const sym of Object.getOwnPropertySymbols(globalThis)) {
+      if (vmModOf(sym) === mod && Object.getOwnPropertyDescriptor(globalThis, sym)?.configurable !== false) delete globalThis[sym];
+    }
+  }
+  VM_STORE.clear();
   VM_SHOWN.clear();
 }
 

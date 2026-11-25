@@ -494,9 +494,17 @@ The file is in this folder. It is `main.json` with these changes:
   - Keys overlay: the key, its section in brackets, then the action with `.`/`_` turned into spaces.
     So `ctrl-shift-s  (layout:Down-the-Stack)` reads `down-the-stack sheet`: `-` stays
     (`mods/help/main.js:17-22,83`).
-  - Mod palette entries show their own `title` (ours say "Down the Stack: …"). But a command that
-    fails toasts `<mod>.<cmd> failed` (`src/window.rs:3076-3078`), and a copy that fails to load
-    says `<mod> did not load` (`src/window.rs:4795`).
+  - Mod palette entries show their own `title` (ours says "Down the Stack: Herd panel"). herdr lists
+    every mod's entries in every layout (`frame/palette/main.js` `modPalettes`). A `<mod>.<cmd>`
+    entry must name the mod's own folder and take no args (`modEntry`), and it reaches shown copies
+    only, so picked in another layout it fails: a command that fails toasts `<mod>.<cmd> failed`
+    (`src/window.rs:3076-3078`). An app command such as `mod.open {"name": "<mod>"}` (kept only
+    when `mods/<name>/main.js` exists) works in any layout: it toggles the overlay `mod.json`
+    describes. Entries with the same command and args are duplicates (`entryId`) and only the
+    first is kept, so one mod gets one `mod.open` entry; `mod.clone` does not rewrite its
+    `"name"`. The palette itself hides `mod.open`, `layout.toggle` / `show` / `hide` and
+    `layout.resize` from its built-in list (`HIDDEN`, `:67-73`); a mod entry may still use them.
+    A copy that fails to load says `<mod> did not load` (`src/window.rs:4795`).
   - So a layout or mod name is visible to the person. Pick one you are happy to show, or accept that
     the id shows in herdr's chrome.
 

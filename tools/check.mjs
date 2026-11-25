@@ -388,7 +388,16 @@ export async function runCheck(opts = {}) {
     } catch (e) {
       out.errors.push({ level: "error", code: "fixtures", message: `could not load ${rel(fixturesPath)}: ${e.message}`, where: "fixtures" });
     }
-    if (opts.role) roles = roles.filter((r) => r.name === opts.role || r.props?.role === opts.role);
+    if (opts.role) {
+      const all = roles;
+      roles = roles.filter((r) => r.name === opts.role || r.props?.role === opts.role);
+      // a typo must not check nothing and pass
+      if (!roles.length) {
+        const known = [...new Set(all.map((r) => r.props?.role).filter(Boolean))];
+        out.missing.push(`a role named "${opts.role}" (a role: ${known.join(", ")}; or one of the ${all.length} fixture names, e.g. ${all[0]?.name ?? "-"})`);
+        log(`roles       none named "${opts.role}"`);
+      }
+    }
     log(`roles       ${roles.length} from ${rel(fixturesPath)}  (widths ${(opts.widths ?? [360, 960, 1600]).join("/")}, zooms ${(opts.zooms ?? [1, 2]).join("/")})`);
     for (const role of roles) {
       const r = await checkRole(main, role, opts);
@@ -417,22 +426,38 @@ function printProblems(list, title, limit) {
   }
 }
 
+const USAGE = "usage: node --import ./tools/mock/register.mjs tools/check.mjs [--main path] [--fixtures path] [--role name] [--widths 360,960,1600] [--zooms 1,2] [--json] [--quiet]";
+
 async function cli(argv) {
   const opts = {};
   let json = false;
   let quiet = false;
+  const VALUED = { "--main": "main", "--fixtures": "fixtures", "--role": "role", "--widths": "widths", "--zooms": "zooms" };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--main") opts.main = argv[++i];
-    else if (a === "--fixtures") opts.fixtures = argv[++i];
-    else if (a === "--role") opts.role = argv[++i];
-    else if (a === "--widths") opts.widths = argv[++i].split(",").map(Number);
-    else if (a === "--zooms") opts.zooms = argv[++i].split(",").map(Number);
-    else if (a === "--json") json = true;
+    if (VALUED[a]) {
+      const v = argv[++i];
+      if (v === undefined || v.startsWith("--")) {
+        console.error(`${a} needs a value\n${USAGE}`);
+        return 2;
+      }
+      if (a === "--widths" || a === "--zooms") {
+        const list = v.split(",").map(Number);
+        if (!list.length || list.some((n) => !(Number.isFinite(n) && n > 0))) {
+          console.error(`${a} takes positive numbers separated by commas, got ${JSON.stringify(v)}\n${USAGE}`);
+          return 2;
+        }
+        opts[VALUED[a]] = list;
+      } else opts[VALUED[a]] = v;
+    } else if (a === "--json") json = true;
     else if (a === "--quiet") quiet = true;
     else if (a === "-h" || a === "--help") {
-      console.log("usage: node --import ./tools/mock/register.mjs tools/check.mjs [--main path] [--fixtures path] [--role name] [--widths 360,960,1600] [--zooms 1,2] [--json] [--quiet]");
+      console.log(USAGE);
       return 0;
+    } else {
+      // an unknown argument (a typo such as --rol) would otherwise check something else and pass
+      console.error(`unknown argument ${JSON.stringify(a)}\n${USAGE}`);
+      return 2;
     }
   }
   if (!json) console.log("Down the Stack — mock herdr-app check\n");
@@ -445,7 +470,8 @@ async function cli(argv) {
   printProblems(res.errors, "ERRORS", 200);
   if (!quiet) printProblems(res.warnings, "WARNINGS", 40);
   const verdict = res.exitCode === 0 ? "PASS" : res.exitCode === 2 && !res.errors.length ? "INCOMPLETE (missing inputs)" : "FAIL";
-  console.log(`\nRESULT: ${verdict} — ${res.errors.length} errors, ${res.warnings.length} warnings${res.missing.length ? `; missing: ${res.missing.map(rel).join(", ")}` : ""}`);
+  const missing = res.missing.map((m) => (path.isAbsolute(m) ? rel(m) : m));
+  console.log(`\nRESULT: ${verdict} — ${res.errors.length} errors, ${res.warnings.length} warnings${missing.length ? `; missing: ${missing.join(", ")}` : ""}`);
   return res.exitCode;
 }
 

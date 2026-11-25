@@ -708,6 +708,33 @@ test("herd bosses: Challenge and (confirmed) Retreat", async () => {
   assert.deepEqual(f.host.commands, [["retreat", {}]]);
 });
 
+test("herd bosses: the fighting boss's row is revealed (scroll_to_item on the list's direct child) once per fight and tab visit", async () => {
+  const { m, role } = await mount("herd", "bossFight");
+  const asked = [];
+  role.bossScroll = { __handle: role.bossScroll.__handle, scroll_to_item: (i) => asked.push(i), release() {} };
+  role.ui.bossShown = undefined;
+  m.render();
+  const list = m.node("hd-bosses");
+  assert.ok(list.has("track_scroll"), "the boss list tracks the handle");
+  assert.deepEqual(asked, [3], "the fourth boss fights");
+  assert.equal(list.children[3].id, "hd-b-octopus_merge", "the index is the row's place among the list's direct children");
+  m.render();
+  assert.deepEqual(asked, [3], "once: the person may scroll away");
+  role.ui.tab = "upgrades";
+  m.render();
+  role.ui.tab = "bosses";
+  m.render();
+  assert.deepEqual(asked, [3, 3], "again on coming back to the tab");
+  assert.deepEqual(errorsOf(m), []);
+  // no fight: nothing to reveal
+  const calm = await mount("herd", "bosses");
+  const none = [];
+  calm.role.bossScroll = { __handle: calm.role.bossScroll.__handle, scroll_to_item: (i) => none.push(i), release() {} };
+  calm.role.ui.bossShown = undefined;
+  calm.m.render();
+  assert.deepEqual(none, []);
+});
+
 test("herd roster: Sheet opens the hero's sheet; Retire confirms first", async () => {
   const { m, host } = await mount("herd", "roster");
   click(m, "hd-sheet-r:2");
@@ -759,14 +786,100 @@ test("herd settings: herd.cfg switches, choices, stage height (layout.resize), H
   assert.equal(runs("layout.toggle").length, 0);
 });
 
+// herdr's win98 theme as settings.rs resolve() gives it: derived from its palette (background
+// #ffffff, like paper's), then its colors overrides: a black background under a light popover and chrome
+const WIN98 = {
+  background: "#000000", foreground: "#000000", surface: "#c0c0c0", popover: "#c0c0c0", raised: "#dfdfdf", hover: "#dfdfdf",
+  border: "#808080", input: "#ffffff", muted: "#404040", dim: "#808080", accent: "#000080", accent_foreground: "#ffffff",
+  ring: "#000000", working: "#808000", blocked: "#ff0000", done: "#0000ff", idle: "#808080", unknown: "#808080",
+};
+
+test("herd settings: the loot-glow rarity names read at 4.5:1 on their control (paper, graphite, win98); the picked one by weight", async () => {
+  const { contrast, over } = await import("../mods/down-the-stack/ui/party.js");
+  for (const theme of [...THEMES, M.resolveTheme("paper", WIN98)]) {
+    const label = typeof theme === "string" ? theme : "win98";
+    const { m } = await mount("herd", "settingsOff", { theme });
+    const t = SheetMod.dialogTheme(SheetMod.dialogTokens());
+    for (let id = 1; id <= 5; id++) {
+      const opt = m.node(`hd-opt-glow-${id}`);
+      const fg = opt.last("text_color")[0];
+      assert.match(fg, /^#[0-9a-fA-F]{6}$/, `${label} ${id}: full strength, no alpha (${fg})`);
+      const picked = id === 3;
+      const under = picked ? over(t.btn, t.well) : t.well;
+      const r = contrast(fg, under);
+      assert.ok(r >= 4.5, `${label} rarity ${id} ${fg} on ${under}: ${r.toFixed(2)}:1`);
+      assert.equal(opt.has("font_bold"), picked, `${label} ${id}: the picked one is bold`);
+    }
+  }
+});
+
+test("win98 (black background, light popover): the dialogs take light-theme ink; the waiting cue reads", async () => {
+  const { contrast, over, ink } = await import("../mods/down-the-stack/ui/party.js");
+  const { C } = await import("../mods/down-the-stack/ui/kit.js");
+  const theme = M.resolveTheme("paper", WIN98);
+  const { m } = await mount("herd", "upgrades", { theme });
+  const t = SheetMod.dialogTheme(SheetMod.dialogTokens());
+  assert.equal(t.light, true, "light by its popover, as herdr classes win98 by its palette");
+  assert.equal(t.popover, "#c0c0c0");
+  const waiting = m.findAll((n) => n.type === "text" && n.text === "1 waiting for you")[0]?.parent;
+  const fg = waiting.last("text_color")[0];
+  assert.equal(fg, ink(C.blocked, t));
+  assert.ok(contrast(fg, t.popover) >= 4.5, `"1 waiting for you" ${fg} on ${t.popover}: ${contrast(fg, t.popover).toFixed(2)}:1`);
+  // the rename field is not black on black (it sat on the theme background)
+  const rename = await mount("herd", "settings", { theme, ui: { renaming: true } });
+  const field = rename.m.findAll((n) => n.type === "input" || (n.has("border_color") && n.has("text_color") && n.last("border_color")[0] === t.accent))[0];
+  if (field && field.has("bg")) assert.ok(contrast(t.fg, over(field.last("bg")[0], t.popover)) >= 4.5, "the rename field's text reads");
+  // a dark theme is untouched: graphite keeps the raw game colours
+  await mount("herd", "upgrades", { theme: "graphite" });
+  assert.equal(SheetMod.dialogTheme(SheetMod.dialogTokens()).light, false);
+  assert.equal(ink(C.blocked, SheetMod.dialogTheme(SheetMod.dialogTokens())), C.blocked);
+});
+
+test("herd settings: Stage height finds the stage by its content; no stage in the layout → disabled, no layout.resize", async () => {
+  const block = (id, role, extra = {}) => ({ id, type: "block", size: { px: 200 }, content: { mod: "down-the-stack", props: { role } }, ...extra });
+  const tree = (...children) => ({ id: "root", type: "column", children: [{ id: "panes", type: "block", content: { builtin: "panes" } }, ...children] });
+  // herdr's own main layout has no stage (the panel opens there from a toast's mod.open): the
+  // choice is disabled and nothing runs (herdr would toast "layout.resize failed")
+  const none = await mount("herd", "settings", { fixture: { layout: tree() } });
+  click(none.m, "hd-opt-stageH-120");
+  assert.deepEqual(none.host.commands, []);
+  assert.equal(runs("layout.resize").length, 0);
+  assert.equal(M.calls().toasts.length, 0);
+  const ch = none.m.node("hd-choice-stageH");
+  assert.equal(ch.methods.find((x) => x[0] === "tooltip")?.[1][0], "This layout has no stage");
+  assert.ok(ch.methods.some((x) => x[0] === "opacity"), "dimmed like the HUD switch");
+  assert.deepEqual(errorsOf(none.m), []);
+  // a cloned layout whose stage block has another id: that id
+  const other = await mount("herd", "settings", { fixture: { layout: tree(block("arena", "stage"), block("strip", "hud", { hidden: true })) } });
+  click(other.m, "hd-opt-stageH-120");
+  click(other.m, "hd-sw-hud");
+  assert.deepEqual(other.host.commands, [["setting", { key: "stageH", value: 120 }]]);
+  assert.deepEqual(runs("layout.resize").map((c) => c.args), [{ id: "arena", px: 120 }]);
+  assert.deepEqual(runs("layout.toggle").map((c) => c.args), [{ id: "strip" }]);
+  assert.deepEqual(errorsOf(other.m), []);
+  // a hidden (collapsed) stage takes the height and the flash says so
+  const hidden = await mount("herd", "settings", { fixture: { layout: tree(block("stage", "stage", { hidden: true })) } });
+  click(hidden.m, "hd-opt-stageH-64");
+  assert.deepEqual(runs("layout.resize").map((c) => c.args), [{ id: "stage", px: 64 }]);
+  assert.match(hidden.m.text(), /The stage is hidden now; it opens at this height\./);
+  // another mod's stage-role block is not ours
+  const foreign = await mount("herd", "settings", { fixture: { layout: tree({ ...block("stage2", "stage"), content: { mod: "elsewhere", props: { role: "stage" } } }) } });
+  click(foreign.m, "hd-opt-stageH-120");
+  assert.equal(runs("layout.resize").length, 0);
+});
+
 test("herd settings (D§11.15): loot glow, collapse the stage, the autopilot master switch; inactive systems do nothing", async () => {
   const { m, host } = await mount("herd", "settingsOff");
-  // the six rarities, each in its colour; the current one picked
+  // the six rarities, each in its colour; the current one picked (on its button, lightened just
+  // enough to clear 4.5:1 there: the same hue)
+  const { mix } = await import("../mods/down-the-stack/ui/party.js");
   for (const [id, color] of [[0, "#A0A4AB"], [3, "#B36BFF"], [5, "#FF7AA8"]]) {
     const opt = m.node(`hd-opt-glow-${id}`);
     assert.ok(opt, `option ${id}`);
     const tc = opt.methods.find((x) => x[0] === "text_color")[1][0];
-    assert.ok(tc.toUpperCase().startsWith(color), `${id}: ${tc}`);
+    const ok = [0, 0.05, 0.1, 0.15].some((k) => mix(color, "#ffffff", k).toUpperCase() === tc.toUpperCase());
+    assert.ok(ok, `${id}: ${tc}`);
+    if (id !== 3) assert.equal(tc.toUpperCase(), color, `${id}: unpicked, the rarity colour itself`);
   }
   click(m, "hd-opt-glow-3"); // already picked: inert
   click(m, "hd-opt-glow-5");

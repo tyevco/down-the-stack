@@ -147,7 +147,7 @@ const SAVE = {
 const sixGroups = () => [
   { key: "g:s1", name: "herdr-app", offDuty: false, rows: [kip, rue, ada] },
   { key: "g:s2", name: "api-gateway", offDuty: false, rows: [juno, pax, ori] },
-  { key: "g:off", name: "Off duty", offDuty: true, rows: [zed, lumi, brin] },
+  { key: "g:off", name: "Off duty", offDuty: true, chests: 1, rows: [zed, lumi, brin] },
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -199,7 +199,7 @@ function crowdedGroups() {
   return [
     { key: "g:s1", name: "herdr-app", offDuty: false, rows: rows.slice(0, 16) },
     { key: "g:s3", name: "billing-service", offDuty: false, rows: rows.slice(16) },
-    { key: "g:off", name: "Off duty", offDuty: true, rows: [zed, lumi, brin].map((r) => ({ ...r, slim: true })) },
+    { key: "g:off", name: "Off duty", offDuty: true, chests: 1, rows: [zed, lumi, brin].map((r) => ({ ...r, slim: true })) },
   ];
 }
 

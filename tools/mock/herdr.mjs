@@ -15,7 +15,8 @@
 //
 // Fixture hooks for IO trouble (tests): fixture().readError?.(absPath) → an Error (or message) makes
 // that readTextFile reject; fixture().hangAfterWrite?.(absPath) → true makes that writeTextFile
-// land on disk but never settle (herdr: the calling copy went away while the write ran).
+// land on disk but never settle (herdr: the calling copy went away while the write ran);
+// fixture().runError?.(name, args) → an Error (or message) is thrown by that run() call.
 
 import path from "node:path";
 import { S, als, report, fixture, deliver, updateFixture } from "./state.mjs";
@@ -117,6 +118,9 @@ export function run(name, args) {
   if (typeof name !== "string") throw new TypeError("run(name, args) expects a command name string");
   const command = COMMAND_BY_NAME.get(name);
   S.calls.run.push({ name, args: clone(args) ?? null, copy: c?.label });
+  // (tests) a command herdr refuses: fixture().runError?.(name, args) → an Error (or text) is thrown
+  const refused = typeof fixture().runError === "function" ? fixture().runError(name, args) : null;
+  if (refused) throw refused instanceof Error ? refused : new Error(String(refused));
   if (command) {
     validateArgs(command, args); // herdr throws these synchronously
     const missing = missingArg(command, args);

@@ -249,7 +249,9 @@ import { renderTermling } from "./termling.js";
 /** kit.T() plus the dialog tokens herdr's own dialogs use, with fallbacks. */
 export function dialogTheme(base) {
   const t = { ...(base ?? T()) };
-  const light = isLight(t);
+  // light or dark by the surface the dialog draws on (herdr's popover), not the background:
+  // win98's background is black while its popover is #c0c0c0
+  const light = typeof t.light === "boolean" ? t.light : isLight({ bg: t.popover ?? t.bg });
   t.light = light;
   t.popover = t.popover ?? mix(t.bg, "#ffffff", light ? 0 : 0.06);
   t.input = t.input ?? (light ? "#00000026" : "#ffffff24");
@@ -262,6 +264,8 @@ export function dialogTheme(base) {
   t.well = mix(t.popover, "#000000", light ? 0.045 : 0.16);
   t.btn = t.raised ?? t.card;
   t.btnHover = mix(t.btn, light ? "#000000" : "#ffffff", 0.07);
+  // game colours as text (ink) clear 4.5:1 on the dialog's own surfaces (light themes)
+  t.inkOn = [t.popover, t.card, t.well];
   t.good = ink(C.working, t);
   t.bad = ink(C.hp, t);
   return t;
@@ -1050,9 +1054,12 @@ function careerTab(vm, env, ui, t) {
 function ladderRow(l, env, ui, t) {
   const current = l.state === "current";
   const rv = l.review;
-  // The review line shows only while it means something (ready, running, or won on this tier).
-  const showReview = rv && rv.status !== "locked";
-  const rvColor = rv ? (rv.status === "won" ? C.working : rv.status === "ready" ? C.hp : rv.status === "running" ? C.blocked : C.idle) : C.idle;
+  // The review line shows only while it means something (ready, running, or won on this tier): a
+  // tier left behind keeps its ✓ (the tooltip names the review it passed), and a won review is
+  // one line, so at Lv 60+ the boss card below the ladder still shows whole at 760 × 500.
+  const won = rv?.status === "won";
+  const showReview = rv && rv.status !== "locked" && !(won && l.state === "done");
+  const rvColor = rv ? (won ? C.working : rv.status === "ready" ? C.hp : rv.status === "running" ? C.blocked : C.idle) : C.idle;
   return v_flex().id(`sh-cl-${l.key}`).px(10).py(5).gap(3).rounded(8)
     .bg(current ? alpha(t.accent, t.light ? 0.08 : 0.1) : t.card).border(1).border_color(current ? alpha(t.accent, 0.45) : rv?.status === "ready" ? alpha(C.hp, 0.45) : t.border)
     .when(l.state === "locked", (e) => e.opacity(0.6))
@@ -1063,7 +1070,11 @@ function ladderRow(l, env, ui, t) {
       .child(div().flex_none().text_size(12.5).font_semibold().child(l.title))
       .child(div().flex_none().font_family(MONO).text_size(10.5).text_color(t.dim).child(l.levels))
       .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).text_right().child(l.note ?? "")))
-    .when(Boolean(showReview), (e) => e.child(h_flex().pl(20).gap(8).items_center()
+    .when(Boolean(showReview) && won && !rv.challenge, (e) => e.child(h_flex().id(`sh-clr-${l.key}`).pl(20).gap(8).items_center()
+      .child(div().size(7).flex_none().rounded_full().bg(tone(rvColor, t)))
+      .child(div().flex_none().text_size(11.5).text_color(t.fg).child(rv.statusText))
+      .child(div().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(rv.name))))
+    .when(Boolean(showReview) && !(won && !rv.challenge), (e) => e.child(h_flex().pl(20).gap(8).items_center()
       .child(div().size(7).flex_none().rounded_full().bg(tone(rvColor, t)))
       .child(v_flex().flex_1().min_w(0)
         .child(div().min_w(0).truncate().text_size(11.5).text_color(t.fg).child(rv.statusText))
@@ -1130,10 +1141,10 @@ function bossCard(b, env, ui, t) {
     .child(h_flex().gap(8).items_center()
       .child(svg(art("ui/boss.svg")).w(14).h(14).flex_none().text_color(ink(C.hp, t)))
       .child(v_flex().flex_1().min_w(0)
-        .child(div().truncate().text_size(12.5).font_semibold().child(b.name))
+        .child(div().id("sh-boss-name").truncate().text_size(12.5).font_semibold().child(b.name))
         .child(div().truncate().text_size(11).text_color(t.muted).child(b.zone))
         .child(h_flex().gap(8).items_center()
-          .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.fg).child(b.status))
+          .child(div().id("sh-boss-status").flex_1().min_w(0).truncate().text_size(11).text_color(t.fg).child(b.status))
           .when(Boolean(b.estimate) && !estTop, (e) => e.child(est())))));
 }
 
@@ -1177,7 +1188,7 @@ function identity(vm, env, ui, t) {
   };
   const row = ui.renaming && input
     ? h_flex().gap(6).items_center()
-      .child(Input.new(input).flex_1().min_w(0).h(26).px(8).rounded(6).border(1).border_color(t.accent).bg(t.bg).text_size(12).text_color(t.fg))
+      .child(Input.new(input).flex_1().min_w(0).h(26).px(8).rounded(6).border(1).border_color(t.accent).bg(t.well).text_size(12).text_color(t.fg))
       .child(plainButton("sh-rename-save", "Save", t, save, { h: 26, px: 9, size: 11.5, on: true }))
       .child(plainButton("sh-rename-cancel", "Cancel", t, (cx) => { ui.renaming = false; ui.typing = false; env.focus?.focus?.(); cx.notify(); }, { h: 26, px: 9, size: 11.5 }))
     : h_flex().gap(6).items_center()

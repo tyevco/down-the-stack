@@ -257,6 +257,32 @@ test("party: the chest chip claims the chest without focusing", async () => {
   assert.equal(runs("pane.focus").length, 0);
 });
 
+test("party: a folded off-duty group shows its pending chests (gold chest and count); none without", async () => {
+  const textOf = (n) => (n.type === "text" ? n.text : n.children.map(textOf).join(""));
+  const isIn = (n, root) => { for (let e = n; e; e = e.parent) if (e === root) return true; return false; };
+  const groups = P.scenarios.six.groups.map((g) => (g.offDuty ? { ...g, chests: 3 } : g));
+  const { m } = await mount("party", { ...P.scenarios.six, groups });
+  assert.equal(m.node("pr-h:8"), null, "folded");
+  const cue = m.node("pg-g:off-chests");
+  assert.ok(cue, "the folded header carries the chests");
+  assert.equal(cue.parent.id, "pg-g:off");
+  assert.ok(m.findAll((n) => n.src === "mods/down-the-stack/art/ui/chest.svg" && isIn(n, cue)).length === 1, "a chest icon");
+  assert.ok(textOf(cue).includes("×3"));
+  assert.match(cue.methods.find((x) => x[0] === "tooltip")[1][0], /3 chests wait off duty: unfold to open them/);
+  // unfolded: the rows show their own chests, the header none
+  m.fire("pg-g:off");
+  m.render();
+  assert.equal(m.node("pg-g:off-chests"), null);
+  // an old PartyVM without `chests` counts the rows with a chest pending
+  const older = P.scenarios.six.groups.map((g) => { const { chests, ...rest } = g; return rest; });
+  const { m: m2 } = await mount("party", { ...P.scenarios.six, groups: older });
+  assert.ok(m2.node("pg-g:off-chests"), "Lumi's chest");
+  // nothing pending: no cue
+  const none = P.scenarios.six.groups.map((g) => (g.offDuty ? { ...g, chests: 0, rows: g.rows.map((r) => ({ ...r, chestPending: false })) } : g));
+  const { m: m3 } = await mount("party", { ...P.scenarios.six, groups: none });
+  assert.equal(m3.node("pg-g:off-chests"), null);
+});
+
 test("party: the off-duty group starts folded; its header unfolds it; off-duty rows open the sheet", async () => {
   const { m, host } = await mount("party", P.scenarios.six);
   assert.equal(m.node("pr-h:7"), null);
@@ -347,6 +373,44 @@ test("party: blocked heroes stand out without re-sorting: 'N need you' jumps to 
   assert.ok(textUnder(rail.m.node("pp-h:2")).includes("!"), textUnder(rail.m.node("pp-h:2")));
   assert.ok(!textUnder(rail.m.node("pp-h:1")).includes("!"));
   assertClean(rail.m, "rail");
+});
+
+test("blocked cues read on light chrome, win98's too (light chrome under a black background): one family with the stripe", async () => {
+  // herdr's win98 theme as settings.rs resolve() gives it: its palette (background #ffffff, as
+  // paper's) derives the chrome, then its colors overrides: background and foreground black
+  const WIN98 = M.resolveTheme("paper", {
+    background: "#000000", foreground: "#000000", surface: "#c0c0c0", popover: "#c0c0c0", raised: "#dfdfdf", hover: "#dfdfdf",
+    border: "#808080", input: "#ffffff", muted: "#404040", dim: "#808080", accent: "#000080", accent_foreground: "#ffffff",
+  });
+  const lastBg = (n) => n.methods.filter((x) => x[0] === "bg").at(-1)?.[1][0];
+  const lastFg = (n) => n.methods.filter((x) => x[0] === "text_color").at(-1)?.[1][0];
+  for (const [label, theme] of [["paper", "paper"], ["win98", WIN98], ["graphite", "graphite"]]) {
+    const th = typeof theme === "string" ? M.resolveTheme(theme) : theme;
+    const chrome = th.chrome;
+    const light = label !== "graphite";
+    const { m } = await mount("party", P.scenarios.six, { theme });
+    const stripe = PartyMod.stripeColor("#F2A93B", "blocked", { bg: th.background, chrome, hover: th.hover, selected: th.selected });
+    // "N need you" and the row's "!" chip: text on their amber tint over the chrome
+    const need = m.node("party-needyou");
+    const bang = m.findAll((n) => typeof n.id === "string" && n.id.startsWith("pc-") && textUnder(n).startsWith("!"))[0];
+    assert.ok(need && bang, label);
+    for (const [what, n] of [["need you", need], ["! chip", bang]]) {
+      const fg = lastFg(n);
+      const under = COL.over(lastBg(n), chrome);
+      assert.ok(COL.ratio(fg, under) >= 4.5, `${label} ${what}: ${fg} on ${under}: ${COL.ratio(fg, under).toFixed(2)}:1`);
+      if (light) assert.equal(fg.toLowerCase(), stripe.toLowerCase(), `${label} ${what}: the stripe's family (${fg} vs ${stripe})`);
+      else assert.equal(fg.toUpperCase(), "#F2A93B", `${label} ${what}: the design amber on dark chrome`);
+    }
+    // the rail's "!" badge clears 3:1 against the chrome, its "!" 4.5:1 on the badge
+    const rail = await mount("party", P.scenarios.rail, { width: 52, theme });
+    const badge = rail.m.node("pb-h:2");
+    assert.ok(badge, `${label}: the rail badge`);
+    assert.ok(COL.ratio(lastBg(badge), chrome) >= 3, `${label} rail badge ${lastBg(badge)} on ${chrome}: ${COL.ratio(lastBg(badge), chrome).toFixed(2)}:1`);
+    assert.ok(COL.ratio(lastFg(badge), lastBg(badge)) >= 4.5, `${label} rail "!" ${lastFg(badge)} on ${lastBg(badge)}`);
+  }
+  // win98 is light by its chrome, as herdr classes it by its palette (themes(): light)
+  assert.equal(PartyMod.isLight(PartyMod.onChrome({ bg: WIN98.background, chrome: WIN98.chrome })), true);
+  assert.equal(PartyMod.isLight({ bg: WIN98.background }), false, "its background alone says dark");
 });
 
 test("chrome buttons hover with a background: no hover text colour where an svg icon keeps its built colour in herdr", async () => {
@@ -792,16 +856,55 @@ test("nameplate: shows the hero and herdr's own terminal title; narrow panes kee
   assert.ok(contractor.m.text().includes("(contractor)"));
 });
 
-test("nameplate: plan() drops career, then bars, so the terminal title keeps its room", () => {
+test("nameplate: plan() drops the bars and the career so the terminal title keeps its room", () => {
   const vm = N.scenarios.long;
   const wide = PlateMod.plan(vm, 1400, false, "short title");
   assert.ok(wide.career && wide.bars && !wide.tiny);
+  // 760 px and a long title: the whole title does not fit beside the bars, so they go (D§11.12)
   const mid = PlateMod.plan(vm, 760, false, N.panes.long.title);
-  assert.ok(!mid.career && mid.bars, JSON.stringify(mid));
+  assert.ok(!mid.bars, JSON.stringify(mid));
+  // a short title fits beside them
+  assert.equal(PlateMod.plan(vm, 760, false, "Fix flaky auth test").bars, true);
   const small = PlateMod.plan(vm, 400, false, N.panes.long.title);
   assert.ok(!small.bars && !small.tiny, JSON.stringify(small));
   const tiny = PlateMod.plan(vm, 220, true, N.panes.long.title);
   assert.ok(tiny.tiny && !tiny.chip, "hovered tiny header gives the chip's room to the buttons");
+});
+
+test("nameplate: the bars never cost the title its room; equal panes match whatever the name or status; a retitle does not flicker them", () => {
+  const est = (s, px) => String(s ?? "").length * px;
+  const titles = ["Bump deps and fix types in the router", "Fix flaky auth test", "Split the router", "Add dark mode", "zsh"];
+  const heroes = [
+    ["Pim Null-Safe", "! waiting"], ["Echo the Idempotent", "fighting 3-3"], ["Tamsin the Composable", "fighting 1-1"],
+    ["Tamsin the Composable", "BOSS 94%"], ["Xan", "! waiting 59m"], ["Rue", "shipped · chest ready"],
+  ];
+  for (let W = 480; W <= 1000; W += 10) {
+    for (const title of titles) {
+      const plans = heroes.map(([name, chip]) => PlateMod.plan({ ...N.scenarios.long, name, careerTitle: "", chip: { text: chip, color: "#8A8F98" } }, W, false, title));
+      // the same width and title: the same decision for every name and status chip (the bug:
+      // 'Echo' had none beside 'Pim' with them; 'fighting 1-1' → 'BOSS 94%' toggled them)
+      assert.equal(new Set(plans.map((p) => p.bars)).size, 1, `${W} px "${title}": ${plans.map((p) => p.bars)}`);
+      // shown, they leave the whole title its room (names up to 170 px, chips up to 100 px)
+      if (plans[0].bars) {
+        for (const [i, [name, chip]] of heroes.entries()) {
+          if (est(name, 7.2) > 170 || est(chip, 5.4) + 20 > 100) continue;
+          const used = 130 + est(name, 7.2) + est(chip, 5.4) + 20 + 154;
+          assert.ok(W - used >= Math.min(est(title, 6.2), 220) - 0.01, `${W} px ${name}: title "${title}" cut beside the bars (plan ${i})`);
+        }
+      }
+    }
+  }
+  // hysteresis: bars shown stay through a slightly longer title, and go when it clearly needs the room
+  const vm = N.scenarios.long;
+  const W = 700;
+  const fits = "x".repeat(Math.floor((W - 554) / 6.2));
+  assert.equal(PlateMod.plan(vm, W, false, fits).bars, true);
+  const longer = fits + "xx";
+  assert.equal(PlateMod.plan(vm, W, false, longer, "", false).bars, false, "off: a title that does not fit keeps them off");
+  assert.equal(PlateMod.plan(vm, W, false, longer, "", true).bars, true, "on: a retitle 2 characters longer keeps them");
+  assert.equal(PlateMod.plan(vm, W, false, fits + "x".repeat(6), "", true).bars, false, "and they go when it is clearly longer");
+  // a hover never toggles them
+  for (const t of titles) assert.equal(PlateMod.plan(vm, 700, true, t).bars, PlateMod.plan(vm, 700, false, t).bars, t);
 });
 
 test("nameplate: below 360 px plan() keeps the terminal title, drops the level before it, and goes short below 200", () => {

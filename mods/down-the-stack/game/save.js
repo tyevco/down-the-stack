@@ -227,10 +227,7 @@ const C = {
       if (typeof v === "string") return ctx && ctx.strIdx && ctx.strIdx.has(v) ? ctx.strIdx.get(v) : v;
       return v == null ? null : [qDeep(v)];
     },
-    dec: (c, ctx) => {
-      if (typeof c === "number") return ctx && ctx.table && typeof ctx.table[c] === "string" ? ctx.table[c] : "";
-      return Array.isArray(c) ? c[0] : c;
-    },
+    dec: (c, ctx) => decText(c, ctx), // the same reading as a free-text slot's (below)
     def: () => null,
   }),
   json: (d) => ({ enc: (v) => qDeep(v), dec: (c) => (c === undefined ? d() : c), def: d }),
@@ -483,8 +480,8 @@ function unbits(n, keys) {
 }
 
 // cfg keys the codec writes itself (readable / compact); any other key is kept as it is
-const CFG_KNOWN = ["auto", "calm", "stageH", "nums", "notify", "autoX", "notifyX", "autopilot", "glow", "collapse", "collapsed"];
-const CFG_COMPACT = ["autoX", "notifyX", "ap", "col", "held"];
+const CFG_KNOWN = ["auto", "calm", "stageH", "nums", "notify", "autoX", "notifyX", "autopilot", "glow", "collapse", "collapsed", "idleAt"];
+const CFG_COMPACT = ["autoX", "notifyX", "ap", "col", "held", "idle"];
 const cfgCodec = {
   enc(v) {
     const d = defaultCfg();
@@ -501,6 +498,9 @@ const cfgCodec = {
     if (glow > 0) out.glow = glow;
     if (c.collapse) out.col = 1;
     if (c.collapsed) out.held = 1;
+    // the host's note of when nothing started working (host.js stageAuto): a restart inside the
+    // collapse countdown goes on with it; absent while something works
+    if (Number.isFinite(c.idleAt)) out.idle = Math.round(c.idleAt);
     const ax = {};
     for (const k of Object.keys(auto)) if (!AUTO_KEYS.includes(k)) ax[k] = qDeep(auto[k]);
     if (Object.keys(ax).length) out.autoX = ax;
@@ -521,6 +521,7 @@ const cfgCodec = {
       notify: Object.assign(unbits(numOr(o.notify, 0), NOTIFY_KEYS), isObj(o.notifyX) ? o.notifyX : {}),
       autopilot: o.ap !== 0, glow: Math.max(0, Math.min(5, Math.round(numOr(o.glow, 0)))), collapse: !!o.col, collapsed: !!o.held,
     };
+    if (Number.isFinite(o.idle)) out.idleAt = o.idle;
     for (const k of Object.keys(o)) if (!(k in out) && !CFG_COMPACT.includes(k)) out[k] = o[k];
     return out;
   },

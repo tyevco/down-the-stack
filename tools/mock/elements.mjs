@@ -224,6 +224,7 @@ function attach(parent, value, where) {
   }
   const t = typeof value;
   if (t === "string" || t === "number") {
+    if (t === "string") V.checkUtf8(value, where);
     if (t === "number" && !Number.isFinite(value)) report("error", "non-finite", `${where}(${value}) renders the text "${value}"; guard the arithmetic`);
     const n = textNode(String(value));
     n.parent = parent;

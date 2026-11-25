@@ -49,6 +49,12 @@ export const TIERS = { bars: 480, name: 360, micro: 200 };
 const MIN_TITLE = 100;
 const TITLE_WANT = 220;
 const NAME_MAX = 170;
+/** The bars test reserves this for the status chip (its common widest forms, "! waiting 59m"). */
+const CHIP_RESERVE = 100;
+/** Bars already shown stay until the title's room falls this far under what it wants. */
+const BARS_HYSTERESIS = 24;
+/** Width estimates per character: the bold / medium hero name, the chip, the terminal title. */
+const NAME_PX = 7.2;
 
 // herdr's own text spinner (peek / worktree mods), so no other mod's asset is needed.
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -147,18 +153,23 @@ function faceScreen(vm, t) {
 }
 
 /**
- * What fits in a hero header of width W (logical px). Real information wins: optional parts drop
- * in this order while the terminal title has less room than it wants (its estimated width, up to
- * TITLE_WANT): career title, contractor tag; the HP/XP bars drop only below MIN_TITLE; then the
- * name truncates. The folder shows when there is room left after the whole title. Text widths are
- * estimated per character (Geist / JetBrains Mono at these sizes). Below TIERS.name see tinyPlan().
- * Hovered, the chip makes way for the pane buttons when they would not fit otherwise.
+ * What fits in a hero header of width W (logical px). Real information wins (D§11.12: herdr's
+ * own terminal title stays as it is): the HP/XP bars show only when the whole title (its
+ * estimated width, up to TITLE_WANT) fits beside them, judged with the name at NAME_MAX and the
+ * chip at CHIP_RESERVE whatever they are now, so equal panes with equal titles match and a status
+ * change never moves the title; bars already shown (`prevBars`) stay until the title's room falls
+ * BARS_HYSTERESIS under that, so a retitle does not flicker them. Then career title and contractor
+ * tag drop while the title has less room than it wants; then the name truncates. The folder shows
+ * when there is room left after the whole title. Text widths are estimated per character (Geist /
+ * JetBrains Mono at these sizes). Below TIERS.name see tinyPlan(). Hovered, the chip makes way for
+ * the pane buttons when they would not fit otherwise (the bars test leaves the buttons out: a
+ * hover never toggles the bars).
  */
-export function plan(vm, W, hovered, title = "", folderText = "") {
+export function plan(vm, W, hovered, title = "", folderText = "", prevBars = false) {
   const est = (s, px) => String(s ?? "").length * px;
   if (W < TIERS.name) return tinyPlan(vm, W, hovered, title);
   const buttonsW = hovered ? 4 * 20 + 4 * 8 : 0;
-  const nameW = Math.min(est(vm.name, 6), NAME_MAX);
+  const nameW = Math.min(est(vm.name, NAME_PX), NAME_MAX);
   // padding 20, program icon 14, face 28, "Lv 88" 32, the hero's gaps 24, gap to the centre 8,
   // divider + its gap 9 (optional parts carry their own gap in `cost`); estimates err low: the
   // title truncates gracefully when they are short of the real widths.
@@ -173,11 +184,13 @@ export function plan(vm, W, hovered, title = "", folderText = "") {
     contractor: vm.contractor ? 78 : 0,
     bars: 146 + 8,
   };
-  const on = { career: !!vm.careerTitle, contractor: !!vm.contractor, bars: W >= TIERS.bars };
-  const used = () => base + nameW + chipW + buttonsW + Object.keys(on).reduce((a, k) => a + (on[k] ? cost[k] : 0), 0);
   const want = Math.max(MIN_TITLE, Math.min(est(title, 6.2), TITLE_WANT));
+  // the bars: the pane's width and the title's only (not the name, the chip or the hover)
+  const barsRoom = W - (base + NAME_MAX + CHIP_RESERVE + cost.bars);
+  const bars = W >= TIERS.bars && barsRoom >= want - (prevBars ? BARS_HYSTERESIS : 0);
+  const on = { career: !!vm.careerTitle, contractor: !!vm.contractor, bars };
+  const used = () => base + nameW + chipW + buttonsW + Object.keys(on).reduce((a, k) => a + (on[k] ? cost[k] : 0), 0);
   for (const k of ["career", "contractor"]) if (on[k] && W - used() < want) on[k] = false;
-  if (on.bars && W - used() < MIN_TITLE) on.bars = false;
   const spare = W - used();
   const nameMax = spare >= MIN_TITLE ? NAME_MAX : Math.max(72, nameW - (MIN_TITLE - spare));
   const folder = !!folderText && spare - est(title, 6.2) >= Math.min(est(folderText, 6.2), 220) + 8;
@@ -217,7 +230,8 @@ function heroHeader(vm, env, t, ui) {
   const W = ui.size?.w ?? env.width ?? 600;
   const hovered = !!ui.hovered;
   const title = p.name || p.title || "";
-  const fit = plan(vm, W, hovered, title, folder(p.cwd, env.home));
+  const fit = plan(vm, W, hovered, title, folder(p.cwd, env.home), !!ui.bars);
+  ui.bars = fit.bars;
   const pic = vm.programIcon ? programGlyph(vm.programIcon, 14, t.dim) : herdrIcon(p.program, 14, t.dim);
 
   const hero = h_flex().id(`np-hero-${p.pane}`).flex_none().h(26).px(4).ml(-4).gap(6).items_center().rounded(6).cursor_pointer()
@@ -246,7 +260,7 @@ function heroHeader(vm, env, t, ui) {
     // header; the centre then clips its title and folder instead of painting over the chip
     : h_flex().flex_1().min_w(0).gap(8).items_center().overflow_hidden()
       .child(div().flex_none().w(1).h(14).bg(t.border))
-      .child(div().min_w(0).truncate().text_color(t.muted).child(title))
+      .child(div().min_w(0).truncate().text_color(t.muted).when(Boolean(title), (el) => el.tooltip(title)).child(title))
       .when(fit.folder, (el) => el.child(div().flex_none().max_w(220).truncate().text_color(t.dim).child(folder(p.cwd, env.home))))
       .child(div().flex_1());
 

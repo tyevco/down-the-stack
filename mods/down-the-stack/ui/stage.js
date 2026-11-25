@@ -33,8 +33,10 @@
  *
  * @typedef {object} RoomVMAdditions
  * @property {string} [tooltip]  Room header hover: zone, map, quota, Sprint meter (D§11.16).
- * @property {{heroIds:number[], mapId:string|null}|null} [pin]  Header click (D§11.16): pinMap
- *           {heroId, mapId} for each hero (mapId null unpins); null: the header is not clickable.
+ * @property {{heroIds:number[], mapId:string|null, pinned?:boolean}|null} [pin]  Header click
+ *           (D§11.16): pinMap {heroId, mapId} for each hero (mapId null unpins); null: the header
+ *           is not clickable. pinned: every hero here is pinned to this map (the header draws a
+ *           pin before the title, 2 elements, but not on bare rooms; the tooltip says a click unpins).
  * @property {{kind:string, idx:number, tooltip?:string}|null} [challenge]  Boss-door click
  *           (D§11.16): the `challenge` command {kind, idx}; null: the door is only a sign (also
  *           while the engine would refuse the challenge: a boss fight on, a retry wait, nobody
@@ -298,6 +300,7 @@ export function renderStage(model, env = {}) {
   if (!ctx.compact) {
     for (const h of heroes) if (h.reviewEnd) scene.children(reviewEnd(h, ctx));
     for (const f of paintOrder(ctx.fxKept)) scene.children(fx(f, ctx));
+    for (const f of ctx.fxKept) if (f.kind === "pillar") scene.children(pillarLabel(f, ctx));
     if (vm.boss) scene.children(bossOverlays(vm.boss, ctx));
   }
   const note = vm.headerNote && !ctx.compact ? headerNote(vm.headerNote, ctx, rooms) : null;
@@ -472,7 +475,7 @@ function sceneCost(vm, rooms, heroes, ctx, d) {
     if (!d.plainRooms) el += 2 + Math.min(d.maxProps, (r.props ?? []).length);
     if (d.farTiles) { el += 1 + Math.ceil((w + 48) / 160); if (r.working && motion) an++; }
     const hf = headerFit(r, w, d.bareRooms);
-    el += 1 + (hf.hasQuota ? 2 : 0) + (hf.stats ? 1 : 0);
+    el += 1 + (hf.hasQuota ? 2 : 0) + (hf.stats ? 1 : 0) + (hf.pin ? 2 : 0);
     if (r.door) el += 1 + (r.challenge ? 2 : 1);
   }
   const b = vm.boss;
@@ -714,18 +717,35 @@ function headerFit(r, w, bare = false) {
   let stats = bare ? "" : typeof r.stats === "string" ? r.stats : hasQuota ? `${r.quota.have}/${r.quota.need}` : "";
   const bw = w < 220 ? 24 : 36;
   const doorW = r.door ? (r.challenge ? 19 : 16) : 0;
-  const space = (st) => w - 14 - (hasQuota ? bw + 5 : 0) - (st ? monoW(st, 9.5) + 5 : 0) - doorW;
+  // the map pin goes with the stats on bare rooms: the last rungs then cost what they did before
+  // pins were drawn (30 pinned rooms are 60 elements), and the header's tooltip still says so
+  const pin = !bare && pinnedRoom(r);
+  const pinW = pin ? PIN_W + 5 : 0;
+  const space = (st) => w - 14 - (hasQuota ? bw + 5 : 0) - (st ? monoW(st, 9.5) + 5 : 0) - doorW - pinW;
   const textW = (t) => String(t ?? "").length * 10.5 * 0.56;  // the UI font averages ≈ 0.56 em
   let title = r.title ?? "";
   if (textW(title) > space(stats)) title = r.shortTitle ?? title;
   if (textW(title) > space(stats) && stats.includes(" · ")) stats = stats.slice(0, stats.indexOf(" · "));
-  const used = (r.dividerLeft ? 7 : 6) + textW(title) + (hasQuota ? bw + 5 : 0) + (stats ? monoW(stats, 9.5) + 5 : 0) + doorW + 5;
-  return { hasQuota, stats, bw, title, used: Math.min(w, used) };
+  const used = (r.dividerLeft ? 7 : 6) + pinW + textW(title) + (hasQuota ? bw + 5 : 0) + (stats ? monoW(stats, 9.5) + 5 : 0) + doorW + 5;
+  return { hasQuota, stats, bw, title, pin, used: Math.min(w, used) };
+}
+
+/** Every hero in the room is pinned to its map (RoomVM.pin.pinned: the header click unpins). */
+const pinnedRoom = (r) => Boolean(r.pin && r.pin.pinned && Array.isArray(r.pin.heroIds) && r.pin.heroIds.length);
+const PIN_W = 6;
+
+/**
+ * The map pin before a pinned room's title (D§11.16: the header click pins the room's heroes to
+ * its map; autopilot's map choice then leaves them there): a cream head on a needle, two elements.
+ */
+function pinMark(r) {
+  return div().id(`${r.key}/pin`).flex_none().relative().size(PIN_W).mb(4).rounded_full().bg(CREAM)
+    .child(div().absolute().left(2.25).top(5).w(1.5).h(5).rounded(1).bg(CREAM));
 }
 
 /** Header band (y 0–18): map title, quota bar, stats, boss-door icon. Pinned to the top. */
 function roomHeader(r, w, ctx) {
-  const { hasQuota, bw, title, stats } = headerFit(r, w, ctx.bareRooms);
+  const { hasQuota, bw, title, stats, pin: pinShown } = headerFit(r, w, ctx.bareRooms);
   const divider = r.dividerLeft && !ctx.bareRooms;
   const strip = div().id(`${r.key}/hdr`).absolute().left(0).top(0).w(w).h(18).flex().items_center().gap(5).pl(divider ? 7 : 6).pr(5)
     .overflow_hidden().whitespace_nowrap().text_size(10.5).font_weight(600).text_color(CREAM)
@@ -741,6 +761,7 @@ function roomHeader(r, w, ctx) {
       for (const heroId of pin.heroIds) ctx.act("pinMap", { heroId, mapId: pin.mapId ?? null });
     });
   }
+  if (pinShown) strip.child(pinMark(r));
   strip.child(String(title));
   if (hasQuota) {
     strip.child(div().flex_none().relative().w(bw).h(3).rounded(1).bg("#FFFFFF2E")
@@ -988,7 +1009,9 @@ function forkCounter(h, all, ctx) {
   const w = monoW(text, 8) + 8;
   const tips = all.slice(0, 3).map((f) => String(f?.tooltip ?? "Sub-agent"));
   if (n > tips.length) tips.push(`…and ${n - tips.length} more`);
-  return div().id(`${h.key}/forks`).absolute().left(r2(clampX(num(all[0]?.x, h.x + 20) - 8, w, ctx))).top(r2(ctx.oy + num(all[0]?.y, h.y) - 16))
+  // where the first Forkling stands, but clear of the hero's 40 px body (at the slot's scale)
+  const left = Math.max(num(all[0]?.x, h.x + 20) - 8, h.x + 20 * num(h.scale, 1) + 1);
+  return div().id(`${h.key}/forks`).absolute().left(r2(clampX(left, w, ctx))).top(r2(ctx.oy + num(all[0]?.y, h.y) - 16))
     .w(w).h(11).rounded(3).bg(alpha(INK, 0.7)).flex().items_center().justify_center()
     .text_size(8).line_height(1).font_family(MONO).font_weight(700).text_color(blocked ? C.blocked : alpha(CREAM, 0.85))
     .whitespace_nowrap().cursor_pointer()
@@ -1380,11 +1403,15 @@ function fx(f, ctx) {
 /** Level-up: a cyan light column and "LEVEL UP" text (age 0..1, DESIGN §11.8). */
 function levelUp(f, ctx) {
   const { oy } = ctx;
-  const col = div().id(f.key).absolute().left(r2(f.x - 9)).top(r2(oy + 30)).w(18).h(GROUND - 30).rounded(9)
+  // on short stages the column starts below the header band (as a loot pillar's does)
+  const top = Math.max(18, oy + 30);
+  const col = div().id(f.key).absolute().left(r2(f.x - 9)).top(r2(top)).w(18).h(r2(Math.max(1, oy + GROUND - top))).rounded(9)
     .bg(alpha(C.xp, 0.55)).opacity(0.7);
-  if (ctx.motion) col.loop("opacity", { from: 0.3, to: 0.9, period: 400, easing: "ease-in-out" });
+  // one slow pulse over the column's 1.6 s: a loop's period is a whole there-and-back
+  // (materialize.rs apply_loops), and nothing on the stage flashes faster than 1 Hz (D§11.1)
+  if (ctx.motion) col.loop("opacity", { from: 0.3, to: 0.9, period: 1600, easing: "ease-in-out" });
   const age = num(f.age, 0);
-  const label = div().id(`${f.key}/t`).absolute().left(r2(f.x - 34)).top(r2(oy + f.y - (age >= 1 ? 92 : 72))).w(68).h(12)
+  const label = div().id(`${f.key}/t`).absolute().left(r2(f.x - 34)).top(r2(Math.max(20, oy + f.y - (age >= 1 ? 92 : 72)))).w(68).h(12)
     .flex().justify_center().text_size(10).line_height(1).font_family(MONO).font_weight(800).text_color(C.xp)
     .whitespace_nowrap().opacity(age >= 2 ? 0 : 1)
     .transition("top", { duration: 900, easing: "ease-out" }).transition("opacity", { duration: 600 })
@@ -1393,8 +1420,9 @@ function levelUp(f, ctx) {
 }
 
 /**
- * LTS / Keepsake light pillar: 48 px column in the rarity colour with the rarity name. Painted
- * over the scene but with no handler: its click (the sheet) is pillarHit's, under the heroes.
+ * LTS / Keepsake light pillar: 48 px column in the rarity colour. Painted over the scene but with
+ * no handler: its click (the sheet) is pillarHit's, under the heroes. Its rarity name is
+ * pillarLabel's, painted after every other effect.
  */
 function lootPillar(f, ctx) {
   const { oy } = ctx;
@@ -1403,12 +1431,24 @@ function lootPillar(f, ctx) {
   const top = Math.max(18, oy + 20);
   const col = div().id(f.key).absolute().left(r2(f.x - 24)).top(r2(top)).w(48).h(r2(Math.max(1, oy + GROUND - top))).rounded(6).bg(alpha(c, 0.28))
     .opacity(num(f.age, 0) >= 3 ? 0 : 1).transition("opacity", { duration: 600 });
-  return [
-    col,
-    div().id(`${f.key}/t`).absolute().left(r2(f.x - 40)).top(r2(top + 4)).w(80).h(12).flex().justify_center()
-      .text_size(9.5).line_height(1).font_family(MONO).font_weight(800).text_color(c).whitespace_nowrap()
-      .opacity(num(f.age, 0) >= 3 ? 0 : 1).transition("opacity", { duration: 600 }).child(String(f.text ?? "")),
-  ];
+  return [col];
+}
+
+/**
+ * A pillar's rarity name, in the rarity colour on the dark plate the stage's other labels use (the
+ * raw colour over a light zone's sky read at 1.4–1.6:1), painted over the effects so a damage
+ * number rising through the column never hides it (short stages put both near the header band).
+ */
+function pillarLabel(f, ctx) {
+  if (ctx.calm || f.kind !== "pillar") return [];
+  const c = f.color ?? "#FF9A2E";
+  const text = String(f.text ?? "");
+  const top = Math.max(18, ctx.oy + 20);
+  const w = Math.min(96, monoW(text, 9.5) + 10);
+  return [div().id(`${f.key}/t`).absolute().left(r2(clampX(f.x - w / 2, w, ctx))).top(r2(top + 3)).w(w).h(14).rounded(4)
+    .bg(alpha(INK, 0.85)).flex().items_center().justify_center()
+    .text_size(9.5).line_height(1).font_family(MONO).font_weight(800).text_color(c).whitespace_nowrap()
+    .opacity(num(f.age, 0) >= 3 ? 0 : 1).transition("opacity", { duration: 600 }).child(text)];
 }
 
 /**
@@ -1447,9 +1487,21 @@ function headerNote(n, ctx, rooms) {
     const free = w - headerFit(r, w, ctx.bareRooms).used - 8;
     if (!best || free > best.free) best = { free, right: num(r.x, 0) + w - 4 };
   }
+  // the Localhost scenery at either end of the strip (backdrop()) has an empty header band too:
+  // a lone hero's 320 px slot on a wide stage leaves hundreds of px there. A note in it sits
+  // beside the rooms (right-aligned on the left end, left-aligned on the right end).
+  if (rooms.length) {
+    const lo = Math.min(...rooms.map((r) => num(r.x, 0)));
+    const hi = Math.max(...rooms.map((r) => num(r.x, 0) + num(r.w, 0)));
+    const end = ctx.vm.overflow ? num(ctx.vm.overflow.x, ctx.W) : ctx.W;
+    for (const [a, b, side] of [[0, lo, "l"], [hi, end, "r"]]) {
+      const free = b - a - 8;
+      if (free > 0 && (!best || free > best.free)) best = { free, right: side === "l" ? b - 4 : null, left: side === "r" ? a + 4 : null };
+    }
+  }
   if (!best || best.free < Math.min(want, NOTE_MIN_W)) return null;
   const bw = Math.min(want, best.free);
-  const left = best.right - bw;
+  const left = best.left != null ? best.left : best.right - bw;
   const top = 1;
   return div().id(n.key).absolute().left(r2(clampX(left, bw, ctx))).top(top).w(r2(bw)).h(16).rounded(8)
     .bg("#0B0A12EB").border(1).border_color(alpha(n.color ?? CREAM, 0.55))

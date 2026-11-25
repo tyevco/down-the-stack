@@ -22,24 +22,32 @@ Below, `<home>` means that folder.
 
 1. **Show another layout first** (for example `ctrl-shift-l`, `cmd-shift-l` on macOS, or Settings).
    - herdr watches `layouts/` and `mods/`, and reloads every copy of a mod that is on screen
-     about 150 ms after files change.
+     within about 0.1 s of a file change (it batches app-home file events for 80 ms).
    - A slow copy over a running install can load a mix of old and new modules for a moment.
-   - Copying to a temporary folder and renaming it into place also avoids this.
-2. Copy the files:
+2. Copy the files. Copy the mod folder **onto `<home>/mods/`, not onto the folder itself**, and
+   only when `<home>/mods/down-the-stack` does not exist yet (an update removes it first, see
+   below):
    ```sh
    cp layouts/Down-the-Stack.json  <home>/layouts/Down-the-Stack.json
-   cp -r mods/down-the-stack       <home>/mods/down-the-stack
+   cp -r mods/down-the-stack       <home>/mods/
    ```
+   - `cp -r` (and PowerShell's `Copy-Item -Recurse`) into a folder that already exists copies the
+     source *inside* it: you would get `<home>/mods/down-the-stack/down-the-stack/`, which herdr
+     never loads, while the old `main.js` keeps running. Copying onto the parent only merges, and
+     keeps files a newer version dropped. So never copy over an installed mod: remove the old
+     folder (or move it out of `<home>/mods/`) first.
    - The mod folder **must be named `down-the-stack`**. These all use that name:
      - the layout's `"mod": "down-the-stack"` blocks and its `"preview"` path;
      - the asset root `ASSETS = "mods/down-the-stack"` (`mods/down-the-stack/ui/kit.js`);
      - `SELF = { mod: "down-the-stack" }` (`mods/down-the-stack/host.js`: overlays, commands and
-       the save folder) and the dialogs' `openOverlay({ mod: "down-the-stack", … })`
-       (`mods/down-the-stack/ui/stage.js`, `mods/down-the-stack/ui/party.js`);
-     - the `down-the-stack.*` commands in `mod.json` and `keys.example.json`.
+       the save folder; `mods/down-the-stack/ui/herdpanel.js`: the stage and HUD blocks) and the
+       dialogs' `openOverlay({ mod: "down-the-stack", … })` (`mods/down-the-stack/ui/stage.js`,
+       `mods/down-the-stack/ui/party.js`);
+     - the palette entry of `mod.json` (`mod.open {"name": "down-the-stack"}`) and the
+       `down-the-stack.*` commands of `keys.example.json`.
    - If the name is taken, rename all of them together. herdr's `mod.clone` rewrites only
      `mods/<name>` paths and `mod: "<name>"` keys, which covers the ones in the mod's code. It
-     leaves the `down-the-stack.*` commands of `mod.json`, the layout and `keys.json` alone.
+     leaves `mod.json`'s palette entry, the layout and `keys.json` alone.
    - The layout file's name is its title in herdr, so keep `Down-the-Stack` unless that is taken
      too.
    - Leave `RECIPE.md`, `preview.png`, `docs/`, `tools/` and `test/` out: the mod needs none of
@@ -61,7 +69,9 @@ Below, `<home>` means that folder.
    | `ctrl-shift-d` | calm mode (`down-the-stack.calm`) |
 
    An untouched `keys.json` is replaced by newer default shortcuts when herdr updates. Once you edit
-   it, it is yours, and new default shortcuts must be added by hand.
+   it, it is yours, and new default shortcuts must be added by hand. Without these keys the
+   palette still has "Down the Stack: Herd panel" (it opens on the Digest tab in any layout), and
+   the panel's Roster and Settings tabs reach the character sheets and calm mode.
 5. Switch to it in any of these ways:
    - the Settings layout picker (the card is called "Down-the-Stack");
    - the palette row "Layout: Down-the-Stack";
@@ -72,7 +82,7 @@ Below, `<home>` means that folder.
 
 herdr has no display title for a layout, so Settings, the palette and the macOS View > Layout menu
 show the file name, "Down-the-Stack". herdr names mod actions by the mod folder, so the Keys
-overlay reads "down-the-stack sheet" and a failed command toasts `down-the-stack.sheet failed`. The
+overlay reads "down-the-stack sheet" and a failed command would toast `down-the-stack.sheet failed`. The
 game itself only says "Down the Stack".
 
 ## What it touches
@@ -83,15 +93,21 @@ game itself only says "Down the Stack".
   - `save.broken` (then `save.broken-<ms>`): a save that failed to load, kept aside and never
     overwritten;
   - `save.unsaved` (then `save.unsaved-<ms>`): a session that ran on a new herd while
-    `save.json` could not be read, kept aside once the old save is back.
+    `save.json` could not be read, kept aside once the old save is back (also a session's world
+    when the save that turns up was written by a newer version, which opens read-only).
 - It posts no notifications unless you turn them on in the Herd panel's Settings tab (herd-first
   boss kill, LTS or Keepsake drop, a hero reaches Principal). Then it posts at most 3 a game day
   (the day turns at 04:00) as herdr toasts, never with a sound, and only for what happens while
-  herdr runs. Clicking one opens the Herd panel on its Digest tab (`mod.open`), from any layout.
+  herdr runs. A boss's Keepsake counts as a Keepsake drop; a herd-first kill's Keepsake is named in
+  that kill's toast while boss kills are on. Clicking one opens the Herd panel on its Digest tab
+  (`mod.open`), from any layout. Toasts close after herdr's usual 5 s; the Digest keeps every line.
 - With "Collapse the stage when nothing works" on (Settings tab, off by default), it hides its own
   stage block a minute after the last hero stops working and shows it again when one works
   (`layout.hide` / `layout.show`). herdr keeps a hidden block hidden across restarts
-  (`<home>/layouts/.state/`), and the save remembers that the game hid it.
+  (`<home>/layouts/.state/Down-the-Stack.json`), and the save remembers that the game hid it. It
+  never shows a stage it did not hide: one hidden by hand, or left hidden by an earlier install or
+  a lost save, comes back with `ctrl-shift-g` (keys merged) or `herdr-app do layout.show --id stage`
+  while this layout shows.
 - Its own buttons change the layout as herdr's chrome does: the sidebar's rail button
   (`layout.resize` on `sidebar` and herdr's shared `sidebar.width` / `sidebar.collapsed`, like
   herdr's agents list), and the Settings tab's stage height and HUD strip (`layout.resize` /
@@ -100,11 +116,23 @@ game itself only says "Down the Stack".
 
 ## Update and uninstall
 
-- **Update:** show another layout, replace both copies the same way as installing, run
-  `herdr-app check` again, then switch back. The save carries over.
-- **Uninstall:** delete `<home>/layouts/Down-the-Stack.json` and `<home>/mods/down-the-stack/`. Also
-  delete `<home>/data/down-the-stack/` to drop the save. Remove the `layout:Down-the-Stack` section
-  from `keys.json` if you merged it.
+- **Update:** show another layout, then remove the old mod folder and copy the new one onto
+  `<home>/mods/` (never copy over the old folder: `cp -r` would nest the new build inside it and
+  leave the old one running, and `herdr-app check` would pass the old build):
+  ```sh
+  rm -rf <home>/mods/down-the-stack
+  cp -r mods/down-the-stack <home>/mods/
+  cp layouts/Down-the-Stack.json <home>/layouts/Down-the-Stack.json
+  ```
+  To keep the old build, move it out of `<home>/mods/` instead of deleting it (herdr treats every
+  folder there as a mod, and a `mv` onto a folder that exists nests too). Run
+  `herdr-app check <home>/mods/down-the-stack` again, then switch back. The save carries over (it
+  lives in `<home>/data/down-the-stack/`).
+- **Uninstall:** delete `<home>/layouts/Down-the-Stack.json`, `<home>/mods/down-the-stack/` and
+  `<home>/layouts/.state/Down-the-Stack.json` (herdr's memory of this layout's clicks, such as a
+  hidden stage: left behind, it would bring the stage back hidden after a reinstall). Also delete
+  `<home>/data/down-the-stack/` to drop the save. Remove the `layout:Down-the-Stack` section from
+  `keys.json` if you merged it.
 
 ## Develop
 

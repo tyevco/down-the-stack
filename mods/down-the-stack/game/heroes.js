@@ -9,7 +9,7 @@ import {
   TUNING as T, CLASSES, CAREERS, SKILLS, SKILL_SLOTS, NAMES, ZONES, TROPHY, BUILDINGS, BUILDING_IDX, CLASS_IDX,
   RARITIES,
 } from "./data.js";
-import { g, DR, need, bareHandDmg, weaponDmg, powerLevel, trackerTier } from "./formulas.js";
+import { g, DR, need, bareHandDmg, weaponDmg, powerLevel, trackerTier, autoOn } from "./formulas.js";
 import { fnv1a32, rngNext, seedOf } from "./rng.js";
 import { itemStats, newItem, canEquip, FLAG_STARTER } from "./items.js";
 
@@ -153,7 +153,9 @@ export function learn(hero, slot) {
 /**
  * Auto-learn (D§7.1): each free point goes to the eligible skill with the lowest rank/max ratio;
  * ties: Ultimate, Signature, Main, Area, Capstone, Passive, Buff. Respects hero.autoLearn unless
- * opts.force. Returns the number of points spent.
+ * opts.force. Returns the number of points spent. The herd's switch (herd.cfg.auto.learn and the
+ * autopilot master switch, formulas.autoOn) is the caller's to check: respec, setClass and a
+ * provisional switch in recordTask re-spend only while it is on.
  */
 export function autoLearn(hero, opts = {}) {
   if (!opts.force && hero.autoLearn === false) return 0;
@@ -196,7 +198,9 @@ function refundAll(hero) {
 }
 
 /**
- * Respec (D§7.1): free once per 24 h while Resting, otherwise 5 x L Snippets from the herd.
+ * Respec (D§7.1): free once per 24 h while Resting, otherwise 5 x L Snippets from the herd. The
+ * refunded points are re-spent at once only while auto-learn is on for the herd (opts.herd's
+ * switches, formulas.autoOn) and for the hero; otherwise they wait for the person.
  * @param {object} hero @param {number} nowMs
  * @param {{resting?:boolean, herd?:object}} [opts] herd is needed for a paid respec
  * @returns {{ok:boolean, free?:boolean, cost?:number, error?:string}}
@@ -216,7 +220,7 @@ export function respec(hero, nowMs, opts = {}) {
     hero.cd.respecAt = nowMs;
   }
   refundAll(hero);
-  autoLearn(hero);
+  if (autoOn({ herd: opts.herd }, "learn")) autoLearn(hero);
   return { ok: true, free, cost };
 }
 
@@ -943,12 +947,13 @@ function assignClass(hero) {
 /**
  * Records a closed task on the signature window (D§4.2). Only tasks of 1.5 min or more qualify.
  * While the class is provisional (Lv 10+, fewer than 15 qualifying tasks), the class is
- * re-evaluated and switches for free (skill points refunded; auto-learn re-spends them); the
- * 15th qualifying task locks it.
+ * re-evaluated and switches for free (skill points refunded; auto-learn re-spends them unless
+ * opts.learn is false: the herd's auto-learn switch is off); the 15th qualifying task locks it.
  * @param {{minutes:number, blocks?:number, spawned?:boolean}} task
+ * @param {{learn?:boolean}} [opts]
  * @returns {{qualifying:boolean, switched:boolean, locked:boolean, cls:number}}
  */
-export function recordTask(hero, task) {
+export function recordTask(hero, task, opts = {}) {
   const out = { qualifying: false, switched: false, locked: false, cls: hero.cls };
   const min = task.minutes || 0;
   if (!(min >= T.seals.minMinutes)) return out;
@@ -970,7 +975,7 @@ export function recordTask(hero, task) {
     if (rec !== hero.cls) {
       hero.cls = rec;
       refundAll(hero);
-      autoLearn(hero);
+      if (opts.learn !== false) autoLearn(hero);
       out.switched = true;
     }
     if (sig.n >= T.skills.classLockTasks) {
@@ -985,7 +990,8 @@ export function recordTask(hero, task) {
 /**
  * Person override / Career Change (D§4.2): any class, free, before Lv 20 (locks it; before Lv 10
  * it is remembered and applied, locked, at Lv 10). From Lv 20 a change costs 25 x L Snippets and
- * refunds all skill points. Choosing the current class just locks it.
+ * refunds all skill points (re-spent at once only while auto-learn is on for the herd, autoOn, and
+ * for the hero). Choosing the current class just locks it.
  * @returns {{ok:boolean, cost?:number, error?:string, msg?:string}}
  */
 export function setClass(state, hero, cls) {
@@ -1009,7 +1015,7 @@ export function setClass(state, hero, cls) {
   hero.cls = idx;
   hero.prov = 0;
   refundAll(hero);
-  autoLearn(hero);
+  if (autoOn(state, "learn")) autoLearn(hero);
   return { ok: true, cost };
 }
 

@@ -434,6 +434,51 @@ describe("bosses and reviews (D§9.5, D§4.5)", () => {
     assert.deepEqual(AP.autoChallenge(w, makeEv()), [], "the auto-boss switch");
   });
 
+  test("a Backlog boss floor displaces a paused repeat (farm) fight nobody may ever come back to; a paused frontier or Backlog fight still waits", () => {
+    // the end-game: every boss beaten, nobody stands in a farm fight's zone again (its participant
+    // retired, or quests in the Backlog), so the paused fight would hold the Backlog up for good
+    const w = makeWorld({ heroes: [{ cls: "hotfixer", L: 100, mapId: "backlog" }] });
+    const herd = w.state.herd;
+    herd.boss.fill(1);
+    herd.zone = D.BACKLOG.n;
+    herd.backlog = { floor: 10, kills: 50 };
+    const id = w.state.heroes[0].id;
+    const fakeApi = () => {
+      const api = fakeBoss({ est: 1.2 });
+      api.canChallenge = (world, kind, idx) => { api.calls.push(["can", kind, idx]); return { ok: true, estimate: 1.2, label: "Even", heroIds: [id] }; };
+      return api;
+    };
+    w.rt.bossApi = fakeApi();
+    herd.fight = { k: "b", i: 2, ids: [99], t: 10, ph: 1, p: [[0, 1000, 5000]], m: {}, pool: 5000, dl: 100, sq: 0 };
+    const started = AP.autoChallenge(w, makeEv());
+    assert.deepEqual(started.map((f) => [f.kind, f.bossIdx]), [["backlog", 10]], "the Backlog boss floor goes ahead");
+    // (boss.js startFight closes the paused farm fight as a Postmortem, Wounds kept)
+    w.rt.fights = [];
+    for (const paused of [{ k: "x", f: 10, i: 0 }, { k: "b", i: 8 }]) {
+      if (paused.k === "b") herd.boss[8] = 0; // the frontier boss, not beaten yet
+      herd.fight = Object.assign({ ids: [99], t: 10, ph: 1, p: [[0, 1000, 5000]], m: {}, pool: 5000, dl: 100, sq: 0 }, paused);
+      w.rt.bossApi = fakeApi();
+      assert.deepEqual(AP.autoChallenge(w, makeEv()), [], `a paused ${paused.k === "x" ? "Backlog" : "frontier"} fight waits`);
+      herd.boss[8] = 1;
+    }
+  });
+
+  test("through the real boss.js: the Backlog boss floor closes the paused farm fight as a Postmortem and starts", () => {
+    const w = makeWorld({ heroes: [{ cls: "hotfixer", L: 100, mapId: "backlog" }, { cls: "shellmancer", L: 100, mapId: "backlog" }] });
+    const herd = w.state.herd;
+    herd.boss.fill(1);
+    herd.bossKills.fill(1);
+    herd.zone = D.BACKLOG.n;
+    herd.backlog = { floor: 10, kills: 50 };
+    herd.fight = { k: "b", i: 2, ids: [99], t: 10, ph: 1, p: [[0, 1000, 5000]], m: {}, pool: 5000, dl: 2500, sq: 0 };
+    const ev = makeEv();
+    const started = AP.autoChallenge(w, ev);
+    assert.deepEqual(started.map((f) => [f.kind, f.floor]), [["backlog", 10]]);
+    assert.equal(herd.fight.k, "x", "herd.fight now mirrors the Backlog fight");
+    assert.ok(herd.wounds["2"][0] > 0, "the farm fight's Wounds are kept");
+    assert.ok(ev.journals.some((j) => j[0] === "boss" && /Postmortem/.test(j[2])));
+  });
+
   test("reviews: a Questing hero at Lv 30 takes the Senior Review, at Lv 60 the Staff Review", () => {
     const w = makeWorld({ heroes: [{ cls: "hotfixer", L: 30, rev: [0, 0] }, { cls: "hotfixer", L: 61, rev: [1, 0] }, { cls: "hotfixer", L: 45, rev: [1, 0] }] });
     w.rt.bossApi = fakeBoss({ est: 1.1, ok: (kind) => kind === "review" });

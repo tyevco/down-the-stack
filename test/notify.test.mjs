@@ -14,6 +14,7 @@ import * as Hr from "../mods/down-the-stack/game/heroes.js";
 import * as I from "../mods/down-the-stack/game/items.js";
 import { need } from "../mods/down-the-stack/game/formulas.js";
 import { encodeState, decodeState } from "../mods/down-the-stack/game/save.js";
+import { refKit } from "./helpers/engine.mjs";
 
 const T0 = Date.UTC(2026, 10, 24, 12, 0, 0);
 const HOUR = 3600000;
@@ -27,6 +28,53 @@ function liveWorld(kinds = ["boss", "lts", "principal"]) {
   for (const k of kinds) w.state.herd.cfg.notify[k] = true;
   W.tick(w, snap(T0 + 1000));
   return w;
+}
+
+const agent = (addr) => ({
+  address: addr, status: "working", seq: 1, app: "claude", program: { key: "claude", name: "claude" }, title: "x", space: "s1",
+  space_name: "repo", tab: "tb", tab_index: 1, tab_name: "main", pane: `p${addr}`, pane_name: null, pinned: false, focused: false,
+});
+
+/**
+ * Three Lv 25 heroes working before boss 0 kill it on live ticks: the herd's first kill, or a repeat
+ * kill (`repeat`). Notifications on for `kinds`; auto-boss and farming off (the person challenges).
+ */
+function bossKill(seed, { repeat = false, kinds = [] } = {}) {
+  const w = W.createWorld({ nowMs: T0, seed });
+  const herd = w.state.herd;
+  let now = T0;
+  const step = () => W.tick(w, snap(now += 1000, { agents: ["t1", "t2", "t3"].map(agent) }));
+  for (let i = 0; i < 3; i++) step();
+  for (const h of w.state.heroes) {
+    Object.assign(h, { L: 25, cls: 3, prov: 0, spFree: 0, sp: Hr.autoRanks(3, 25, true).slice() });
+    refKit(w.state, h);
+  }
+  Object.assign(herd.cfg.auto, { boss: false, farm: false });
+  for (const k of kinds) herd.cfg.notify[k] = true;
+  const last = D.ZONES[0].maps[2].id;
+  herd.quota[last] = 1000;
+  herd.meter = 1000;
+  if (repeat) {
+    herd.boss[0] = 1;
+    herd.bossKills[0] = 1;
+    herd.zone = 1;
+    w.rt.bossSeen = herd.bossKills.slice();
+    w.rt.zoneSeen = 1;
+  }
+  for (const l of w.rt.live.values()) l.mapId = last;
+  w.rt.roomsDirty = true;
+  const kills0 = herd.bossKills[0] || 0;
+  const drops0 = herd.drops || 0;
+  const r = W.command(w, "challenge", { kind: "boss", idx: 0 }, now);
+  assert.equal(r.ok, true, r.error);
+  const notes = [];
+  for (let i = 0; i < 400 && (herd.bossKills[0] || 0) === kills0; i++) {
+    step();
+    for (const n of w.rt.notes) if (!notes.includes(n.text)) notes.push(n.text);
+  }
+  assert.equal(herd.bossKills[0], kills0 + 1, "the boss fell");
+  const ks = herd.stash.filter((it) => it.rar === 5);
+  return { w, herd, ks, notes, drops: (herd.drops || 0) - drops0 };
 }
 
 /** An off-duty Lv 89 hero a hair short of Lv 90, with a chest older than a day (it opens Unreviewed). */
@@ -127,6 +175,7 @@ describe("raising milestones (D§11.15)", () => {
     assert.deepEqual(back.state.herd.notified, w.state.herd.notified);
     assert.deepEqual(back.state.herd.milestones, w.state.herd.milestones);
     back.rt.nowMs = T0 + 1000;
+    back.rt.tzOffsetMin = 0; // (the first snapshot tells the time zone)
     assert.equal(W.raiseMilestone(back, "boss", { title: "x" }), false, "still 3 today after the reload");
     // nothing raised: the fields are left out of the save (an old save reads them as their defaults)
     const fresh = JSON.parse(encodeState(W.createWorld({ nowMs: T0 }).state));
@@ -269,6 +318,89 @@ describe("only live play raises milestones (no burst of stale ones after catch-u
     assert.equal(r.ok, true, r.error);
     assert.equal(h.L, 90);
     assert.equal(w.state.herd.milestones.length, 1);
+  });
+
+  test("a Keepsake from a repeat kill is raised, counted for the digest and noted like any LTS drop", () => {
+    // seed 19: this repeat kill rolls the 15% Keepsake (D§8.6)
+    const { herd, ks, notes, drops } = bossKill(19, { repeat: true, kinds: ["lts"] });
+    assert.equal(ks.length, 1, "a Keepsake dropped");
+    const name = I.itemName(ks[0]);
+    assert.deepEqual(herd.milestones.map((m) => [m.kind, m.title]), [["lts", `Keepsake: ${name}`]]);
+    assert.match(herd.milestones[0].body, /^Found by .+\.$/);
+    assert.ok(notes.includes(`Keepsake: ${name}`), "a header note (D§11.15: Release or better)");
+    const lines = herd.log.filter((e) => e[1] === "drop");
+    assert.equal(lines.filter((e) => e[3] === name).length, 1, "one journal line");
+    assert.equal(drops, lines.length, "the digest counts every notable drop, the Keepsake too");
+    // off: a Keepsake raises nothing
+    const off = bossKill(19, { repeat: true, kinds: [] });
+    assert.equal(off.ks.length, 1);
+    assert.deepEqual(off.herd.milestones, []);
+  });
+
+  test("a herd-first kill's Keepsake rides on the boss toast while that is on; otherwise it is raised itself", () => {
+    const both = bossKill(11, { kinds: ["boss", "lts"] });
+    assert.equal(both.ks.length, 1, "a herd-first kill always drops a Keepsake");
+    const name = I.itemName(both.ks[0]);
+    const boss = both.herd.milestones.filter((m) => m.kind === "boss");
+    assert.equal(boss.length, 1);
+    assert.equal(boss[0].body, `The herd reached frame #2, ${D.ZONES[1].name}. Keepsake: ${name}.`);
+    assert.ok(!both.herd.milestones.some((m) => m.title === `Keepsake: ${name}`), "no second toast for the same kill");
+    assert.ok(both.notes.includes(`Keepsake: ${name}`), "the header note still shows");
+    const lts = bossKill(11, { kinds: ["lts"] });
+    assert.ok(lts.herd.milestones.some((m) => m.kind === "lts" && m.title === `Keepsake: ${name}`), "boss toasts off: the Keepsake is raised");
+    const bossOnly = bossKill(11, { kinds: ["boss"] });
+    assert.deepEqual(bossOnly.herd.milestones.map((m) => m.kind), ["boss"]);
+    assert.match(bossOnly.herd.milestones[0].body, new RegExp(`Keepsake: ${name}\\.$`));
+  });
+
+  test("only Principal raises: promotions to Junior, Senior and Staff raise nothing", () => {
+    for (const L of [9, 29, 59, 89]) {
+      const w = liveWorld(["principal"]);
+      w.rt.nowMs = T0 + 1000;
+      const h = Hr.newHero(w.state, { seat: "repo/claude", sid: "s1", ord: 0, nowMs: T0 });
+      Object.assign(h, { L, cls: 1, prov: 0, rev: [1, 1], xp: need(L) - 1e-6 });
+      w.state.heroes.push(h);
+      Hr.grantXP(w.state, h, 1, W.makeEmitter(w, { live: true }));
+      assert.equal(h.L, L + 1, `promoted from Lv ${L}`);
+      assert.deepEqual(w.state.herd.milestones.map((m) => m.title), L + 1 === 90 ? [`${h.name} reached Principal`] : [], `Lv ${L + 1}`);
+    }
+  });
+
+  test("a command before the first tick counts toward the local day, not the UTC day", () => {
+    const TZ = 480; // UTC-8: 21:00 local on Nov 24 is 05:00 UTC on Nov 25
+    const EVENING = Date.UTC(2026, 10, 25, 5, 0, 0);
+    const local = (nowMs, extra) => snap(nowMs, Object.assign({ tzOffsetMin: TZ }, extra));
+    const fresh = () => {
+      const w0 = W.createWorld({ nowMs: EVENING - 5000, seed: 3 });
+      Object.assign(w0.state.herd.cfg.notify, { principal: true, boss: true });
+      almostPrincipal(w0).pend[0].at = EVENING - 60000; // a fresh chest: it waits for the person
+      const world = W.loadWorld(W.serialize(w0), { nowMs: EVENING }).world;
+      return { world, h: world.state.heroes[0] };
+    };
+    const today = W.localDay(EVENING, TZ);
+    assert.equal(W.localDay(EVENING, 0), today + 1, "the UTC day is already tomorrow");
+    // the app (re)loads the save and the person claims the chest before the first tick
+    const { world, h } = fresh();
+    assert.equal(W.command(world, "claimChest", { heroId: h.id }, EVENING).ok, true);
+    assert.equal(h.L, 90);
+    W.tick(world, local(EVENING + 1000)); // the first tick tells the time zone
+    assert.equal(world.state.herd.milestones.length, 1, "raised");
+    assert.equal(world.state.herd.milestones[0].at, EVENING, "at the click");
+    assert.deepEqual(world.state.herd.notified, [today, 1, 1], "counted toward the local day");
+    for (const i of [3, 4]) { world.state.herd.bossKills[i] = 1; W.tick(world, local(EVENING + 1000 * i)); }
+    assert.deepEqual(world.state.herd.notified, [today, 3, 3], "the evening spends today's three");
+    // tomorrow 09:00 local: a new game day with its own three
+    const TOMORROW = Date.UTC(2026, 10, 25, 17, 0, 0);
+    W.tick(world, local(TOMORROW));
+    W.tick(world, local(TOMORROW + 1000));
+    world.state.herd.bossKills[5] = 1;
+    W.tick(world, local(TOMORROW + 2000));
+    assert.deepEqual(world.state.herd.notified, [today + 1, 1, 4], "tomorrow's first milestone is raised");
+    // a host that passes the time zone with the command counts it at once
+    const b = fresh();
+    assert.equal(W.command(b.world, "claimChest", { heroId: b.h.id }, EVENING, TZ).ok, true);
+    assert.deepEqual(b.world.state.herd.notified, [today, 1, 1]);
+    assert.equal(b.world.state.herd.milestones.length, 1);
   });
 
   test("a Contractor reaching Principal is not raised (it is never saved)", () => {

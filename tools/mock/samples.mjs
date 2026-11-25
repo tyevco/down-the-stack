@@ -5,11 +5,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { REPO } from "./config.mjs";
 
+/**
+ * Program records as herdr reports them (src/programs.rs `shown()` over defaults/programs.json): an
+ * agent's entry with `agent: true`; a shell is the "shell" entry named after the shell. codex's
+ * icon is full colour (tint false: a white tile plus its logo, drawn with image()); pi's is a mask.
+ */
 export const PROGRAMS = {
-  claude: { key: "claude", name: "Claude Code", icon: "icons/claude.svg", tint: false, tile: null, color: "#d97757", shell: false, agent: true },
-  codex: { key: "codex", name: "Codex", icon: "icons/codex.svg", tint: true, tile: null, color: "#e6e6e6", shell: false, agent: true },
-  pi: { key: "pi", name: "pi", icon: "icons/pi.svg", tint: true, tile: null, color: "#9ad1ff", shell: false, agent: true },
-  shell: { key: "shell", name: "zsh", icon: "icons/shell.svg", tint: true, tile: null, color: null, shell: true, agent: false },
+  claude: { key: "claude", name: "Claude Code", icon: "icons/claude.svg", tint: false, tile: "#1c1d21", color: "#ffffff", shell: false, agent: true },
+  codex: { key: "codex", name: "Codex", icon: "icons/codex.svg", tint: false, tile: "#1c1d21", color: "#ffffff", shell: false, agent: true },
+  pi: { key: "pi", name: "Pi", icon: "icons/pi.svg", tint: true, tile: "#1c1d21", color: "#ffffff", shell: false, agent: true },
+  shell: { key: "shell", name: "zsh", icon: "icons/shell.svg", tint: true, tile: "#16241a", color: "#4ec95f", shell: true, agent: false },
 };
 
 /** One agent row (AgentInfo). */

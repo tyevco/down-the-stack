@@ -635,6 +635,28 @@ describe("rewards (D§8.6, D§9.5)", () => {
     assert.ok(h.L > 12 || h.xp - xp0 >= F.bossXP(12, true) - 1);
   });
 
+  test("the Keepsake is logged like every notable drop: journal, header note, digest count, its pillar before the boss", () => {
+    const w = makeWorld({ seed: 4, heroes: [{ cls: "shellmancer", L: 12, mapId: "1-3" }, { cls: "hotfixer", L: 12, mapId: "1-3" }] });
+    openDoor(w, 0);
+    const ev = makeEv();
+    ev.milestones = [];
+    ev.milestone = (kind, data) => { ev.milestones.push([kind, data.title, data.body]); return true; };
+    const herd = w.state.herd;
+    Bo.startFight(w, "boss", 0, null, ev);
+    assert.equal(finish(w, ev), "won");
+    const ks = herd.stash.find((it) => it.rar === 5);
+    const name = D.KEEPSAKES[ks.prop].name;
+    assert.ok(ev.notes.includes(`Keepsake: ${name}`), "a header note");
+    assert.equal(ev.journals.filter((j) => j[0] === "drop" && j[2] === name).length, 1, "one journal line");
+    const pillars = ev.fxOf("pillar").filter((p) => p.rar === 5);
+    assert.equal(pillars.length, 1, "one pillar");
+    assert.equal(pillars[0].roomId, "arena", "before the boss");
+    assert.equal(pillars[0].value, ks.uid);
+    assert.equal(herd.drops, ev.journals.filter((j) => j[0] === "drop").length, "the digest counts it");
+    assert.deepEqual(ev.milestones.filter((m) => m[1] === `Keepsake: ${name}`).map((m) => m[0]), ["lts"], "boss toasts off: the Keepsake raises its own");
+    assert.equal(w.rt.firstKeepsake.name, name, "the boss toast can name it (world.js bossKills)");
+  });
+
   test("repeat kills: xpRepeat x Need XP x level gap (balance: 0.02, design 0.1), once per 3 working hours per hero, no meter needed", () => {
     const w = makeWorld({ seed: 4, heroes: [{ cls: "shellmancer", L: 30, mapId: "1-3" }] });
     openDoor(w, 1);
@@ -775,5 +797,29 @@ describe("retreat and paused fights", () => {
     assert.equal(h.bossIdx, 5);
     assert.equal(w.state.herd.lessons["6"], 1);
     assert.equal(w.state.herd.fight.i, 5);
+  });
+
+  test("leaveSavedFight: a hero leaving the roster leaves the paused fight; the last one out closes it as a Postmortem", () => {
+    const w = makeWorld({ seed: 2, heroes: [{ cls: "shellmancer", L: 40, mapId: "1-1" }, { cls: "hotfixer", L: 40, mapId: "1-1" }] });
+    const ev = makeEv();
+    const herd = w.state.herd;
+    herd.fight = { k: "b", i: 2, ids: [1, 2], hl: [2], t: 10, ph: 1, p: [[0, 1000, 5000]], m: {}, pool: 5000, dl: 4000, sq: 0 };
+    assert.equal(Bo.leaveSavedFight(w, 7, ev), false, "not a participant");
+    assert.equal(Bo.leaveSavedFight(w, 2, ev), true);
+    assert.deepEqual([herd.fight.ids, herd.fight.hl, herd.fight.n], [[1], [], 2], "the boss keeps the pool it was given");
+    const f = Bo.unpackFight(w, herd.fight);
+    assert.equal(f.n, 2);
+    assert.equal(f.pool, 5000);
+    assert.equal(ev.journals.length, 0);
+    assert.equal(Bo.leaveSavedFight(w, 1, ev), true);
+    assert.equal(herd.fight, null, "nobody left");
+    assert.ok(ev.notes.some((n) => n.startsWith("Postmortem:")));
+    assert.deepEqual(ev.journals.map((j) => [j[0], j[1]]), [["boss", 0]], "a Postmortem line for the herd");
+    assert.ok(herd.wounds["2"][0] > 0, "Wounds kept");
+    // a running fight owns herd.fight (it is mirrored every tick): left alone
+    const g = Bo.startFight(w, "boss", 0, [1, 2], ev);
+    assert.ok(g);
+    assert.equal(Bo.leaveSavedFight(w, 2, ev), false);
+    assert.deepEqual(herd.fight.ids, [1, 2]);
   });
 });

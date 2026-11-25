@@ -51,7 +51,7 @@ import * as Herd from "../herd.js";
 import { bossApi } from "../autopilot.js";
 import { heroCtx } from "../combat.js";
 import { fnv1a32 } from "../rng.js";
-import { statusWord, programIconOf, termlingColors, faceOf, xpFracOf, feFracOf, whyLine, taskLabel, tellingTitle } from "./chrome.js";
+import { statusWord, programIconOf, termlingColors, faceOf, xpFracOf, feFracOf, whyLine, taskLabel, tellingTitle, gapPart, gapText } from "./chrome.js";
 
 // ---------------------------------------------------------------------------------------------
 // Constants
@@ -1012,7 +1012,7 @@ function xpTooltip(world, hero, live) {
     const started = num(hero.st && hero.st.seals) > 0;
     return `Off duty: no XP. Fresh Eyes builds up (1 min per 4, up to ${cap} min)${started ? "" : ` once ${firstName(hero)} has shipped a chest`}`;
   }
-  const w = whyLine(live.why || null);
+  const w = whyLine(live.why || null, { level: hero.L });
   return w || "Working out the XP rate…";
 }
 
@@ -1273,7 +1273,8 @@ function respecAction(world, hero, live, clock, roster) {
   const resting = !live || live.state === "resting" || live.state === "shipped";
   const last = hero.cd && hero.cd.respecAt;
   const free = resting && (last == null || clock.now - last >= RESPEC_FREE_MS);
-  const after = hero.autoLearn !== false ? "; auto-learn re-spends them" : "";
+  // the herd's switch (and the autopilot master switch) rules over the hero's (heroes.respec)
+  const after = hero.autoLearn !== false && autoOn(world.state, "learn") ? "; auto-learn re-spends them" : "";
   if (free) return action("respec", "Respec", "respec", args, { cost: "Free (resting)", confirm: "Respec for free?", tooltip: `Refunds every skill point${after}` });
   const cost = T.skills.respecSnippetsPerLevel * hero.L;
   const short = shortfall(world.state.herd, 0, cost);
@@ -1287,19 +1288,22 @@ function skillsVM(world, hero, live, st, clock) {
   const roster = inRoster(world, hero);
   const sp = num(hero.spFree);
   const on = hero.autoLearn !== false;
+  // points are spent only while auto-learn is on for the herd too (Settings, and the autopilot
+  // master switch): the hero's own switch alone spends nothing (world.js autoLearn)
+  const spends = on && autoOn(world.state, "learn");
   const autoKey = "autolearn";
   const autoAct = roster
     ? action(autoKey, "Auto-learn", "autoLearn", { heroId: hero.id, on: !on }, { tooltip: on ? "Turn auto-learn off" : "Turn auto-learn on" })
     : disabled(autoKey, "Auto-learn", "autoLearn", { heroId: hero.id, on: !on }, "Contractors learn on their own");
   let note = null;
   if (hero.cls === 0) note = `Intern points are refunded at Lv ${CAREERS[1].from}, when the class arrives.`;
-  else if (hero.prov) note = "Provisional class: if it changes, every point is refunded and re-spent.";
+  else if (hero.prov) note = `Provisional class: if it changes, every point is refunded${spends ? " and re-spent" : ""}.`;
   return {
     sp: {
       count: sp, text: `skill ${plural(sp, "point")} to spend`,
-      tooltip: `1 point per level from Lv 2, +1 per review won.${on ? " Auto-learn spends them within a minute." : ""}`,
+      tooltip: `1 point per level from Lv 2, +1 per review won.${spends ? " Auto-learn spends them within a minute." : on ? " Auto-learn is off in Settings, so they wait." : ""}`,
     },
-    autoLearn: { on, action: autoAct, hint: on ? "Spends points on the lowest-ranked skill" : "Off: you spend points yourself" },
+    autoLearn: { on, action: autoAct, hint: spends ? "Spends points on the lowest-ranked skill" : on ? "Waits: auto-learn is off in Settings" : "Off: you spend points yourself" },
     respec: respecAction(world, hero, live, clock, roster),
     rules: `Free once a day while resting; otherwise ${T.skills.respecSnippetsPerLevel} × level Snippets.`,
     ladder: ladderOf(hero),
@@ -1391,6 +1395,13 @@ function whyVM(world, hero, live) {
   if (why.unblocked > 0) parts.push({ key: "unblocked", label: "Unblocked", value: pctI(why.unblocked), good: true, tooltip: `${why.unblockedLeft} Questing ticks left` });
   if (why.onboarding > 0) parts.push({ key: "onboarding", label: "Onboarding", value: pctI(why.onboarding), good: true, tooltip: "A new hire 10+ levels behind the herd's top hero" });
   if (why.gear > 0) parts.push({ key: "gear", label: "Gear", value: pctI(why.gear), good: true, tooltip: "XP affixes and Keepsakes" });
+  // the level gap (D§6.2) binds mainly under a manual map pin: autopilot keeps heroes near their level
+  const gp = gapPart(why, hero.L);
+  if (gp) {
+    const G = T.gap;
+    parts.push({ key: "gap", label: "Level gap", value: `×${gp.mult}`, good: false,
+      tooltip: `${gapText(gp)} (kill XP −${Math.round(G.lossPerLevel * 100)}% a level past ${G.freeAbove}, down to ×${G.floor})${hero.pinMap === gp.mapId ? `; pinned to ${gp.mapId}: Auto on the Career tab's Map card unpins` : ""}` });
+  }
   if (why.crowding < 1) parts.push({ key: "crowd", label: "Crowding", value: `×${Math.round(why.crowding * 100) / 100}`, good: false, tooltip: `More than ${T.crowdingAt} heroes questing at once` });
   parts.push({ key: "shift", label: "Shift", value: `×${why.shiftKill}`, good: why.shiftKill < 1 ? false : null, tooltip: `${fmtMin(why.shiftMin)} worked today` });
   notes.push(why.shiftBand === 0
@@ -1703,6 +1714,12 @@ function bossLine(text, value) {
   return text;
 }
 
+// chests that opened Unreviewed (agents.openChests): value the count, text the task when one
+function unrevLine(text, value) {
+  const n = Math.max(1, num(value, 1));
+  return n > 1 ? `${n} chests opened Unreviewed (half value, no Seals)` : `Chest opened Unreviewed${text ? `: “${text}”` : ""} (half value, no Seals)`;
+}
+
 function journalLine(e, clock) {
   const [at, kind, , text0, value] = e;
   const text = str(text0);
@@ -1730,6 +1747,7 @@ function journalLine(e, clock) {
     case "hire": icon = "ui/herd.svg"; color = COL.working; line = "Joined the herd as a Lv 1 Intern"; break;
     case "leave": icon = "ui/herd.svg"; color = COL.idle; line = `Left the roster at Lv ${num(value)}`; break;
     case "class": icon = "ui/career.svg"; color = COL.xp; line = `Provisional class: ${text}`; break;
+    case "unrev": icon = "ui/chest.svg"; color = COL.idle; line = unrevLine(text, value); break;
     case "map": icon = "ui/star.svg"; color = COL.working; break;
     case "deprecate": icon = "ui/snippet.svg"; color = COL.idle; break;
     default: break;
@@ -2361,6 +2379,13 @@ function digestVM(world, clock) {
     keyOf("s", x), `${x.name ? firstName({ name: x.name }) : "A hero"} shipped “${str(x.text) || "Commit"}”`,
     num(x.seals) > 0 ? `${(Math.round(num(x.seals) * 10) / 10).toFixed(1)} Seals` : null, COL.done,
   ));
+  // chests that opened Unreviewed (off duty 24 h, or the hero left): where the chest went
+  const unreviewed = (d.unreviewed || []).slice().reverse().map((x) => {
+    const who = x.name ? firstName({ name: x.name }) : "A hero";
+    const n = Math.max(1, num(x.n, 1));
+    const text = n > 1 ? `${who}: ${n} chests opened Unreviewed` : `${who}'s chest opened Unreviewed`;
+    return line(keyOf("u", x), text, `${n === 1 && str(x.text) ? `“${str(x.text)}” · ` : ""}half value, no Seals`, COL.idle);
+  });
   const badges = d.badges.slice().reverse().map((x) => line(keyOf("bd", x), `Badge: ${str(x.text)}`, whenOrEarlier(x.at, clock), COL.xp));
   const chests = [];
   for (const h of state.heroes) {
@@ -2381,6 +2406,7 @@ function digestVM(world, clock) {
   add("drops", "Release or better", "ui/slot-weapon.svg", drops);
   add("bosses", "Bosses", "ui/boss.svg", bosses);
   add("shipped", "Shipped", "ui/chest.svg", shipped);
+  add("unreviewed", "Opened Unreviewed", "ui/chest.svg", unreviewed);
   add("badges", "Badges", "ui/star.svg", badges);
   add("chests", "Chests waiting", "ui/chest.svg", chests);
   const dot = !!world.rt.digestDot;
@@ -2397,7 +2423,7 @@ function digestVM(world, clock) {
 function digestBadge(world) {
   const d = Herd.digest(world.state);
   if (d.empty) return world.rt.digestDot ? "•" : null;
-  const n = d.levels.length + d.drops.length + d.bosses.length + d.badges.length + d.chestsWaiting;
+  const n = d.levels.length + d.drops.length + d.bosses.length + d.badges.length + (d.unreviewed || []).length + d.chestsWaiting;
   if (n <= 0) return "•";
   return n > 9 ? "9+" : String(n);
 }
@@ -2405,6 +2431,9 @@ function digestBadge(world) {
 // ---------------------------------------------------------------------------------------------
 // Herd panel: settings
 // ---------------------------------------------------------------------------------------------
+
+/** A win-estimate threshold as the boss cards show estimates: 0.9 → "90%". */
+const atPct = (x) => `${Math.round(num(x, 1) * 100)}%`;
 
 function settingsVM(world) {
   const herd = world.state.herd;
@@ -2447,10 +2476,12 @@ function settingsVM(world) {
         sys("polish", "Auto-polish", "One item a minute, keeping a 20% gold reserve"),
         sys("buildings", "Buildings", "Buys the cheapest upgrade at 3× its cost"),
         sys("maps", "Map choice", "Moves heroes to the deepest map they outfight"),
-        sys("boss", "Auto-boss", "Challenges when the win estimate is 100% or more"),
-        sys("farm", "Farm bosses", "Fights beaten bosses again at 150% or more"),
+        sys("boss", "Auto-boss", `Challenges when the win estimate is ${atPct(T.boss.autoAt)} or more`),
+        sys("farm", "Farm bosses", `Fights beaten bosses again at ${atPct(T.boss.farmAt)} or more`),
         sys("calls", "Answer calls", "Heroes who beat a boss help others fight it"),
-        sys("career", "Career", "Takes the recommended class at Lv 10"),
+        // auto.career gates only the promotion reviews (autopilot.autoChallenge); the Lv 10 class
+        // and its provisional switches follow the hero's work whatever this says (D§4.2)
+        sys("career", "Promotion reviews", `Starts a hero's Senior and Staff Reviews at ${atPct(T.boss.autoAt)} or more`),
       ] },
     ],
     herd: { name: str(herd.name).trim() || "The Herd", hint: "Shown here and in the sidebar. Renaming is free." },

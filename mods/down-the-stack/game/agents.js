@@ -18,7 +18,7 @@
 import { TUNING as T, CLASSES, CLASS_IDX, MAP_BY_ID, SLOTS, AFFIX_IDX, BACKLOG, KEEPSAKE_IDX } from "./data.js";
 import {
   chestTierOf, shiftSealMult, shiftKillMult, shiftBand, chestGold, chestXP, mobXP, gap as gapMult,
-  crowding as crowdingMult, partyXp, iRef, itemTier, polishMax,
+  crowding as crowdingMult, partyXp, iRef, itemTier, polishMax, autoOn, cutText,
 } from "./formulas.js";
 import { newHero, stats, grantXP, recordTask, autoRanks, careerOf } from "./heroes.js";
 import { rollChest, baseIdFor, stashAdd, repairItem } from "./items.js";
@@ -26,7 +26,7 @@ import { seedOf } from "./rng.js";
 import {
   addGold, addSeals, herdXpBonus, freshEyesCapMin, onboardingBonus, awardBadge, logDrop, journal as herdJournal,
 } from "./herd.js";
-import { chooseMap, mapLevels, offerDrop } from "./autopilot.js";
+import { chooseMap, mapLevels, offerDrop, bossApi } from "./autopilot.js";
 import { heroCtx, addBuff, unblockedTicks } from "./combat.js";
 
 const S = T.seals;
@@ -46,9 +46,12 @@ export function normStatus(s) {
   return STATUSES[s] ? s : "idle";
 }
 
-/** norm() of D§3.1: lowercase, trimmed, at most 32 characters. */
+/**
+ * norm() of D§3.1: lowercase, trimmed, at most 32 UTF-16 units (cutText: never half an emoji, which
+ * herdr would reject wherever the seat is shown).
+ */
 export function normSeat(s) {
-  return String(s == null ? "" : s).trim().toLowerCase().slice(0, NORM_MAX);
+  return cutText(String(s == null ? "" : s).trim().toLowerCase(), NORM_MAX);
 }
 
 /** Seat key (D§3.1): norm(space.name || space.id || "nospace") + "/" + (program.key || app || "agent"). */
@@ -111,6 +114,8 @@ export function tellingTitle(raw, who) {
 }
 const TELLING = new Map();
 const TELLING_MAX = 512;
+/** For tests: the size of tellingTitle's answer cache (bounded by TELLING_MAX). */
+export const _internal = { tellingCacheSize: () => TELLING.size, TELLING_MAX };
 
 function judgeTitle(s, w, prog) {
   const live = s.replace(TITLE_MARK, "").trim();
@@ -124,11 +129,12 @@ function judgeTitle(s, w, prog) {
 
 /**
  * The Quest name a title gives a task (D§2.3): the telling title (status glyph stripped), cut to
- * 40 characters; "" when the title names the program, shell, a path or nothing at all.
+ * 40 UTF-16 units without splitting an emoji (cutText); "" when the title names the program,
+ * shell, a path or nothing at all.
  */
-function questName(raw, who) {
+export function questName(raw, who) {
   const s = tellingTitle(raw, who);
-  return s.length > TITLE_MAX ? s.slice(0, TITLE_MAX).trimEnd() : s;
+  return s.length > TITLE_MAX ? cutText(s, TITLE_MAX).trimEnd() : s;
 }
 
 function ensureRt(rt) {
@@ -352,12 +358,15 @@ export function makeContractor(world, a, seat, nowMs) {
 /**
  * Removes a roster hero to make room (D§3.4): its gear goes to the stash (auto-deprecate applies),
  * pending chests open Unreviewed for the herd (gold and items; no Seals, no XP: the hero leaves).
+ * It leaves a paused boss fight too (boss.leaveSavedFight).
  */
 function evictHero(world, hero, ev) {
   const state = world.state;
   openChests(world, hero, { reason: "unreviewed", all: true, noXp: true }, ev);
   const idx = state.heroes.indexOf(hero);
   if (idx >= 0) state.heroes.splice(idx, 1);
+  const api = bossApi(world);
+  if (typeof api.leaveSavedFight === "function") api.leaveSavedFight(world, hero.id, ev);
   for (let s = 0; s < hero.eq.length; s++) {
     const it = hero.eq[s];
     hero.eq[s] = null;
@@ -414,7 +423,11 @@ function bindAgent(world, a, snap, ev) {
   let hero = null;
   let fast = false;
   for (const h of state.heroes) {
-    if (h.addr === a.address && !isBound(world, h.id) && (h.seat === seat || (h.sid && h.sid === a.space))) {
+    // the hero's own terminal: its seat, or its space (renamed meanwhile) with the same program. A
+    // terminal outlives the agent in it, so another program started in it is a new terminal of its
+    // own seat (D§3.1), as in pickFreeHero: it never takes over this hero, its seat or its chests
+    if (h.addr === a.address && !isBound(world, h.id) &&
+        (h.seat === seat || (h.sid && h.sid === a.space && seatProgram(h.seat) === seatProgram(seat)))) {
       hero = h;
       fast = true;
       break;
@@ -951,7 +964,9 @@ export function closeTask(world, hero, live, reason, ev) {
   live.task = null;
   if (!task) return null;
   const workMin = task.workSec / 60;
-  const rec = recordTask(hero, { minutes: workMin, blocks: task.blocks, spawned: task.spawned });
+  // a provisional switch refunds every skill point; they are re-spent at once only while the
+  // herd's auto-learn is on (with it off, they wait for the person, D§11.15 "Off stops every system")
+  const rec = recordTask(hero, { minutes: workMin, blocks: task.blocks, spawned: task.spawned }, { learn: autoOn(world.state, "learn") });
   if (rec.switched) {
     // the free switch (D§4.2) can leave a weapon of the old class's type in hand: the targeted
     // autopilot sweep looks for a class weapon this very tick (as the manual setClass does)
@@ -1087,6 +1102,12 @@ export function openChests(world, hero, opts = {}, ev) {
       const title = tellingTitle(p.title, live) || "Commit";
       emitJournal(world, ev, "ship", hero.id, title, Math.round(seals * 10) / 10);
     }
+  }
+  if (unreviewed && out.opened) {
+    // one journal line for the batch, so the person learns where the chest went (the sheet's
+    // journal and the Herd digest): its task when one chest opened, the count in the value
+    const title = out.opened === 1 ? tellingTitle(open[0].title, live) || "" : "";
+    emitJournal(world, ev, "unrev", hero.id, title, out.opened);
   }
   if (ev) {
     if (out.gold > 0) ev.fx?.("coin", { heroId: hero.id, value: Math.round(out.gold) });
@@ -1294,7 +1315,10 @@ export function whyOf(world, hero, live) {
   const crowd = crowdingMult(questingNow);
   const lv = mapLevels(world, hero, live);
   const xpPct = gear + party + banner + unblocked + onboarding + herd;
-  const perKill = mobXP(lv.mid) * gapMult(hero.L - lv.mid) * (1 + xpPct) * fe * shiftKillMult(shiftMin) * crowd;
+  // the level gap as combat.kill applies it: none below ×1 in the Backlog (D§9.8)
+  let gp = gapMult(hero.L - lv.mid);
+  if (lv.id === BACKLOG.id && gp < 1) gp = 1;
+  const perKill = mobXP(lv.mid) * gp * (1 + xpPct) * fe * shiftKillMult(shiftMin) * crowd;
   const bands = T.shift.bandsMin;
   return {
     state: state0, xpPerMin: Math.round(T.refKillsPerMin * perKill * working), working, freshEyes: fe,
@@ -1302,7 +1326,7 @@ export function whyOf(world, hero, live) {
     unblockedLeft: unblockedLeft(hero, tick), onboarding, gear, crowding: crowd, xpPct,
     shiftMin, shiftBand: band, shiftKill: shiftKillMult(shiftMin), shiftSeal: shiftSealMult(shiftMin),
     nextBandMin: band < bands.length ? bands[band] : null,
-    flapPaused: flapPaused(live, tick), pending: hero.pend ? hero.pend.length : 0, mapId: lv.id,
+    flapPaused: flapPaused(live, tick), pending: hero.pend ? hero.pend.length : 0, mapId: lv.id, gap: gp,
     career: careerOf(hero).title,
   };
 }

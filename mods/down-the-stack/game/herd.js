@@ -607,14 +607,14 @@ export function digestMark(state, nowMs) {
 
 /**
  * The Digest tab's data: what happened since herd.digestAt (the last time the person marked it
- * read): levels gained, Release-or-better drops, bosses beaten, chests shipped, badges, plus chests
- * waiting now. Counts come from herd.digestSnap (digestMark) diffed against the herd as it is now,
+ * read): levels gained, Release-or-better drops, bosses beaten, chests shipped, chests that opened
+ * Unreviewed (journal kind "unrev": text the task, value the count), badges, plus chests waiting now. Counts come from herd.digestSnap (digestMark) diffed against the herd as it is now,
  * so nothing goes missing when more happened than the 60-line journal holds; the journal supplies
  * the details it still has (item names, quest titles, times). Without a snapshot (a fresh herd, or a
  * save from before snapshots) the baseline is the start of the herd when digestAt is 0, else the
  * journal alone. Extra fields: levels[].from, dropsMore / shippedMore / bossesMore (counts beyond the
  * listed lines), sealsShipped.
- * @returns {{since:number, levels:Array, drops:Array, bosses:Array, shipped:Array, badges:Array,
+ * @returns {{since:number, levels:Array, drops:Array, bosses:Array, shipped:Array, unreviewed:Array, badges:Array,
  *            chestsWaiting:number, sealsWaiting:number, dropsMore:number, shippedMore:number,
  *            bossesMore:number, sealsShipped:number, empty:boolean}}
  */
@@ -628,7 +628,7 @@ export function digest(state, sinceMs) {
   let snap = herd.digestSnap && Math.abs((herd.digestSnap.at || 0) - since) < 1000 ? herd.digestSnap : null;
   if (!snap && !(since > 0)) snap = { at: 0, lv: {}, bk: [], seals: 0, drops: 0, badges: [] };
   const out = {
-    since, levels: [], drops: [], bosses: [], shipped: [], badges: [], chestsWaiting: 0, sealsWaiting: 0,
+    since, levels: [], drops: [], bosses: [], shipped: [], unreviewed: [], badges: [], chestsWaiting: 0, sealsWaiting: 0,
     dropsMore: 0, shippedMore: 0, bossesMore: 0, sealsShipped: 0, empty: true,
   };
   const byHero = new Map((state.heroes || []).map((h) => [h.id, h]));
@@ -649,6 +649,7 @@ export function digest(state, sinceMs) {
       if (idx >= 0) (bossLines.get(idx) || bossLines.set(idx, []).get(idx)).push({ text, value, at });
       else postmortems.push({ text, value, at });
     } else if (kind === "ship") out.shipped.push({ heroId, name, text, seals: value, at });
+    else if (kind === "unrev") out.unreviewed.push({ heroId, name, text, n: value, at });
     else if (kind === "badge") out.badges.push({ text, at });
   }
   if (snap) {
@@ -716,7 +717,7 @@ export function digest(state, sinceMs) {
     }
   }
   out.empty = !out.levels.length && !out.drops.length && !out.bosses.length && !out.shipped.length && !out.badges.length &&
-    !out.chestsWaiting && !out.dropsMore && !out.shippedMore;
+    !out.unreviewed.length && !out.chestsWaiting && !out.dropsMore && !out.shippedMore;
   return out;
 }
 
@@ -729,8 +730,13 @@ export function notableDrop(item) {
   return !!item && item.rar >= 3;
 }
 
-/** Journal + note for a notable drop (Release, LTS, Keepsake). */
-export function logDrop(world, hero, item, ev) {
+/**
+ * Journal + note for a notable drop (Release, LTS, Keepsake): the digest's drop count, and for LTS
+ * or better a loot pillar and the opt-in "LTS or Keepsake drop" milestone. opts.roomId places the
+ * pillar ("arena": before the boss, for a boss's Keepsake); opts.milestone false raises none (a
+ * herd-first kill's Keepsake when the boss-kill notification already tells of it, boss.js).
+ */
+export function logDrop(world, hero, item, ev, opts = {}) {
   if (!notableDrop(item)) return;
   const st = world.state || world;
   if (st.herd) st.herd.drops = (st.herd.drops || 0) + 1; // counted for the digest (digestMark)
@@ -740,10 +746,14 @@ export function logDrop(world, hero, item, ev) {
     ev.journal?.("drop", hero ? hero.id : 0, name, item.rar);
     ev.note?.(`${r.name}: ${name}`, r.color);
     if (item.rar >= 4) {
-      ev.fx?.("pillar", { heroId: hero ? hero.id : undefined, text: r.name, rar: item.rar, value: item.uid });
+      const pillar = { heroId: hero ? hero.id : undefined, text: r.name, rar: item.rar, value: item.uid };
+      if (opts.roomId != null) pillar.roomId = opts.roomId;
+      ev.fx?.("pillar", pillar);
       ev.major?.();
       // opt-in notification (D§11.15 "LTS or Keepsake drop"); world.js decides whether it posts
-      ev.milestone?.("lts", { title: `${r.name}: ${name}`, body: hero && hero.name ? `Found by ${hero.name}.` : "A new item for the herd's stash." });
+      if (opts.milestone !== false) {
+        ev.milestone?.("lts", { title: `${r.name}: ${name}`, body: hero && hero.name ? `Found by ${hero.name}.` : "A new item for the herd's stash." });
+      }
     }
   } else {
     journal(world.state || world, "drop", hero ? hero.id : 0, name, item.rar);

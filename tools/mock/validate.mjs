@@ -19,13 +19,41 @@ function describe(v) {
   return typeof v;
 }
 
+const SURROGATE = /[\uD800-\uDFFF]/;
+/** Index of the first unpaired UTF-16 surrogate in `s` (half of an emoji cut in two), or -1. */
+export function loneSurrogate(s) {
+  if (typeof s !== "string" || !SURROGATE.test(s)) return -1;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const d = s.charCodeAt(i + 1);
+      if (d >= 0xdc00 && d <= 0xdfff) { i++; continue; }
+      return i;
+    }
+    if (c >= 0xdc00 && c <= 0xdfff) return i;
+  }
+  return -1;
+}
+
+/**
+ * Every string that crosses into herdr is converted with rquickjs String::to_string, which runs
+ * str::from_utf8 over QuickJS's CESU-8 bytes: a lone surrogate (a string cut in the middle of an
+ * emoji's pair) is not UTF-8, and the call throws.
+ */
+export function checkUtf8(s, where) {
+  const i = loneSurrogate(s);
+  if (i >= 0) throw mockError("bad-string", `${where}: the string has an unpaired UTF-16 surrogate at index ${i} (an emoji cut in half?), which is not valid UTF-8; herdr's bridge refuses it (rquickjs String::to_string)`);
+}
+
 /**
  * The value bridge: only null/undefined/boolean/number/string (and functions, for handlers)
- * cross into herdr. Objects (a Background, an array, a plain object) throw.
+ * cross into herdr. Objects (a Background, an array, a plain object) throw, and so does a string
+ * that is not valid UTF-8 (checkUtf8).
  */
 export function checkBridgeable(v, method, { allowFunction = true } = {}) {
   const t = typeof v;
-  if (v === null || v === undefined || t === "boolean" || t === "number" || t === "string") return;
+  if (t === "string") { checkUtf8(v, method); return; }
+  if (v === null || v === undefined || t === "boolean" || t === "number") return;
   if (t === "function") {
     if (allowFunction) return;
     throw mockError("bad-argument", `\`${method}\` does not take a function`);

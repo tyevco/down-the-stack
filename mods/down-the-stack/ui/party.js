@@ -44,10 +44,15 @@
  * Rows never move on status, focus or pin changes (D§11.11): a pinned agent keeps its place here
  * (its pin shows as the portrait dot and the stage banner).
  *
+ * PartyVM.groups[].chests (off-duty group): its heroes' pending chests (they open Unreviewed after
+ * 24 h, D§2.4); the group starts folded, so its folded header shows them (gold chest + "×n").
+ * Absent (an older VM): the rows with chestPending are counted.
+ *
  * @typedef {Object} PartyFooterAdditions
  * gold, snippets and release are display strings ("48.2k", "133", "v2.3"); numbers are shown
  * with String(). sprint: null | { label, have, need } (have/need numbers, shown "7/10").
- * digestDot: boolean (something new in the Herd panel's digest).
+ * digestDot: boolean (something new in the Herd panel's digest, or an off-duty chest within 4 h
+ * of opening Unreviewed: the Digest lists it with an Open button).
  * PartyVM.save: null | { title, short, tooltip } (game/view saveCue: host.saveStatus()): save
  * trouble is never silent (D§13.1), so the footer shows it above the gold row (the rail: a dot
  * above the Herd button), and a click opens the Herd panel, whose band says the rest (D§13.4).
@@ -73,13 +78,24 @@ export const RAIL_PX = 160;
 const hex6 = (s) => (typeof s !== "string" ? null : /^#[0-9a-fA-F]{6}/.test(s) ? s.slice(1, 7)
   : /^#[0-9a-fA-F]{3}$/.test(s) ? s[1] + s[1] + s[2] + s[2] + s[3] + s[3] : null);
 
-/** True when the theme's background is light (paper and friends). */
+/**
+ * True when the surface a renderer draws on is light (paper and friends): `t.light` when the
+ * renderer set it for its surface (onChrome, the dialogs' popover), else the theme's background.
+ * A theme can differ per surface: herdr's win98 overrides the background to black while its
+ * chrome and popover stay light (herdr classes it light by its palette, settings.rs).
+ */
 export function isLight(t) {
+  if (t && typeof t.light === "boolean") return t.light;
   const h = hex6(t?.bg);
   if (!h) return false;
   const n = parseInt(h, 16);
   const ch = (s) => ((n >> s) & 255) / 255;
   return 0.2126 * ch(16) + 0.7152 * ch(8) + 0.0722 * ch(0) > 0.5;
+}
+
+/** The theme tokens for a renderer that draws on herdr's chrome (party, HUD): light by the chrome. */
+export function onChrome(t) {
+  return { ...t, light: isLight({ bg: hex6(t?.chrome) ? t.chrome : t?.bg }) };
 }
 
 /** Mix two #rrggbb colours (k = share of b). */
@@ -95,9 +111,42 @@ export function mix(a, b, k) {
   return out;
 }
 
-/** A game colour as text on herdr's chrome: as is on dark themes, deepened on light ones. */
+/**
+ * A game colour as text on herdr's chrome: as is on dark themes, deepened on light ones. The
+ * blocked amber takes the light blocked step (the rust stripe) instead, so the "!" chip, "N need
+ * you" and the stripe beside them are one family (the amber deepened with black was a brown).
+ */
 export function ink(color, t) {
-  return isLight(t) ? mix(color, "#000000", 0.45) : color;
+  if (!isLight(t)) return color;
+  const out = hex6(color)?.toUpperCase() === "F2A93B" ? STRIPE.light.blocked : mix(color, "#000000", 0.45);
+  // a renderer that knows its text surfaces (the dialogs: popover, card, well) gets text that
+  // clears 4.5:1 on all of them; win98's mid-grey popover needs a step more than paper's white
+  return Array.isArray(t?.inkOn) ? legible(out, t.inkOn, true) : out;
+}
+
+const LEGIBLE = new Map(); // (colour, surfaces, light, min) -> the colour, at most 128 entries
+
+/**
+ * `fg`, deepened (light) or lightened (dark) in 5% steps until it clears `min`:1 on every one of
+ * `bgs` ("#rrggbb", or "#rrggbbaa" laid over the first opaque one). Cached by its inputs.
+ */
+export function legible(fg, bgs, light, min = 4.5) {
+  const f = hex6(fg);
+  if (!f) return fg;
+  const key = `${f}|${bgs.join(",")}|${light ? 1 : 0}|${min}`;
+  const hit = LEGIBLE.get(key);
+  if (hit) return hit;
+  const base = bgs.map((b) => hex6(b)).find(Boolean);
+  const under = bgs.map((b) => (hex6(b) ? over(b, `#${base}`) : null)).filter(Boolean);
+  const start = `#${f}`;
+  let out = start;
+  for (let k = 0.05; k <= 1 && under.length && Math.min(...under.map((b) => contrast(out, b))) < min; k += 0.05) {
+    out = mix(start, light ? "#000000" : "#ffffff", k);
+  }
+  if (out === start) out = fg;
+  if (LEGIBLE.size >= 128) LEGIBLE.clear();
+  LEGIBLE.set(key, out);
+  return out;
 }
 
 /** A game colour as a shape (bar fill, stripe): slightly deepened on light themes. */
@@ -367,7 +416,7 @@ const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
  * @param {{width:number, height:number, zoom:number, theme:object, host:object, act:Function, ui?:object}} env
  */
 export function renderParty(vm, env) {
-  const t = env.theme ?? T();
+  const t = onChrome(env.theme ?? T());
   const ui = env.ui ?? { toggled: new Set(), hovered: null, size: null };
   const width = env.width ?? 268;
   const compact = !!vm?.compact || width < RAIL_PX;
@@ -464,9 +513,13 @@ function groupHeader(g, folded, ui, t) {
   // working: a dot on a folded group
   const bang = !g.offDuty && top === "blocked";
   const dot = folded && !g.offDuty && top && top !== "idle" && !bang;
-  return h_flex().id(`pg-${g.key}`).px(8).pt(8).h(30).flex_none().gap(6).items_center()
+  // a folded off-duty group still shows its pending chests (they open Unreviewed after 24 h)
+  const chests = folded && g.offDuty ? Math.max(0, Number(g.chests) || g.rows.filter((r) => r.chestPending).length) : 0;
+  // a folded off-duty group's chest cue is an icon: herdr fixes an svg's colour when it builds the
+  // element, so that header hovers with its background (a text colour would leave the icon behind)
+  return h_flex().id(`pg-${g.key}`).px(8).pt(8).h(30).flex_none().gap(6).items_center().rounded(6)
     .text_size(11).font_medium().text_color(t.dim).cursor_pointer()
-    .hover((s) => s.text_color(t.fg))
+    .hover((s) => (chests > 0 ? s.bg(t.hover) : s.text_color(t.fg)))
     .on_click((_e, cx) => {
       if (ui.toggled.has(g.key)) ui.toggled.delete(g.key);
       else ui.toggled.add(g.key);
@@ -477,6 +530,9 @@ function groupHeader(g, folded, ui, t) {
     .child(div().flex_1())
     .when(bang, (el) => el.child(bangBadge(t)))
     .when(dot, (el) => el.child(div().size(7).flex_none().rounded_full().bg(stripeColor(statusColor(top), top, t))))
+    .when(chests > 0, (el) => el.child(chipEl({ kind: "chest", text: chests > 1 ? `×${chests}` : "", color: C.done,
+      tooltip: `${chests} ${chests === 1 ? "chest waits" : "chests wait"} off duty: unfold to open ${chests === 1 ? "it" : "them"} (after 24 h unopened ${chests === 1 ? "it opens" : "they open"} Unreviewed, half value)` },
+    t, `pg-${g.key}-chests`)))
     .child(div().flex_none().w(10).text_size(10).text_center().child(folded ? "▸" : "▾"));
 }
 
@@ -694,8 +750,12 @@ function railRow(r, g, vm, env, t) {
   // herdr's rail marks a blocked agent with a "!" badge; here it sits on the portrait's corner
   // (where the pin dot goes: the badge is the more urgent of the two)
   if (blocked) {
-    pic.child(div().absolute().left(21).top(-3).size(13).rounded(4).bg(tone(C.blocked, t)).border(1.5).border_color(t.chrome)
-      .flex().items_center().justify_center().text_size(9).font_bold().line_height(1).text_color("#1c1d21").child("!"));
+    // light chrome: the rust blocked step with a white "!" (the deepened amber was 2.6:1 against
+    // the chrome); dark chrome: the amber with a dark "!"
+    const light = isLight(t);
+    pic.child(div().id(`pb-${r.key}`).absolute().left(21).top(-3).size(13).rounded(4).bg(light ? STRIPE.light.blocked : tone(C.blocked, t))
+      .border(1.5).border_color(t.chrome)
+      .flex().items_center().justify_center().text_size(9).font_bold().line_height(1).text_color(light ? "#ffffff" : "#1c1d21").child("!"));
   }
   return h_flex().id(`pr-${r.key}`).relative().h(40).flex_none().mx(2).rounded(8).justify_center()
     .when(r.focused, (el) => el.bg(t.selected))

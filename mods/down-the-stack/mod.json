@@ -12,19 +12,12 @@
   },
   "palette": [
     {
-      "title": "Down the Stack: character sheet",
-      "command": "down-the-stack.sheet",
-      "words": "hero termling gear skills stats career journal rpg game"
-    },
-    {
       "title": "Down the Stack: Herd panel",
-      "command": "down-the-stack.herd",
-      "words": "upgrades buildings stash bug tracker bosses roster hall of fame digest settings rpg game"
-    },
-    {
-      "title": "Down the Stack: calm mode",
-      "command": "down-the-stack.calm",
-      "words": "quiet reduce motion damage numbers banners dim rpg game"
+      "command": "mod.open",
+      "args": {
+        "name": "down-the-stack"
+      },
+      "words": "upgrades buildings stash bug tracker bosses roster character sheet hero hall of fame digest settings calm mode rpg game"
     }
   ]
 }

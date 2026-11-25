@@ -269,7 +269,7 @@ function build(spec, { width, height, tick = 0 } = {}) {
         (quota ? `\nQuota ${quota.have}/${quota.need} kills to open the next map` : "") + (sprint ? `\nSprint ${sprint.have}/${sprint.need} toward the boss door` : ""),
       // D§11.16 header click: pin the room's heroes here (unpin when all already are); the door
       // icon challenges the zone's boss, only while no boss fight is on (the engine refuses one)
-      pin: r._arena ? null : { heroIds: r._heroes.map((h) => h.id), mapId: r._heroes.every((h) => h.pinMap) ? null : r.mapId },
+      pin: r._arena ? null : { heroIds: r._heroes.map((h) => h.id), mapId: r._heroes.every((h) => h.pinMap) ? null : r.mapId, pinned: r._heroes.every((h) => h.pinMap) },
       challenge: !r._arena && frontier && fr.door && !spec.boss ? { kind: "boss", idx: zone.n ?? 0, tooltip: `${zone.name} boss: the boss door is open\nClick to challenge` } : null,
     };
     if (stats) vm.stats = stats; // optional: absent (not undefined) when there is nothing to count

@@ -543,8 +543,10 @@ export function autoChallenge(world, ev, auto = autoCfg(world.state)) {
   const started = [];
   // One boss fight at a time. A paused fight (herd.fight) waits for someone to work in its zone
   // again (world.tick resumes it, D§9.5); starting another boss would make boss.js close it as a
-  // Postmortem, so only the frontier boss may displace a paused repeat (farm) fight, and a paused
-  // frontier or Backlog fight blocks everything else.
+  // Postmortem (Wounds kept), so only progress may displace a paused repeat (farm) fight: the
+  // frontier boss, or a Backlog boss floor (in the end-game nobody may ever stand in the farm
+  // fight's zone again, and the Backlog would wait for it forever). A paused frontier or Backlog
+  // fight blocks everything else.
   const paused = herd.fight;
   const pausedFarm = !!paused && paused.k === "b" && herd.boss[paused.i] > 0;
   const bossFight = rt.fights.some((f) => f.kind !== "review") || (!!paused && !pausedFarm);
@@ -564,7 +566,7 @@ export function autoChallenge(world, ev, auto = autoCfg(world.state)) {
     // the Backlog (D§9.8): every 10th floor waits for its boss once its 50 kills are in; nothing
     // else starts that fight (boss.js picks the heroes standing in the Backlog)
     const bl = herd.backlog;
-    if (!started.length && !paused && auto.boss && bl && bl.floor > 0 && bl.floor % BACKLOG.bossEvery === 0 &&
+    if (!started.length && (!paused || pausedFarm) && auto.boss && bl && bl.floor > 0 && bl.floor % BACKLOG.bossEvery === 0 &&
         (bl.kills || 0) >= BACKLOG.killsPerFloor && backlogOpen(state)) {
       const f = tryFight(world, ev, "backlog", bl.floor, [], T.boss.autoAt);
       if (f) started.push(f);

@@ -417,6 +417,42 @@ test("memo: the same world version gives the same VM object; a tick or a command
 // ---------------------------------------------------------------------------------------------
 // behaviour
 
+test("party: an off-duty hero's pending chest shows on the folded group and its row; near opening Unreviewed it lights the Herd dot", async () => {
+  const world = D.demoWorld("mid", NOW).world;
+  closeTerminals(world, ["t2", "t6"]);
+  const hero = world.state.heroes.find((h) => h.id === 6);
+  for (const h of world.state.heroes) if (h.id === 2) h.pend = []; // the other one off duty: none
+  const DAY = 86400000;
+  const now = world.state.herd.lastMs;
+  // a chest shipped an hour ago: shown, no dot for it yet
+  hero.pend = [{ min: 10, fmin: 0, title: "Bump deps", at: now - 3600e3, sealFactor: 1 }];
+  world.rt.version++;
+  const { digestDot } = await import("../mods/down-the-stack/game/herd.js");
+  const dotBefore = digestDot(world);
+  let vm = V.partyView(world, { width: 268, nowMs: now });
+  let off = vm.groups.at(-1);
+  assert.equal(off.offDuty, true);
+  assert.equal(off.chests, 1, "the group counts its pending chests");
+  const row = off.rows.find((r) => r.heroId === 6);
+  assert.equal(row.chestPending, true);
+  assert.match(row.tooltip, /opens Unreviewed in 23h/);
+  assert.equal(vm.footer.digestDot, dotBefore, "not yet");
+  // 21 h later (3 h before it opens Unreviewed, half value, no Seals): the Herd button's dot
+  hero.pend.push({ min: 5, fmin: 0, title: "Fix it", at: now - 1800e3, sealFactor: 1 });
+  hero.pend[0].at = now - 21 * 3600e3;
+  world.rt.version++;
+  vm = V.partyView(world, { width: 268, nowMs: now });
+  off = vm.groups.at(-1);
+  assert.equal(off.chests, 2);
+  assert.equal(vm.footer.digestDot, true, "an off-duty chest about to open Unreviewed lights the dot");
+  assert.equal(V.hudView(world, { nowMs: now }).digestDot, true, "the HUD's too");
+  assert.match(off.rows.find((r) => r.heroId === 6).tooltip, /opens Unreviewed in 3h/);
+  // no chests anywhere off duty: 0
+  hero.pend = [];
+  world.rt.version++;
+  assert.equal(V.partyView(world, { width: 268, nowMs: now + DAY }).groups.at(-1).chests, 0);
+});
+
 test("party: groups by space in herdr's order, off duty last; agentOrder = live rows top to bottom; a pin never moves a row", () => {
   const world = D.demoWorld("mid", NOW).world;
   const vm = V.partyView(world, { width: 268, nowMs: NOW });
@@ -688,6 +724,12 @@ test("a long terminal title names the task as the Quest name does: cut to 40 cha
   const live = { title: "zsh", task: null, address: "t9", program: { key: "codex", name: "Codex" }, paneName: "x".repeat(39) + " and more", tabName: "1" };
   assert.equal(Chrome.taskLabel(live), "x".repeat(39));
   assert.equal(Chrome.taskLabel({ ...live, paneName: "Short pane" }), "Short pane");
+  // an emoji across the 40-unit cut goes whole: half a surrogate pair would make herdr's bridge
+  // throw on the tooltip, and the party, stage, nameplate and sheet would render as error chips
+  const rocket = "y".repeat(39) + "\u{1F680} then tag the release";
+  assert.equal(Chrome.taskLabel({ ...live, paneName: rocket }), "y".repeat(39));
+  assert.equal(Chrome.taskLabel({ ...live, title: `✳ ${rocket}` }), "y".repeat(39));
+  assert.equal(Chrome.taskLabel({ ...live, paneName: "z".repeat(38) + "\u{1F680}!" }), "z".repeat(38) + "\u{1F680}");
 });
 
 test("program keys named like Object.prototype members get a title-bar tint (the party and the Herd roster keep rendering)", async () => {

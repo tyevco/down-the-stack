@@ -126,6 +126,8 @@ Seals are linear in working time, so four 10-minute tasks and one 40-minute task
 
 Closing a terminal is **not** acknowledgment. Pending chests on an off-duty hero wait; after 24 h they open as **Unreviewed**: half gold, half chest XP, `floor(rawSeals/2)` items, **no Seals**. The sidebar row of an off-duty hero shows its chest icon, so one click still claims it fully.
 
+As built (round 3): the folded "Off duty" group header shows its pending chests (a gold chest chip "×n"), each off-duty row's tooltip says when its chest opens Unreviewed, and the Herd button's dot (party footer and HUD) lights while an off-duty chest is within 4 h of opening Unreviewed; viewing the Digest does not clear that dot, claiming or the opening does. A chest that opens Unreviewed (after 24 h off duty, or at once when its hero is let go to make room or is a Contractor whose agent leaves) writes one journal line, "Chest opened Unreviewed: “task” (half value, no Seals)" (or "n chests …"), which the Digest lists under "Opened Unreviewed".
+
 ### 2.5 Flap guard
 
 More than 6 status changes for one terminal within 60 s suspends chest drops and celebrations for that hero for 5 minutes. The task stays open and keeps accumulating minutes, so nothing is lost; it simply closes once the status settles.
@@ -178,6 +180,8 @@ Every XP bar and nameplate has a "why" tooltip, for example: `+512 XP/min = work
 
 Background hygiene caps (roster limits, Forkling count, crowding, flap guard) exist too but almost never bind for a real user, so they are listed in section 12, not on the tooltip.
 
+As built (round 3): the level gap (6.2) is not one of the three rules, but when it binds (a hero standing on a map whose level is below its own, mostly under a manual pin, 11.16) the why line and the sheet's XP breakdown name it: "1-1 is 31 levels below: ×0.03". The Backlog has no gap penalty (9.8), so it never shows there.
+
 ### 2.10 Signal hygiene
 
 - Status is processed only when `seq` changes; unknown statuses count as `idle`.
@@ -214,6 +218,8 @@ seat = norm(space.name || space.id || "nospace") + "/" + (program.key || app || 
 norm = lowercase, trimmed, at most 32 characters
 ```
 
+As built: "characters" are UTF-16 units, and the cut never keeps half of an emoji (`formulas.cutText`; herdr refuses a lone surrogate in any text). The Quest name's 40 is cut the same way (2.3). A save from an older build whose seats were cut through an emoji is mended on load, so each hero still matches its space.
+
 Several heroes can share a seat; each has an ordinal (0, 1, 2…) used only for its default name. The hero also stores `space.id`: if a space is renamed but its id matches, the seat is re-keyed automatically.
 
 ### 3.2 Binding (only for terminals not yet bound)
@@ -224,6 +230,8 @@ Several heroes can share a seat; each has an ordinal (0, 1, 2…) used only for 
 4. Otherwise the agent plays as a **Contractor** (3.4).
 
 The address → hero map lives in memory for the address's lifetime, so reordering tabs never swaps heroes. `addr` is saved so a reload that keeps the same terminal rebinds instantly. The sheet offers **Rebind**: move a live agent onto any benched hero, of any seat.
+
+As built (round 3): the instant rebind by saved `addr` needs the hero's seat to match, or the same space id and the same program; another program started in the same terminal (codex after claude) binds like a new terminal of its own seat, and the old hero keeps its seat and its unseen chest. Rebind moves the agent onto the target hero's own Daily Shift (2.9: the Shift is per hero), so one agent rotated across benched heroes keeps full rate past 4 or 8 working hours; this follows 12.3's "not adversarial anti-cheat" and is left for the owner to confirm (out/VERIFY.md, round 3).
 
 ### 3.3 Names
 
@@ -269,7 +277,7 @@ The **signature** covers the hero's last 20 qualifying tasks (closed tasks of 1.
 | 4 | Median task ≤ 5 min | **Hotfixer** (single-target, crits) | Many quick fixes |
 | 5 | Anything else | **Shellmancer** (area caster) | Balanced work |
 
-- **Provisional until 15 tasks.** At Lv 10 the hero takes the recommended class, marked *provisional*. Until it has 15 qualifying tasks on record, the class is re-evaluated after every qualifying task and switches for free (skill points are re-spent by auto-learn). At 15 tasks it locks.
+- **Provisional until 15 tasks.** At Lv 10 the hero takes the recommended class, marked *provisional*. Until it has 15 qualifying tasks on record, the class is re-evaluated after every qualifying task and switches for free (skill points are re-spent by auto-learn). At 15 tasks it locks. As built (round 3): the refunded points are re-spent only while auto-learn is on for the herd (Settings, and the autopilot master switch) as well as for the hero; otherwise they wait, and the next autopilot pass spends them once it is on (7.1).
 - **Person override:** any class, free, any time before Lv 20 (this also locks it). From Lv 20, a Career Change costs 25 × L Snippets and refunds all skill points.
 - The sheet's Career tab shows the live signature ("median task 12 min · 0.8 blocks/h · 10% with sub-agents → Shellmancer").
 - Five Claude agents in one repo still end up varied, because classes follow behaviour, and no product is ever ranked.
@@ -302,7 +310,7 @@ Measured balance (simulated on-level farming, reference kit): kills per minute a
 
 ### 4.5 Promotion reviews (solo trials in the hero's own slot)
 
-Trials run only while the hero is Questing (the timer freezes otherwise), use the boss rules of 9.5 (Wounds, Lessons Learned, no loss), and autopilot starts them when the win estimate ≥ 100%. A thin "REVIEW" banner replaces the room header.
+Trials run only while the hero is Questing (the timer freezes otherwise), use the boss rules of 9.5 (Wounds, Lessons Learned, no loss), and autopilot starts them when the win estimate ≥ 100%. A thin "REVIEW" banner replaces the room header. As built: at ≥ 90% (`T.boss.autoAt`, docs/BALANCE.md), under the Settings switch "Promotion reviews" (`auto.career`), which covers the Senior and Staff Reviews only.
 
 | Review | Opponent | HP | Attack | Timer | Mechanic | Reward |
 |---|---|---|---|---|---|---|
@@ -541,6 +549,7 @@ Calendar pacing for four personas is in section 12.
 - Rank notation "`A% + B%`" means `A + B·(rank − 1)` percent of a normal hit (`coef` in 5.4). Rank r requires L ≥ unlock + (r − 1).
 - **Auto-learn** (default on): each point goes, within 60 ticks, to the eligible skill with the lowest rank/max ratio; ties: Ultimate, Signature, Main, Area, Capstone, Passive, Buff.
 - **Respec:** free once per 24 h while Resting, otherwise 5 × L Snippets.
+- As built (round 3): auto-learn spends points only while it is on for the hero *and* for the herd (the Settings switch "Auto-learn", under the autopilot master switch). A respec, a class change or a provisional switch refunds points and re-spends them only then; with the herd's switch off, the points wait (the sheet says "Waits: auto-learn is off in Settings", turning the hero's switch on flashes "Auto-learn on, but it is off for the herd (Settings)" or "…the Autopilot is off (Settings)", and the party row shows the unspent-points star), and the next autopilot pass spends them once it is back on.
 - **Rotation** (one action per tick): (1) Ultimate if ready and (boss or review, ≥ 2 arrived lane mobs, or an elite); (2) Signature proc if due; (3) Area if ready and ≥ 2 arrived lane mobs (Hotfixer's Cherry-Pick: any time); (4) Main. Buffs, summons and passive procs are free actions cast when ready while engaged.
 - **Burst window** (bosses only): if a burst-check telegraph (Backtracker, Hydra) starts within 4 ticks, heroes hold their Ultimate and Buff until it starts.
 - Cooldowns are in ticks; CDR applies, rounded up. Ultimates announce themselves by a 2-tick visual wind-up before they are ready (never a mechanical delay).
@@ -839,6 +848,8 @@ Multipliers are final (trait effects on stats are already included); traits only
 | Repeat kills | Beaten bosses can be fought again from their arena; per hero, once per 3 working hours per boss; autopilot farms them when E ≥ 1.5 ("Farm bosses", default on). |
 | Rewards | 8.6 drops; boss XP 6.2; herd's first kill: next zone, trophy (+1% damage and max HP for everyone), Keepsake, "FIXED" stamp |
 
+As built (round 3), suspended fights: only progress may displace a paused repeat (farm) fight: the frontier boss, or a Backlog boss floor (9.8) whose estimate reaches the autopilot threshold; the farm fight closes as a Postmortem and keeps its Wounds. A paused frontier or Backlog fight still waits. A hero who leaves the roster (retired, or let go to make room for a new hire) leaves a paused fight too; the boss keeps the HP pool it was given, and a paused fight nobody is left in closes as a Postmortem instead of waiting for a participant who never comes back. Contractors are never saved, so a restart or reload drops them from a paused fight; they rejoin it by standing in its zone. Autopilot's thresholds are 0.9 (`T.boss.autoAt`) for the frontier boss and the reviews and 1.5 for farming (docs/BALANCE.md §7).
+
 Simulated with the reference kit and 20 coffees per hero (generic mechanic overhead: 12% invulnerable time, a 20% max-HP area hit every 25 ticks):
 
 | Fight | Solo, on level | Solo, 2 levels under | Solo, 3 under | Trio (tank, caster, support), on level | Trio, 5 under |
@@ -920,7 +931,7 @@ Simulated with the reference kit and 20 coffees per hero (generic mechanic overh
 
 ### 9.8 Postgame: The Backlog
 
-Unlocks after the Heisenbug. Endless floors f = 1, 2, 3…: mobs from all 27 kinds with a "v2" tint, level 100 formulas with HP × 1.06^f, ATK × 1.05^f, XP × 1.03^f, no gap penalty. 50 herd kills clear a floor. Every 10th floor is a boss floor: boss `((f/10) − 1) mod 9` at level 100 with the floor multipliers ("The Friday Deploy v2: Holiday Freeze Edition"). Loot item level `100 + floor(f/2)`. A Lv 100 hero enters automatically at the deepest floor whose effective level (`100 + ln(1.06^f)/ln(1.07)`) is ≤ PL + 1. No leaderboards.
+Unlocks after the Heisenbug. Endless floors f = 1, 2, 3…: mobs from all 27 kinds with a "v2" tint, level 100 formulas with HP × 1.06^f, ATK × 1.05^f, XP × 1.03^f, no gap penalty. 50 herd kills clear a floor. Every 10th floor is a boss floor: boss `((f/10) − 1) mod 9` at level 100 with the floor multipliers ("The Friday Deploy v2: Holiday Freeze Edition"). Loot item level `100 + floor(f/2)`. A Lv 100 hero enters automatically at the deepest floor whose effective level (`100 + ln(1.06^f)/ln(1.07)`) is ≤ PL + 1. No leaderboards. As built: a boss floor displaces a paused repeat (farm) fight (9.5 as built), so the Backlog never waits on a beaten boss's zone.
 
 ---
 
@@ -1107,6 +1118,8 @@ Delays are positive `animation-delay` values on elements emitted for that tick.
 | Holo Rubber Duck | Waddles in with a soft shine; Duck Chest pops on a kill |
 | New hire / log off | Monitor-on portal (scaleY 0 → 1, 300 ms) and a one-line header note ("New hire: Kip the Idempotent") / wave and closing portal |
 
+As built (round 3): the level-up column pulses once over its 1.6 s (a loop period is a whole there-and-back; nothing on the stage flashes faster than 1 Hz) and, on short stages, starts below the header band; its "LEVEL UP" text is cyan without a plate (it can be faint over a light sky). A loot pillar's rarity name sits on a nearly opaque dark plate painted after every other effect, so a damage number never covers it. A boss's Keepsake is logged like every notable drop: its pillar stands before the boss with the rarity name "Keepsake", the item's name goes to the header note ("Keepsake: Hazard Cone Hat") and the journal, and the digest counts it.
+
 ### 11.9 Renderer contract for a 1 Hz full-window redraw
 
 1. **Pure render:** `render(state, tickStartMs)`. Nothing animates from JavaScript and the renderer never touches the RNG.
@@ -1145,6 +1158,7 @@ gold 48.2k · Snippets 133 · Sprint: Pyramid of Doom 7/10 · [Herd •] [Settin
 - **Row (44 px):** 3 px status stripe (11.1), 32 px portrait (head crop with the live face glyph and program icon corner; focused ring when focused), line 1 name and level, line 2 career title, class and map, line 3 HP bar (red, 3 px) and XP bar (cyan, 3 px, Fresh Eyes segment), right-side chip and badges (Forkling count, Unblocked spark, star for a pending choice, red BOSS chip, chest icon).
 - **Click a row:** show its terminal (2.7). Click the portrait: character sheet. Off-duty rows open the sheet. A chest icon claims the chest.
 - **Waiting agents never hide:** the header shows "N need you" ("! N" when narrow) while anyone is blocked; a click shows the next blocked row's terminal (repeated clicks walk through them; rows still never re-sort). A guild header with a blocked row carries a `!` badge, folded or not, and in the 44 px rail a blocked portrait carries a `!` corner badge. The waiting chip's tooltip names the task ("Waiting for you for 2m on “Bump deps”"). As built it names the most telling label herdr gives the terminal, judged by herdr's own agents-list test: the live title (status glyph stripped), else the task's last title, else a pane or tab name the person gave; never an empty title, a path, a user@host prompt, the program's own name, or a shell or interpreter name ("zsh", "node"), and when nothing tells, the line leaves the name out. The label is cut to 40 characters, as the Quest name is (2.3). The quest, shipped-chest and Forkling lines use the same test, and so do the stage's hero, Forkling and chest tooltips, the character sheet's quest line, its Bind buttons and the digest's waiting chests. The engine applies the test too: a task keeps the last telling title as its Quest name (status glyph stripped, 40 characters), so an agent that retitles itself after its program or a shell keeps the task's real name, and its chest records that name (none when the task never had one: the journal then reads "Commit").
+- As built (round 3): "N need you", the group `!` and the rail `!` count pane agents (rows) only. A waiting pane-less sub-agent shows as an amber fork chip with its count on its parent's row in the wide party (its click shows the one waiting, `terminal.peek`), and gives no cue in the 44 px rail; herdr's own status bar counts only agents too, but herdr's agents list ranks a parent by its most urgent sub-agent. Whether blocked Forklings should count is left for the owner (out/VERIFY.md, round 3). On light chrome (paper, win98) the `!` chip, "N need you" and the rail badge use the light blocked step (#863808, the stripe's own colour; the rail badge is that step with a white `!`).
 - **Narrow sidebars:** below about 230 px a row keeps the chips that fit (urgent first), then the level; it never runs past the edge.
 - **Order:** grouped by space (guild) in herdr's own order; rows never re-sort on status changes. Off-duty heroes collapse into one group at the bottom.
 - **Footer:** gold, Snippets, Release version, frontier Sprint meter, [Herd] button (digest dot), [Settings].
@@ -1159,6 +1173,7 @@ gold 48.2k · Snippets 133 · Sprint: Pyramid of Doom 7/10 · [Herd •] [Settin
 - Centre: herdr's own terminal title stays as it is; real information always wins.
 - Right: 48 px HP bar, 64 px XP bar, status chip: "fighting 2-2" (grey), "BOSS 41%" (red), "! waiting 2m" (amber), "shipped · chest ready" (gold), "resting" (grey), "supervising 2 Forklings" (grey). The agent's own state comes first: "BOSS 41%" / "REVIEW" shows only while the participant is questing or supervising; a blocked participant reads "! waiting" (it holds its seat, 9.5, and its tooltip says "holding until you answer"), a done or idle one has walked out and reads "shipped" / "resting".
 - Below 360 px the header keeps the program icon, the face, herdr's terminal title (it truncates first) and the chip; the name goes, and "Lv 14" shows only while the title keeps its room. Below 200 px: the face, the chip's short form ("!", "! 2m") and the title when 48 px are left. Hover: Power Level, current quest, Fresh Eyes, Shift, buffs and the "why" tooltip.
+- As built (round 3): the HP and XP bars show only when herdr's whole terminal title fits beside them, with room reserved for the longest name and a 100 px chip whatever they are, so they depend on the pane's width and title alone and a hover never toggles them; once shown they stay until the title's room falls 24 px short. In practice that needs a pane of about 650–780 px, so an even two-pane split shows no bars (the party rows and the sheet still carry them). The title has a tooltip with the full title.
 
 ### 11.13 Character sheet (overlay, 760 × 500; Esc or click outside closes)
 
@@ -1172,9 +1187,13 @@ gold 48.2k · Snippets 133 · Sprint: Pyramid of Doom 7/10 · [Herd •] [Settin
 
 As built: the boss card sits in the Career tab after the ladder; while its zone boss fight runs or is paused it leads the tab, red-edged, with its Retreat in the card's title row (11.16), so it is in view without scrolling at 760 × 500. Its Challenge / Fight again shares the title row with the win estimate, so both stay in view when a long ladder pushes the card down (at Lv 60+ the card's name and status lines need a scroll). In the Herd panel the Bosses tab's fight banner holds the same Retreat above the boss list. A running review's line reads "81% left against <opponent>". The Skills tab's skill-point note (Intern refund, provisional class) sits under the respec rules, and the tab's left column scrolls.
 
+As built (round 3): outside a fight the career boss card no longer needs a scroll at Lv 60+: tiers left behind drop their won review line, and a won review on the current tier takes one line. The Herd panel's Bosses tab scrolls its fighting row into view once per fight and per visit (the Retreat stays in the banner). The journal reads chests that opened Unreviewed (2.4 as built). The XP breakdown names the level gap when it binds (2.9 as built).
+
 ### 11.14 Herd panel (overlay, Localhost)
 
 Tabs: Upgrades (buildings), Stash, Bug Tracker, Trophies and bosses (meters, Wounds, Lessons, repeat cooldowns), Roster and Hall of Fame (retire, rebind, rename), Digest, Settings.
+
+As built: the Settings tab's "career" switch is labelled "Promotion reviews" (`auto.career`: it starts the Senior and Staff Reviews at ≥ 90%); "Auto-boss" and "Farm bosses" read their thresholds (90% and 150%) from the tuning. The Stage height row finds the stage block by its content (this mod's stage, any id, as the host's collapse does), is dimmed with "This layout has no stage" where there is none, and still resizes a hidden stage ("The stage is hidden now; it opens at this height."). The HUD switch finds its block the same way. There is no show/hide switch for the stage itself (an open decision, out/VERIFY.md round 3). The palette has one entry, "Down the Stack: Herd panel", which opens the panel on its Digest tab from any layout (`mod.open`); the character sheet and calm mode are reached from the keys, the Roster and Settings tabs and clicks.
 
 ### 11.15 Notifications, calm controls, settings
 
@@ -1185,8 +1204,14 @@ Tabs: Upgrades (buildings), Stash, Bug Tracker, Trophies and bosses (meters, Wou
 
 As built (ARCHITECTURE §3.4, §4):
 - **Notifications** are herdr toasts (`notify`), posted by the host only. Each kind is off by default. At most 3 are raised a day over all kinds: the game's day (2.9: 04:00 local, from the snapshot's clock and time zone), counted in the save, so a restart keeps the count and a clock set back a day keeps the later day's (set back further, as when a clock that ran days ahead is put right, the count starts afresh). Only live play raises one: never the first tick after the app starts or reloads (or, when herdr lists no agents at first, the tick that first sees them), an offline gap (Unreviewed chests opened while away) or a clock behind, so reopening after a night posts no burst of stale news; a person's own commands are live. A milestone is posted only once a save that holds it as taken is on disk, so a restart, a hot reload or a second window on the same save never posts it twice (at most once: one lost with a write that never finishes is not posted later), and never one older than 10 minutes. "Herd-first boss kill" is the first kill of a zone boss ("The Deadlock Hydra: FIXED" / "The herd reached frame #4, Merge Marshes."); "LTS or Keepsake drop" names the item and its finder; "Hero reached Principal" names the hero and its title. Level "success", no icon, never a sound. A click opens the Herd panel on its Digest tab (`mod.open`, which works in any layout); while a Herd panel is open the toast has no click action.
+  - Round 3: a boss's Keepsake counts as a Keepsake drop. A repeat kill's Keepsake raises "LTS or Keepsake drop"; a herd-first kill's Keepsake rides on the boss toast while "Herd-first boss kill" is on ("The herd reached frame #2, Callback Caverns. Keepsake: Hazard Cone Hat."), so the kill spends one of the day's three, and raises its own toast only while the boss kind is off. Promotions to Junior, Senior and Staff raise nothing.
+  - A milestone raised by a click within a second of a load or reload, before the first tick told the time zone, counts toward the local day (the host passes the time zone with every command; the engine holds such a milestone until the next tick otherwise).
+  - The one way a milestone is posted twice is a rollback of the save: a cold restart that finds `save.json` garbage loads `save.bak` (13.1), which may predate the save that took it. Two windows on one save with another program deleting or garbling `save.json` within seconds of a kill can also repeat one. A hot reload never rolls back.
+  - Toasts use herdr's default timeout (5 s for "success"), like herdr's own agent toasts, and herdr closes them whether or not the window is active; the Digest keeps every line. A longer timeout is an open decision (out/VERIFY.md, round 3).
 - **Loot glow minimum rarity:** All (the default: every drop glows) / Alpha / Beta / Release / LTS / Keepsake. A drop below it draws neither its loot glow nor its light pillar (pillars are LTS and Keepsake only); the header note and journal line of a Release+ drop stay.
 - **Collapse the stage when nothing is working** (off by default): a minute after the last questing (crashed counts: its agent still works) or supervising hero stops, the stage block is hidden (`layout.hide`); it comes back (`layout.show`) when one quests or supervises again, and when the setting is turned off. Turning it on while nothing works collapses at once. It acts on those transitions only and shows only a stage it hid itself (the save remembers that, since herdr keeps a hidden block hidden across restarts): a stage shown or hidden by hand (`ctrl-shift-g`) stays as the person left it.
+  - Round 3: an app start or reload while nothing works does not collapse the stage (it is not a transition). A countdown cut short by a restart continues from its saved start (`herd.cfg.idleAt`), giving the new session at least 10 s of its own idling; a hot reload hands it over exactly. The note that this window hid the stage is per window: a save another window wrote never changes it, so two windows on one save each show only a stage they hid.
+  - A stage hidden without that note (herdr's `layouts/.state/Down-the-Stack.json` left from an earlier install, a lost save) stays hidden, as hidden by hand; it comes back with `ctrl-shift-g` (keys merged) or `herdr-app do layout.show --id stage`. herdr's palette hides `layout.show`/`toggle`, and the Settings tab has no stage switch: an open decision (out/VERIFY.md, round 3).
 - **Autopilot master switch:** the first row of the Autopilot column. Off stops every system; the per-system switches keep their values (they show dimmed and inactive) and apply again when it is back on.
 
 ### 11.16 Interactions (all optional; none needed to progress)
@@ -1205,6 +1230,8 @@ As built (ARCHITECTURE §3.4, §4):
 | Herd button | – | Herd panel |
 
 Nothing in the game ever moves keyboard focus away from a terminal.
+
+As built (round 3): a room whose heroes are all pinned draws a cream pin before its title (left out with the stats on bare rooms when the strip is crowded), and its header tooltip reads "Pinned: this hero stays on 1-1 · click to unpin". A pinned hero's tooltip says "(pinned: click the room header to unpin)" when its whole room is pinned, else "(pinned: Auto on the Career tab's Map card unpins)", since a header click in a mixed room pins everyone; the party row's map reads "… (pinned)". When a pin holds a hero far below its level, the why line names the gap (2.9 as built).
 
 ---
 
@@ -1271,6 +1298,7 @@ Raw (bonus-free, on-level) working time to level: Lv 5 in 11.5 min, Lv 10 in 45 
 - `crc` is CRC32 (hex) of the file with `crc` set to `""`. On mismatch or parse failure, load `save.bak` (also when `save.json` is missing); if that fails too, load whichever file's only fault is its checksum (an edited or re-encoded but intact save); only then start fresh. A file that does not load is kept aside, never overwritten: `save.broken`, then `save.broken-<ms>` for later incidents. A `save.json` that cannot be *read* (locked, invalid UTF-8) is read again before deciding, and saving resumes once it reads; a herd that started fresh meanwhile is kept as `save.unsaved-<ms>`.
 - Save trouble is never silent: a read-only, not-saving or restored save shows a notice on the stage (dismissable), a band in the Herd panel (13.4), and, so it is seen with the stage hidden, an amber cue in the party sidebar's footer (a dot on the narrow rail) and in the HUD strip that opens the Herd panel.
 - Not saved: terminal bindings (except `addr` for fast rebind), mob lanes, effects, render state, Contractors, mid-tick state. A boss fight in progress is saved as a suspended fight.
+- As built (round 3), hot reload (herdr reloads the mod in place when its files change): the new code takes the running world over and never rolls back to the save, also when `save.json` is unreadable (it is then never written until it reads), missing (written again) or garbage another program wrote (kept aside as `save.broken`). A valid save another window wrote since is loaded instead. When `save.json` reads again after a session that could never read it, the rule above applies at once: if that session started a fresh herd, or the file is a newer version, the file is loaded and the session's world kept aside as `save.unsaved`. A save notice survives a reload. A *cold* restart that finds `save.json` garbage still falls back to `save.bak`, the one rollback left, which can repeat a notification (11.15).
 
 ### 13.2 Shape
 
@@ -1349,11 +1377,11 @@ Raw (bonus-free, on-level) working time to level: Lv 5 in 11.5 min, Lv 10 in 45 
 As built (docs/BALANCE.md §10): the journal keeps 120 lines up to 20 heroes and tapers to 60 at 30. Strings used more than once (seats, space ids, pane and tab names, pending-chest titles, the journal's kinds and texts) are written once in the top-level `str` table and referred to by index. Chest items waiting in `herd.inbox` are stored as compact stash rows (≈ 37 B each). Measured:
 - the 30-hero worst case above (full Release/LTS gear, 140 stash items, 60 journal lines, one pending chest each): 27.3 KB (28.7 KB before titles and journal strings were interned);
 - a 30-hero herd left running (`stress30`: 30 agents over three spaces, Lv 68–95, 140 stash items) for 0 / 10,000 / 20,000 / 40,000 / 80,000 s: 19.0 / 25.1 / 26.3 / 28.6 / 28.8 KB with 2 / 37 / 68 / 121 / 120 pending chests (before: 19.4 / 26.8 / 28.7 / 31.9 / 32.1 KB);
-- every one of 30 heroes holding the full 20 pending chests (600, three shared titles) on that worst case: 39.2 KB (61.0 KB with titles inline). That is the one state still over the budget; nothing depends on the budget, and herdr's hard limit is 1 MiB per file.
+- every one of 30 heroes holding the full 20 pending chests (600, three shared titles) on that worst case: 39.2 KB (61.0 KB with titles inline; 40.2 KB in round 3's measurement, of which the pending chests are 471 B per hero). That is the one state still over the budget; nothing depends on the budget, and herdr's hard limit is 1 MiB per file. Getting under 30 KB would take a lossy or format change (chest times to the second, columnar rows), which SAVE_VERSION 1 cannot carry without an older build misreading the save.
 
 ### 13.4 Versioning and migration
 
-- `migrations[v]` is a list of pure functions `save_v → save_v+1`, applied in order on load; a save from a newer `v` than the code knows is opened read-only with a notice in the Herd panel.
+- `migrations[v]` is a list of pure functions `save_v → save_v+1`, applied in order on load; a save from a newer `v` than the code knows is opened read-only with a notice in the Herd panel. As built: also when it turns up later (a `save.json` that could not be read at start reads again as a newer version): it is opened read-only, never written or rotated into `save.bak`, and the session's world is kept aside as `save.unsaved`.
 - Content ids (classes, skills, mobs, bosses, affixes, bases, properties) are integers that are never reused. Rebalancing numbers needs no migration because saves store ids, rolls and levels, not derived stats.
 - `gen` bumps when content tables change; on load, unknown ids map to fallbacks (an unknown affix becomes `memo` with the same roll, an unknown base becomes the slot's tier base).
 

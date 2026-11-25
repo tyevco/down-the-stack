@@ -3,9 +3,11 @@
 //
 //   npm run qjs -- [--only <phase>[,<phase>...]] [--kinds mid,late] [--ticks 300] [--seconds 120]
 //                  [--long 20000] [--long-kind late] [--reload-kinds mid,stress30] [--json out.json]
-//                  [--repo <repo root>]
+//                  [--repo <repo root>] [--strict]
 //   (= node tools/qjs/run.mjs ...; needs the devDependencies: `npm install`. Results go to
-//   out/qjs/results.json unless --json says otherwise.)
+//   out/qjs/results.json unless --json says otherwise.) Exits 1 on a failure (a correctness
+//   problem, or a time past one of herdr's budgets); half a budget or the ~5 ms tick target is a
+//   warning, which fails the run only with --strict; 2 on a usage error.
 //
 // Phases (default: all, in this order):
 //   lint      static scan of mods/down-the-stack (acorn): syntax features, risky built-ins, regex flags,
@@ -70,6 +72,30 @@ const opt = (name, def) => {
   return i >= 0 && i + 1 < argv.length ? argv[i + 1] : def;
 };
 const flag = (name) => argv.includes(`--${name}`);
+// every argument is known (a typo such as --stict must not run without the option): 2 otherwise
+{
+  const VALUED = ["only", "kinds", "ticks", "seconds", "long", "long-kind", "reload-kinds", "json", "repo"];
+  const FLAGS = ["strict"];
+  const usage = (msg) => {
+    console.error(`${msg}\nusage: npm run qjs -- [--only <phase>[,<phase>...]] [--kinds mid,late] [--ticks N] [--seconds N] [--long N] [--long-kind K] [--reload-kinds a,b] [--json out.json] [--repo <dir>] [--strict]`);
+    process.exit(2);
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    const name = a.startsWith("--") ? a.slice(2) : null;
+    if (name && FLAGS.includes(name)) continue;
+    if (name && VALUED.includes(name)) {
+      if (i + 1 >= argv.length || argv[i + 1].startsWith("--")) usage(`${a} needs a value`);
+      i++;
+      continue;
+    }
+    usage(`unknown argument ${a}`);
+  }
+  for (const n of ["ticks", "seconds", "long"]) {
+    const i = argv.indexOf(`--${n}`);
+    if (i >= 0 && !(Number(argv[i + 1]) > 0)) usage(`--${n} needs a positive number`);
+  }
+}
 const REPO = path.resolve(opt("repo", path.join(HERE, "..", "..")));
 const MOD_DIR = path.join(REPO, "mods", "down-the-stack");
 const SHIMS = path.join(HERE, "shims");
@@ -350,8 +376,24 @@ function bootDriver(opts = {}) {
 
 const fmt = (x) => (typeof x === "number" ? x.toFixed(2) : String(x));
 const out = (s = "") => console.log(s);
+// Every finding goes to results.flags. A correctness failure (a throw, an error chip, a render, task
+// or shim error, a fuzz failure, a differential mismatch, a reload or load failure, a save round
+// trip that is not identical, an unmapped role, a failed phase) or a herdr budget passed (render
+// 50 ms, callbacks 500 ms, module eval 500 ms) is a failure: the run exits 1. Half a budget, or the
+// ~5 ms tick target, is a warning (timing targets move with the machine's load): exit 0 unless
+// --strict.
 const flags = [];
-const flagIf = (cond, text) => { if (cond) flags.push(text); };
+const failures = [];
+const warnings = [];
+const fail = (text) => { flags.push(text); failures.push(text); };
+const warn = (text) => { flags.push(`warning: ${text}`); warnings.push(text); };
+/** A time against one of herdr's budgets: past it fails, past half of it warns. */
+const timing = (ms, budget, what) => {
+  if (!(typeof ms === "number" && Number.isFinite(ms))) return;
+  if (ms > budget) fail(`${what} ${ms} ms > the ${budget} ms budget`);
+  else if (ms > budget / 2) warn(`${what} ${ms} ms > 50% of the ${budget} ms budget`);
+};
+const STRICT = flag("strict");
 
 // ---------------------------------------------------------------------------------------------
 // phases
@@ -381,7 +423,7 @@ phases.lint = async () => {
   out(`free globals referenced (${names.length}): ${names.join(" ")}`);
   out(`  missing in QuickJS-ng + herdr sandbox: ${missing.length ? missing.map(([n]) => `${n} (${res.globals[n]} refs)`).join(", ") : "none"}`);
   res.missingGlobals = missing.map(([n]) => n);
-  for (const [n] of missing) flags.push(`global ${n} referenced by the mod is undefined in QuickJS-ng`);
+  for (const [n] of missing) fail(`global ${n} referenced by the mod is undefined in QuickJS-ng`);
   return res;
 };
 
@@ -410,7 +452,7 @@ phases.modeval = () => {
     vm.ctx.dispose(); vm.rt.dispose();
   }
   out(`main.js module graph (${res.run1.modules} modules) evaluated in ${res.run1.ms} / ${res.run2.ms} / ${res.run3.ms} ms (budget ${MODULE_BUDGET} ms); heap after eval ${(res.run1.heapBytes / 1048576).toFixed(1)} MiB`);
-  flagIf(res.run1.ms > MODULE_BUDGET / 2, `module eval ${res.run1.ms} ms > 50% of the ${MODULE_BUDGET} ms budget`);
+  timing(res.run1.ms, MODULE_BUDGET, "module eval");
   return res;
 };
 
@@ -440,15 +482,15 @@ phases.roles = async () => {
       kind: role.name === "nameplate-loading" ? "mid" : kind, contractor: /contractor/.test(role.name), loading: role.name === "nameplate-loading",
       widths: role.widths || [360, 960, 1600], zooms: role.zooms || [1, 2], height: role.height || HEIGHT[role.props.role] || 240,
     };
-    if (!arg.kind) { out(`  ${role.name}: could not map its fixture to a demo kind`); flags.push(`roles: ${role.name} unmapped`); continue; }
+    if (!arg.kind) { out(`  ${role.name}: could not map its fixture to a demo kind`); fail(`roles: ${role.name} unmapped`); continue; }
     const { vm } = bootDriver();
     const r = call(vm, "fixtureRole", arg);
     vm.ctx.dispose(); vm.rt.dispose();
     res[role.name] = r;
     const errs = [...r.errors, ...r.hostErrors, ...r.engineErrors.map((x) => `engine ${x}`), ...r.shimErrs.map((x) => `${x.code}: ${x.msg}`), ...r.copyErrors];
     out(`  ${role.name.padEnd(22)} (${arg.kind}${arg.contractor ? "+contractor" : ""}) ${r.renders.length} renders, max ${r.max.toFixed(2)} ms, max nodes ${r.maxNodes}${errs.length ? "  ERRORS " + JSON.stringify(errs.slice(0, 4)) : ""}`);
-    for (const e of errs) flags.push(`roles ${role.name}: ${e}`);
-    flagIf(r.max > RENDER_BUDGET / 2, `roles ${role.name}: render max ${r.max} ms > 50% of 50 ms`);
+    for (const e of errs) fail(`roles ${role.name}: ${e}`);
+    timing(r.max, RENDER_BUDGET, `roles ${role.name}: render max`);
   }
   return res;
 };
@@ -481,8 +523,8 @@ phases.load = async () => {
     vm.ctx.dispose(); vm.rt.dispose();
     res[name] = { ...a, ...b, settleMs: +settle.toFixed(2) };
     out(`  ${name}: from ${b.from}, heroes ${b.heroes}, readOnly ${b.readOnly}, load task (after init) ${settle.toFixed(1)} ms, first render ${typeof b.renderMs === "number" ? b.renderMs.toFixed(2) + " ms" : b.renderMs}${b.chip ? " ERROR CHIP" : ""}, pump ${b.pumpMs} ms, files ${JSON.stringify(b.files.map((f) => f.split("/").pop()))}${b.errors.length ? ", host errors " + JSON.stringify(b.errors) : ""}${b.warning ? ", warning " + b.warning : ""}`);
-    flagIf(settle > CALLBACK_BUDGET / 2, `load ${name}: task ${settle.toFixed(1)} ms > 50% of 500 ms`);
-    if (b.chip || typeof b.renderMs !== "number") flags.push(`load ${name}: render failed`);
+    timing(+settle.toFixed(1), CALLBACK_BUDGET, `load ${name}: task`);
+    if (b.chip || typeof b.renderMs !== "number") fail(`load ${name}: render failed`);
   }
   return res;
 };
@@ -508,21 +550,22 @@ phases.worlds = () => {
     for (const [name, v] of Object.entries(r.roles || {})) {
       out(`  render ${name}: ${v.error ? "ERROR " + v.error : `cold ${v.cold} ms (memo miss, incl. view)  warm p50 ${v.warm.p50} max ${v.warm.max} ms  nodes ${v.nodes}${v.errors ? "  host errors " + JSON.stringify(v.errors) : ""}${v.chip ? "  ERROR CHIP" : ""}`}`);
       if (!v.error) {
-        flagIf(v.cold > RENDER_BUDGET / 2, `${kind} render ${name}: cold ${v.cold} ms > 50% of the 50 ms render budget`);
-        flagIf(v.warm.max > RENDER_BUDGET / 2, `${kind} render ${name}: warm max ${v.warm.max} ms > 50% of the 50 ms render budget`);
-      } else flags.push(`${kind} render ${name}: ${v.error}`);
-      if (v.errors || v.chip) flags.push(`${kind} render ${name}: host errors ${JSON.stringify(v.errors)}`);
+        timing(v.cold, RENDER_BUDGET, `${kind} render ${name}: cold`);
+        timing(v.warm.max, RENDER_BUDGET, `${kind} render ${name}: warm max`);
+      } else fail(`${kind} render ${name}: ${v.error}`);
+      if (v.errors || v.chip) fail(`${kind} render ${name}: host errors ${JSON.stringify(v.errors)}`);
     }
     if (r.shimErrs.length) out(`  shim errors: ${JSON.stringify(r.shimErrs.slice(0, 5))}`);
     if (r.copyErrors.length) out(`  task errors: ${JSON.stringify(r.copyErrors.slice(0, 5))}`);
-    flagIf(!r.save.identical || !r.saveAfter.identical, `${kind}: save round trip not identical`);
-    flagIf(r.ticks && r.ticks.max > CALLBACK_BUDGET / 2, `${kind}: tick max ${r.ticks.max} ms > 50% of the 500 ms callback budget`);
-    flagIf(typeof r.coldTickMs === "number" && r.coldTickMs > CALLBACK_BUDGET / 2, `${kind}: cold tick ${r.coldTickMs} ms > 50% of the 500 ms callback budget`);
-    flagIf(r.ticks && r.ticks.p95 > TICK_TARGET, `${kind}: tick p95 ${r.ticks.p95} ms > the ~5 ms tick target (ARCHITECTURE §2.5)`);
-    for (const [name, v] of Object.entries(r.views || {})) if (typeof v === "number" && v > CALLBACK_BUDGET / 2) flags.push(`${kind}: view ${name} ${v} ms > 50% of the 500 ms callback budget`);
-    for (const [name, v] of Object.entries(r.coldViews || {})) if (typeof v === "object") flags.push(`${kind}: cold view ${name} threw ${v.error}`);
-    for (const [name, v] of Object.entries(r.views || {})) if (typeof v === "object") flags.push(`${kind}: view ${name} threw ${v.error}`);
-    flagIf(r.save.serializeMs > CALLBACK_BUDGET / 2 || r.save.loadWorldMs > CALLBACK_BUDGET / 2, `${kind}: save ${r.save.serializeMs}/${r.save.loadWorldMs} ms > 50% of the callback budget`);
+    if (!r.save.identical || !r.saveAfter.identical) fail(`${kind}: save round trip not identical`);
+    if (r.ticks) timing(r.ticks.max, CALLBACK_BUDGET, `${kind}: tick max`);
+    timing(r.coldTickMs, CALLBACK_BUDGET, `${kind}: cold tick`);
+    if (r.ticks && r.ticks.p95 > TICK_TARGET) warn(`${kind}: tick p95 ${r.ticks.p95} ms > the ~5 ms tick target (ARCHITECTURE §2.5)`);
+    for (const [name, v] of Object.entries(r.views || {})) if (typeof v === "number") timing(v, CALLBACK_BUDGET, `${kind}: view ${name}`);
+    for (const [name, v] of Object.entries(r.coldViews || {})) if (typeof v === "object") fail(`${kind}: cold view ${name} threw ${v.error}`);
+    for (const [name, v] of Object.entries(r.views || {})) if (typeof v === "object") fail(`${kind}: view ${name} threw ${v.error}`);
+    timing(r.save.serializeMs, CALLBACK_BUDGET, `${kind}: save serialize`);
+    timing(r.save.loadWorldMs, CALLBACK_BUDGET, `${kind}: save loadWorld`);
   }
   return res;
 };
@@ -547,9 +590,9 @@ phases.window = () => {
     if (r.engineErrors.length) out(`  engine errors: ${JSON.stringify(r.engineErrors)}`);
     if (r.shimErrs.length) out(`  shim errors: ${JSON.stringify(r.shimErrs.slice(0, 5))}`);
     if (r.copyErrors.length) out(`  task errors: ${JSON.stringify(r.copyErrors.slice(0, 5))}`);
-    flagIf(r.pump.max > CALLBACK_BUDGET / 2, `window ${kind}: timer callback max ${r.pump.max} ms > 50% of 500 ms`);
-    for (const [k, v] of Object.entries(r.renders)) flagIf(v.max > RENDER_BUDGET / 2, `window ${kind}: render ${k} max ${v.max} ms > 50% of 50 ms`);
-    if (r.hostErrors.length) flags.push(`window ${kind}: host errors ${JSON.stringify(r.hostErrors)}`);
+    timing(r.pump.max, CALLBACK_BUDGET, `window ${kind}: timer callback max`);
+    for (const [k, v] of Object.entries(r.renders)) timing(v.max, RENDER_BUDGET, `window ${kind}: render ${k} max`);
+    if (r.hostErrors.length) fail(`window ${kind}: host errors ${JSON.stringify(r.hostErrors)}`);
   }
   return res;
 };
@@ -575,7 +618,7 @@ phases.diff = () => {
   }
   out(`${n} outputs compared (VMs, render trees, save texts, world state after 100/${TICKS} ticks): ${diffs.length} differ`);
   for (const d of diffs) out(`  ${d}`);
-  if (diffs.length) flags.push(`differential: ${diffs.length} outputs differ between QuickJS-ng and V8`);
+  if (diffs.length) fail(`differential: ${diffs.length} outputs differ between QuickJS-ng and V8`);
   return { compared: n, diffs };
 };
 
@@ -585,7 +628,7 @@ phases.fuzz = () => {
   vm.ctx.dispose(); vm.rt.dispose();
   out(`${r.cases} cases; ${r.failures.length} failures`);
   for (const f of r.failures) out(`  ${f}`);
-  for (const f of r.failures) flags.push(`fuzz: ${f}`);
+  for (const f of r.failures) fail(`fuzz: ${f}`);
   return r;
 };
 
@@ -654,22 +697,22 @@ phases.reload = () => {
       seconds(later);
       const after = call(vm, "reloadAfter", { declined });
       const heap1 = memory(vm).memory_used_size;
-      const fail = chk.fail.concat(after.fail);
-      if (mode === "save in flight" && !inflight.saveWritten) fail.push("the in-flight save never wrote save.json before the reload (harness)");
-      if (mode === FAILED && (inflight.saveWritten || !inflight.held)) fail.push("the stage's save was not at its save.bak write at the reload (harness)");
-      if (!chk.inFlight && inflight) fail.push("no save was in flight at the reload (harness)");
-      const b = { gen, mode, evalMs: +evalMs.toFixed(1), initMs: sw.initMs, loadMs: load.ms, heapBefore: heap0, heapAfter: heap1, check: chk, after, fail };
+      const failed = chk.fail.concat(after.fail);
+      if (mode === "save in flight" && !inflight.saveWritten) failed.push("the in-flight save never wrote save.json before the reload (harness)");
+      if (mode === FAILED && (inflight.saveWritten || !inflight.held)) failed.push("the stage's save was not at its save.bak write at the reload (harness)");
+      if (!chk.inFlight && inflight) failed.push("no save was in flight at the reload (harness)");
+      const b = { gen, mode, evalMs: +evalMs.toFixed(1), initMs: sw.initMs, loadMs: load.ms, heapBefore: heap0, heapAfter: heap1, check: chk, after, fail: failed };
       r.builds.push(b);
       out(`  build ${gen} (${mode}): module graph ${b.evalMs} ms, new instances' init ${sw.initMs.join("/")} ms, load + handover ${load.ms} ms; from "${chk.from}", tick ${chk.tickBefore} at the reload → ${chk.tick} after ${declined ? `(the other window's save.json, tick ${chk.fileTick}, loaded; the old host retired)` : `(save.json had ${chk.fileTick}: ${chk.unsavedTicks} ticks kept that a restart would lose)`}`);
       out(`    new copies: timers ${JSON.stringify(chk.timers)}, pending tasks ${JSON.stringify(chk.tasks)}; old copies at release: timers ${JSON.stringify(chk.releasedTimersAtRelease)}, pending tasks ${JSON.stringify(chk.releasedPendingAtRelease)}${chk.kept.length ? `; still on the old build: ${chk.kept.join(", ")}` : ""}`);
       out(`    ${later} s later: save.json tick ${after.fileTick} (world ${after.tick}), ${after.writes} writes, all by build ${gen}; heap ${(heap0 / 1048576).toFixed(2)} → ${(heap1 / 1048576).toFixed(2)} MiB; the retired host still holds a world of ${after.retainedWorldBytes} B and ${after.retainedMemo} memoised views`);
       if (after.shimErrs.length) out(`    shim errors: ${JSON.stringify(after.shimErrs.slice(0, 5))}`);
       if (after.copyErrors.length) out(`    task errors: ${JSON.stringify(after.copyErrors.slice(0, 5))}`);
-      for (const f of fail) { out(`    FAIL ${f}`); flags.push(`reload ${kind} build ${gen} (${mode}): ${f}`); }
-      for (const e of after.copyErrors) flags.push(`reload ${kind} build ${gen}: task error ${e.split("\n")[0]}`);
-      flagIf(evalMs > MODULE_BUDGET / 2, `reload ${kind} build ${gen}: module eval ${b.evalMs} ms > 50% of the ${MODULE_BUDGET} ms budget`);
-      flagIf(load.ms > CALLBACK_BUDGET / 2, `reload ${kind} build ${gen}: load + handover ${load.ms} ms > 50% of the ${CALLBACK_BUDGET} ms budget`);
-      flagIf(sw.initMs.some((x) => x > CALLBACK_BUDGET / 2), `reload ${kind} build ${gen}: an init took > 50% of the ${CALLBACK_BUDGET} ms budget`);
+      for (const f of failed) { out(`    FAIL ${f}`); fail(`reload ${kind} build ${gen} (${mode}): ${f}`); }
+      for (const e of after.copyErrors) fail(`reload ${kind} build ${gen}: task error ${e.split("\n")[0]}`);
+      timing(b.evalMs, MODULE_BUDGET, `reload ${kind} build ${gen}: module eval`);
+      timing(load.ms, CALLBACK_BUDGET, `reload ${kind} build ${gen}: load + handover`);
+      timing(Math.max(0, ...sw.initMs), CALLBACK_BUDGET, `reload ${kind} build ${gen}: slowest init`);
     }
     vm.ctx.dispose(); vm.rt.dispose();
     res[kind] = r;
@@ -723,13 +766,20 @@ for (const p of PHASES) {
   } catch (e) {
     out(`PHASE ${p} FAILED: ${e.stack || e}`);
     results.phases[p] = { failed: String(e.stack || e) };
-    flags.push(`phase ${p} failed: ${String(e.message || e).split("\n")[0]}`);
+    fail(`phase ${p} failed: ${String(e.message || e).split("\n")[0]}`);
   }
   out(`(${p}: ${((performance.now() - t0) / 1000).toFixed(1)} s)`);
 }
 results.flags = flags;
-out(`\n######## flags (${flags.length})`);
-for (const f of flags) out(`  - ${f}`);
+results.failures = failures;
+results.warnings = warnings;
+out(`\n######## failures (${failures.length})`);
+for (const f of failures) out(`  - ${f}`);
+out(`\n######## warnings (${warnings.length}${STRICT ? ", --strict: they fail the run" : ": timing targets, exit 0 unless --strict"})`);
+for (const f of warnings) out(`  - ${f}`);
 fs.mkdirSync(path.dirname(JSON_OUT), { recursive: true });
 fs.writeFileSync(JSON_OUT, JSON.stringify(results, null, 1));
 out(`\nresults: ${JSON_OUT}`);
+const code = failures.length || (STRICT && warnings.length) ? 1 : 0;
+out(`RESULT: ${failures.length ? "FAIL" : warnings.length && STRICT ? "FAIL (--strict)" : "PASS"}: ${failures.length} failures, ${warnings.length} warnings`);
+process.exitCode = code;

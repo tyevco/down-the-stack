@@ -15,7 +15,7 @@
 import {
   TUNING as T, BOSSES, ZONES, BUILDINGS, BUILDING_IDX, CLASSES, MAP_BY_ID, REVIEWS, SKILL_SLOTS, BACKLOG, RARITIES, RARITY_IDX,
 } from "./data.js";
-import { need, fmtNum } from "./formulas.js";
+import { need, fmtNum, autoOn, wellFormed } from "./formulas.js";
 import { newState, encodeState, decodeState } from "./save.js";
 import { grantXP, learn as learnSkill, autoLearn, respec as respecHero, setClass as setHeroClass } from "./heroes.js";
 import {
@@ -78,7 +78,35 @@ export function loadWorld(text, { nowMs = 0 } = {}) {
   const { state, warning, readOnly } = decodeState(text);
   const world = { state, rt: newRt(nowMs, state.herd.tick) };
   world.rt.readOnly = !!readOnly;
+  repairLoaded(state);
   return { world, warning: warning || null };
+}
+
+// Mends what an older build could save wrong (in memory; the next save writes it back):
+// - a seat or task title cut through an emoji ends in a lone surrogate, which herdr rejects
+//   wherever the text is shown (agents.js now cuts with cutText). The seat drops the half
+//   character as normSeat now does, so its hero still matches the space; a title also loses the
+//   space before it (questName's trimEnd).
+// - Contractor ids in the paused boss fight: Contractors are never saved and are numbered afresh
+//   (-1, -2, ...) after a load, so a saved negative id would seat an unrelated Contractor.
+function repairLoaded(state) {
+  const mend = (v) => {
+    if (typeof v !== "string") return v;
+    const t = wellFormed(v, "");
+    return t === v ? v : t.trimEnd();
+  };
+  for (const h of state.heroes || []) {
+    if (typeof h.seat === "string") h.seat = wellFormed(h.seat, "");
+    for (const p of h.pend || []) if (p && typeof p.title === "string") p.title = mend(p.title);
+  }
+  for (const e of state.herd.log || []) if (Array.isArray(e) && typeof e[3] === "string") e[3] = mend(e[3]);
+  const f = state.herd.fight;
+  if (f && Array.isArray(f.ids) && f.ids.some((id) => !(id > 0))) {
+    const n = f.n || f.ids.length; // the boss's HP pool was sized for every participant
+    f.ids = f.ids.filter((id) => id > 0);
+    if (Array.isArray(f.hl)) f.hl = f.hl.filter((id) => id > 0);
+    if (n !== f.ids.length) f.n = n;
+  }
 }
 
 /**
@@ -289,14 +317,32 @@ export function makeEmitter(world, { live = false } = {}) {
  * the day before keeps the later day's count (more than a day back counts afresh). The milestone
  * waits in herd.milestones (saved, at most MILESTONE_QUEUE) until the host drains it
  * (takeMilestones). Callers go through ev.milestone, which lets only live play through. Returns
- * true when queued.
+ * true when queued (or held for the time zone, below).
+ *
+ * The time zone comes with the snapshots (tick) or a command (command's tzOffsetMin). A milestone
+ * raised before either (a click within a second of a load or a hot reload) waits in rt.msHeld
+ * until the first tick tells the time zone, then counts toward its own local day: dated by the
+ * UTC day, an evening west of UTC would spend the next game day's budget.
  */
 export function raiseMilestone(world, kind, data) {
   const { state, rt } = world;
   const herd = state.herd;
   const notify = (herd.cfg && herd.cfg.notify) || {};
   if (!NOTIFY_KEYS.includes(kind) || notify[kind] !== true || rt.readOnly) return false;
-  const day = localDay(rt.nowMs, rt.tzOffsetMin);
+  if (!Number.isFinite(rt.tzOffsetMin)) {
+    if (!Array.isArray(rt.msHeld)) rt.msHeld = [];
+    if (rt.msHeld.length >= MILESTONE_QUEUE) return false;
+    rt.msHeld.push({ kind, data, at: rt.nowMs });
+    return true;
+  }
+  return queueMilestone(world, kind, data, rt.nowMs);
+}
+
+// Counts a milestone toward the local day of `at` and queues it (raiseMilestone).
+function queueMilestone(world, kind, data, at) {
+  const { state, rt } = world;
+  const herd = state.herd;
+  const day = localDay(at, rt.tzOffsetMin);
   const nf = Array.isArray(herd.notified) ? herd.notified : [0, 0, 0];
   let [nDay, count, seq] = [Number(nf[0]) || 0, Number(nf[1]) || 0, Number(nf[2]) || 0];
   // a new day starts afresh; so does a clock more than a day behind the counted day (it was set
@@ -308,11 +354,22 @@ export function raiseMilestone(world, kind, data) {
   herd.notified = [nDay, count, seq];
   const d = data || {};
   if (!Array.isArray(herd.milestones)) herd.milestones = [];
-  herd.milestones.push({ n: seq, kind, at: rt.nowMs, title: String(d.title || ""), body: d.body == null ? "" : String(d.body) });
+  herd.milestones.push({ n: seq, kind, at, title: String(d.title || ""), body: d.body == null ? "" : String(d.body) });
   if (herd.milestones.length > MILESTONE_QUEUE) herd.milestones.splice(0, herd.milestones.length - MILESTONE_QUEUE);
   rt.dirty = true;
   rt.majorAt = rt.nowMs; // saved soon: the host posts a milestone only once a save holds it (host.js)
   return true;
+}
+
+// The milestones raised before the time zone was known (raiseMilestone), counted now that it is
+// (a snapshot without one counts them by the UTC day, as before).
+function releaseHeld(world) {
+  const { rt } = world;
+  const held = rt.msHeld;
+  if (!Array.isArray(held) || !held.length) return;
+  rt.msHeld = [];
+  if (rt.readOnly) return;
+  for (const m of held) queueMilestone(world, m.kind, m.data, m.at);
 }
 
 /**
@@ -359,6 +416,10 @@ export function tick(world, snap) {
   const now = Number(s.nowMs);
   if (!Number.isFinite(now)) return { advanced: false, ticks: 0 };
   rt.nowMs = now;
+  // the local time zone, for the views' dates and clock times (game/view/panels.js) and the
+  // notification day; milestones a command raised before it was known count now
+  if (Number.isFinite(s.tzOffsetMin)) rt.tzOffsetMin = s.tzOffsetMin;
+  releaseHeld(world);
   const dt = now - (herd.lastMs || 0);
   // a clock behind the last tick: nothing accrues until it passes it again, but the snapshot is
   // still reconciled (zero steps) so statuses, bindings and chests seen stay live on the stage; a
@@ -389,8 +450,6 @@ export function tick(world, snap) {
   const fxBefore = rt.fx.length;
   if (rt.bossSeen == null) rt.bossSeen = (herd.bossKills || []).slice();
   if (rt.zoneSeen == null) rt.zoneSeen = herd.zone || 0;
-  // the local time zone, for the views' dates and clock times (game/view/panels.js)
-  if (Number.isFinite(s.tzOffsetMin)) rt.tzOffsetMin = s.tzOffsetMin;
 
   if (!rt.readOnly && !behind) {
     const day = localDay(now, s.tzOffsetMin);
@@ -674,13 +733,16 @@ function bossKills(world, snap, ev) {
     if (first && !rt.banner) ev.banner(`The herd reached frame #${Math.min(ZONES.length, i + 2)}`, `${b.name}: FIXED`);
     if (first) {
       const next = ZONES[i + 1];
+      // the kill's Keepsake rides on this toast (boss.js winFight raises none of its own then)
+      const ks = rt.firstKeepsake && rt.firstKeepsake.i === i ? ` Keepsake: ${rt.firstKeepsake.name}.` : "";
       ev.milestone("boss", {
         title: `${b.name}: FIXED`,
-        body: next ? `The herd reached frame #${i + 2}, ${next.name}.` : `The herd reached ${BACKLOG.name}.`,
+        body: `${next ? `The herd reached frame #${i + 2}, ${next.name}.` : `The herd reached ${BACKLOG.name}.`}${ks}`,
       });
     }
     ev.major();
   }
+  rt.firstKeepsake = null;
   let changed = kills.some((k, i) => (k || 0) !== (seen[i] || 0));
   rt.bossSeen = kills.slice();
   const z = herd.zone || 0;
@@ -860,8 +922,15 @@ const COMMANDS = {
     const on = asBool(a.on);
     if (on == null) return fail("on must be true or false");
     hero.autoLearn = on;
-    if (on) autoLearn(hero);
-    return { ok: true, msg: on ? "Auto-learn on" : "Auto-learn off" };
+    // the herd's switch rules over the hero's: with auto-learn off for the herd (or the autopilot
+    // master switch off) the points wait, and the next autopilot pass spends them once it is on;
+    // the message says so (the sheet flashes it), so turning it on is never a silent no-op
+    const herdOn = autoOn(world.state, "learn");
+    if (on && herdOn) autoLearn(hero);
+    if (!on) return { ok: true, msg: "Auto-learn off" };
+    if (herdOn) return { ok: true, msg: "Auto-learn on" };
+    const master = !(world.state.herd.cfg && world.state.herd.cfg.autopilot === false);
+    return { ok: true, msg: master ? "Auto-learn on, but it is off for the herd (Settings)" : "Auto-learn on, but the Autopilot is off (Settings)" };
   },
 
   respec(world, a, now) {
@@ -979,7 +1048,12 @@ const COMMANDS = {
     A.unbindHero(world, hero.id, ev);
     A.openChests(world, hero, { reason: "click" }, ev);
     const r = H.retire(world, hero.id, now, ev);
-    return r.ok ? { ok: true, msg: r.msg } : fail(r.error);
+    if (!r.ok) return fail(r.error);
+    // a paused boss fight (herd.fight) loses this participant; one nobody is left in closes as a
+    // Postmortem (Wounds kept) instead of waiting for a hero who never comes back
+    const api = AP.bossApi(world);
+    if (typeof api.leaveSavedFight === "function") api.leaveSavedFight(world, hero.id, ev);
+    return { ok: true, msg: r.msg };
   },
 
   rebind(world, a, now, ev) {
@@ -1060,16 +1134,20 @@ export const COMMAND_NAMES = Object.keys(COMMANDS);
 
 /**
  * Runs one UI command (ARCHITECTURE §3.5). Every command validates its arguments; a read-only
- * world refuses them all. Success bumps rt.version and marks the world dirty.
+ * world refuses them all. Success bumps rt.version and marks the world dirty. `tzOffsetMin`
+ * (optional): the local time zone as the snapshots give it, for a milestone the command raises.
  * @returns {{ok:boolean, error?:string, msg?:string}}
  */
-export function command(world, name, args, nowMs) {
+export function command(world, name, args, nowMs, tzOffsetMin) {
   const rt = world.rt;
   const fn = Object.prototype.hasOwnProperty.call(COMMANDS, name) ? COMMANDS[name] : null;
   if (!fn) return fail(`Unknown command: ${name}`);
   if (rt.readOnly) return fail("This save is read-only (it was made by a newer version)");
   const now = Number.isFinite(nowMs) ? nowMs : rt.nowMs;
   if (Number.isFinite(nowMs)) rt.nowMs = nowMs;
+  // the host's local time zone (new Date(nowMs).getTimezoneOffset()): a milestone raised by a
+  // command before the first tick then counts toward the local day at once (raiseMilestone)
+  if (Number.isFinite(tzOffsetMin)) rt.tzOffsetMin = tzOffsetMin;
   const ev = makeEmitter(world, { live: true }); // a person's own action is live play
   let res;
   try {

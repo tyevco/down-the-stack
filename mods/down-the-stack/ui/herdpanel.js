@@ -168,15 +168,18 @@
  *            display, notify (left column), autopilot (right column)
  * @property {{name:string, hint:string}} herd   rename: act("rename", {herd:true, name: typed})
  */
-// env (renderHerd): as renderSheet's, plus chrome: { hud: boolean|null } (is the layout's "hud"
-// block shown; null when the layout has none) and inputs: { herdName: InputState }.
+// env (renderHerd): as renderSheet's, plus chrome: { hud: boolean|null, hudId?, stage?: null |
+// {id, hidden} } (is the layout's HUD block shown, null when the layout has none; the node that
+// holds this mod's stage block, found by its content like host.js stageNode, null when the layout
+// has none: the Stage height choice is disabled then; left out: run on the row's id as before)
+// and inputs: { herdName: InputState }.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 import { div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, Input, InputState, ScrollHandle } from "gpui-base";
 import { run, closeOverlay, layout } from "herdr";
 import { C, MONO, art, zoom, alpha, kids } from "./kit.js";
-import { ink, tone, portrait, openSheet, chromeCommand } from "./party.js";
+import { ink, tone, portrait, openSheet, chromeCommand, legible, over } from "./party.js";
 import {
   dialogTheme, dialogTokens, newUi, filterArgs, flash, actionButton, plainButton, iconButton, switchEl, tag,
   sectionTitle, fluidBar, tabBar, footerBar, itemCard, emptyCard, stashColumn, runAction,
@@ -226,6 +229,7 @@ export function renderHerd(vm, env) {
   else if (vm.tab === "digest" && vm.digest) content = digestTab(vm.digest, env, ui, t);
   else if (vm.tab === "settings" && vm.settings) content = settingsTab(vm.settings, env, ui, t);
   else content = [div().text_color(t.dim).child("Nothing to show here yet.")];
+  if (vm.tab !== "bosses") ui.bossShown = undefined; // back on the tab: reveal the fight again
   return root
     .child(header(vm, t, close))
     .when(Boolean(vm.save), (e) => e.child(saveBand(vm.save, t)))
@@ -452,6 +456,7 @@ function bossReport(b, t) {
 // ── Bosses ───────────────────────────────────────────────────────────────────────────────────
 
 function bossesTab(bv, env, ui, t) {
+  revealFight(bv, env, ui);
   const f = bv.fight;
   const rows = (bv.bosses ?? []).map((b) => bossRow(b, env, ui, t));
   const bl = bv.backlog;
@@ -465,19 +470,34 @@ function bossesTab(bv, env, ui, t) {
           .child(div().min_w(0).truncate().text_size(11).text_color(t.muted).child(f.text)))
         .child(fluidBar(f.frac, 5, tone(C.hp, t), alpha(t.fg.slice(0, 7), 0.12))))
       .child(actionButton("hd-retreat", f.retreat, env, ui, t, { h: 26, px: 10, size: 12, cost: false }))))
+    // the rows are the scroll area's direct children, so scroll_to_item can reveal the fighting
+    // boss's row (below the fold from the sixth boss on) when the tab opens or a fight starts
     .child(div().relative().flex_1().min_h(0)
-      .child(v_flex().id("hd-bosses").absolute().left(0).top(0).size_full().overflow_y_scroll()
-        .child(v_flex().gap(5).pr(4).children(rows)
-          .when(Boolean(bl), (e) => e.child(h_flex().id(`hd-${bl.key}`).flex_none().h(52).px(12).gap(12).items_center().rounded(9)
-            .bg(t.card).border(1).border_color(t.border).when(bl.locked, (x) => x.opacity(0.55))
-            .child(div().w(64).flex_none().text_center().font_family(MONO).text_size(18).font_bold().text_color(ink(C.fresh, t)).child("∞"))
-            .child(v_flex().flex_1().min_w(0)
-              .child(div().text_size(12.5).font_semibold().child(bl.title))
-              .child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child(bl.text)))
-            .child(div().w(120).flex_none().child(fluidBar(bl.progress.frac, 4, tone(C.fresh, t), alpha(t.fg.slice(0, 7), 0.12))))
-            .child(div().w(70).flex_none().text_right().font_family(MONO).text_size(10.5).text_color(t.muted).child(bl.progress.text))
-            .when(Boolean(bl.challenge), (x) => x.child(actionButton("hd-ch-backlog", bl.challenge, env, ui, t, { h: 26, px: 10, size: 12, cost: false }))))))))
+      .child(v_flex().id("hd-bosses").absolute().left(0).top(0).size_full().overflow_y_scroll().gap(5).pr(4)
+        .when(Boolean(env.bossScroll), (e) => e.track_scroll(env.bossScroll))
+        .children(rows)
+        .when(Boolean(bl), (e) => e.child(h_flex().id(`hd-${bl.key}`).flex_none().h(52).px(12).gap(12).items_center().rounded(9)
+          .bg(t.card).border(1).border_color(t.border).when(bl.locked, (x) => x.opacity(0.55))
+          .child(div().w(64).flex_none().text_center().font_family(MONO).text_size(18).font_bold().text_color(ink(C.fresh, t)).child("∞"))
+          .child(v_flex().flex_1().min_w(0)
+            .child(div().text_size(12.5).font_semibold().child(bl.title))
+            .child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child(bl.text)))
+          .child(div().w(120).flex_none().child(fluidBar(bl.progress.frac, 4, tone(C.fresh, t), alpha(t.fg.slice(0, 7), 0.12))))
+          .child(div().w(70).flex_none().text_right().font_family(MONO).text_size(10.5).text_color(t.muted).child(bl.progress.text))
+          .when(Boolean(bl.challenge), (x) => x.child(actionButton("hd-ch-backlog", bl.challenge, env, ui, t, { h: 26, px: 10, size: 12, cost: false })))))))
     .when(Boolean(bv.trophies), (e) => e.child(div().flex_none().text_size(11).text_color(t.dim).child(bv.trophies)))];
+}
+
+/**
+ * Reveal the fighting boss's row once per fight while the Bosses tab shows (ScrollHandle
+ * scroll_to_item: consumed after layout, the smallest scroll; a row already in view stays put).
+ */
+function revealFight(bv, env, ui) {
+  const at = (bv?.bosses ?? []).findIndex((b) => b.state === "fighting");
+  const key = at >= 0 ? bv.bosses[at].key : null;
+  if (key === ui.bossShown) return;
+  ui.bossShown = key;
+  if (at >= 0 && env.bossScroll?.scroll_to_item) env.bossScroll.scroll_to_item(at);
 }
 
 function bossRow(b, env, ui, t) {
@@ -628,12 +648,28 @@ function settingsTab(st, env, ui, t) {
   return [col("hd-set-l", rest, herdName(st.herd, env, ui, t)), col("hd-set-r", auto, null)];
 }
 
+/**
+ * The layout node a chrome row acts on: env.chrome.stage for {resize}, found by content (any id);
+ * undefined when the role was not told (renderHerd called bare: the row's own id, as before).
+ */
+function resizeTarget(row, env) {
+  if (!row.chrome?.resize) return null;
+  const st = env.chrome ? env.chrome.stage : undefined;
+  if (st === undefined) return { id: row.chrome.resize, hidden: false };
+  return st;
+}
+
 function setValue(row, value, env, ui, cx) {
+  const target = resizeTarget(row, env);
+  // no stage block in this layout: herdr would toast "layout.resize failed" (no node)
+  if (row.chrome?.resize && !target) return;
   let r = null;
   if (row.setting) r = env.act ? env.act("setting", { key: row.setting, value }) : null;
-  if (row.chrome?.resize && (!r || r.ok !== false)) {
+  if (target && (!r || r.ok !== false)) {
     const px = Math.max(STAGE_PX.min, Math.min(STAGE_PX.max, Number(value) || STAGE_PX.min));
-    run("layout.resize", { id: row.chrome.resize, px });
+    run("layout.resize", { id: target.id, px });
+    // a hidden (collapsed) stage takes the height now and shows it when it opens again
+    if (target.hidden) r = { ok: true, msg: `${row.label}: ${px} px. The stage is hidden now; it opens at this height.` };
   }
   flash(ui, r ?? { ok: true, msg: `${row.label}: ${value === true ? "on" : value === false ? "off" : String(value)}.` }, row.label, cx);
   ui.armed = null;
@@ -643,23 +679,27 @@ function setValue(row, value, env, ui, cx) {
 function settingRow(row, env, ui, t) {
   let control;
   if (row.kind === "choice") {
-    control = h_flex().flex_none().h(24).p(2).gap(2).items_center().rounded(7).bg(t.well).border(1).border_color(t.border)
+    const noNode = !!row.chrome?.resize && !resizeTarget(row, env);
+    control = h_flex().id(`hd-choice-${row.key}`).flex_none().h(24).p(2).gap(2).items_center().rounded(7).bg(t.well).border(1).border_color(t.border)
       .when(Boolean(row.wide), (e) => e.self_start())
+      .when(noNode, (e) => e.opacity(0.45).tooltip("This layout has no stage"))
       .children((row.options ?? []).map((o) => {
         const on = o.id === row.value;
-        // a coloured option (a rarity) keeps its colour, faded until picked
-        const col = o.color ? tone(o.color, t) : null;
+        // a coloured option (a rarity) is its name in its colour, as text (deepened on light
+        // themes) at full strength: the label is the only thing that says which rarity it sets;
+        // the picked one is marked by its background and weight, not by brightness
+        const col = o.color ? legible(ink(o.color, t), [on ? over(t.btn, t.well) : t.well], t.light) : null;
         return div().id(`hd-opt-${row.key}-${o.id}`).h(18).px(row.wide ? 7 : 8).rounded(5).flex().items_center()
-          .text_size(11).font_medium().text_color(col ? (on ? col : alpha(col, 0.62)) : on ? t.fg : t.dim)
-          .when(on, (e) => e.bg(t.btn))
-          .cursor_pointer().hover((s) => s.text_color(col ?? t.fg))
-          .on_click((_e, cx) => { cx.stop_propagation(); if (!on) setValue(row, o.id, env, ui, cx); })
+          .text_size(11).when(!(col && on), (e) => e.font_medium()).text_color(col ?? (on ? t.fg : t.dim))
+          .when(on, (e) => e.bg(t.btn).when(Boolean(col), (x) => x.font_bold()))
+          .when(!noNode, (e) => e.cursor_pointer().hover((s) => s.text_color(col ?? t.fg)))
+          .on_click((_e, cx) => { cx.stop_propagation(); if (!on && !noNode) setValue(row, o.id, env, ui, cx); })
           .child(o.label);
       }));
   } else if (row.chrome?.toggle) {
     const shown = env.chrome?.hud ?? null;
     control = switchEl(`hd-sw-${row.key}`, shown === true, t, shown == null ? "This layout has no HUD strip" : shown ? "Hide the HUD strip" : "Show the HUD strip", (cx) => {
-      run("layout.toggle", { id: row.chrome.toggle });
+      run("layout.toggle", { id: env.chrome?.hudId ?? row.chrome.toggle });
       if (env.chrome) env.chrome.hud = !shown;
       flash(ui, { ok: true, msg: shown ? "HUD strip hidden." : "HUD strip shown." }, row.label, cx);
       cx.notify();
@@ -696,7 +736,7 @@ function herdName(h, env, ui, t) {
     .child(sectionTitle("Herd", t))
     .child(ui.renaming && input
       ? h_flex().gap(6).items_center()
-        .child(Input.new(input).flex_1().min_w(0).h(26).px(8).rounded(6).border(1).border_color(t.accent).bg(t.bg).text_size(12).text_color(t.fg))
+        .child(Input.new(input).flex_1().min_w(0).h(26).px(8).rounded(6).border(1).border_color(t.accent).bg(t.well).text_size(12).text_color(t.fg))
         .child(plainButton("hd-rename-save", "Save", t, save, { h: 26, px: 9, size: 11.5, on: true }))
         .child(plainButton("hd-rename-cancel", "Cancel", t, (cx) => { ui.renaming = false; ui.typing = false; env.focus?.focus?.(); cx.notify(); }, { h: 26, px: 9, size: 11.5 }))
       : h_flex().gap(8).items_center().px(4)
@@ -719,20 +759,47 @@ function herdName(h, env, ui, t) {
 
 const LAST = { herd: "upgrades" };
 
+// The mod's own name, in the form mod.clone rewrites (ARCHITECTURE §2.9), as host.js SELF.
+const SELF = { mod: "down-the-stack" };
+
 function findNode(node, id) {
   if (!node || typeof node !== "object") return null;
   if (node.id === id) return node;
-  for (const c of node.children ?? []) {
+  for (const c of Array.isArray(node.children) ? node.children : []) {
     const f = findNode(c, id);
     if (f) return f;
   }
   return null;
 }
 
-/** Is the layout's "hud" block shown? null when the layout has none. */
-export function hudShown() {
-  const n = findNode(layout(), "hud");
-  return n ? !n.hidden : null;
+/**
+ * The layout node that holds this mod's block for `role` (any id), as host.js stageNode finds the
+ * stage: content.mod is this mod and content.props.role the role. null when the layout has none.
+ */
+export function roleNode(root, role, depth = 0) {
+  if (!root || typeof root !== "object" || depth > 64) return null;
+  const c = root.content && typeof root.content === "object" ? root.content : null;
+  if (c && c.mod === SELF.mod && c.props && typeof c.props === "object" && c.props.role === role && typeof root.id === "string") return root;
+  for (const k of Array.isArray(root.children) ? root.children : []) {
+    const f = roleNode(k, role, depth + 1);
+    if (f) return f;
+  }
+  return null;
+}
+
+/**
+ * What the Settings tab's herdr rows act on: the HUD block (shown?, its id) and the stage block
+ * ({id, hidden}, or null when this layout has none: the Herd panel opens in any layout, and
+ * layout.resize on a missing node toasts "layout.resize failed").
+ */
+export function chromeNodes() {
+  const root = layout();
+  const hud = roleNode(root, "hud") ?? findNode(root, "hud");
+  const stage = roleNode(root, "stage");
+  return {
+    hud: hud ? !hud.hidden : null, hudId: hud ? hud.id : null,
+    stage: stage ? { id: stage.id, hidden: stage.hidden === true } : null,
+  };
 }
 
 export default class HerdPanel {
@@ -746,6 +813,7 @@ export default class HerdPanel {
       if (a.cmd === "deprecate" || a.cmd === "squash" || a.cmd === "equip") { this.ui.selected = null; this.ui.hover = null; }
     };
     this.scroll = ScrollHandle.new();
+    this.bossScroll = ScrollHandle.new();
     this.inputs = { herdName: InputState.new({ placeholder: "The herd's name" }) };
     this.inputs.herdName.on("focus", (_e, cx) => { this.ui.typing = true; cx.notify(); });
     this.inputs.herdName.on("blur", (_e, cx) => { this.ui.typing = false; cx.notify(); });
@@ -771,8 +839,8 @@ export default class HerdPanel {
     return renderHerd(vm, {
       width: this.ui.size?.w ?? 760, height: this.ui.size?.h ?? 520, zoom: zoom(), theme: dialogTokens(), host,
       act: (name, args) => host?.command?.(name, args), ui: this.ui, overlay: this.props.overlay ?? null,
-      inputs: this.inputs, focus: this.focus ?? null, scroll: this.scroll,
-      chrome: { hud: vm && vm.tab === "settings" ? hudShown() : null },
+      inputs: this.inputs, focus: this.focus ?? null, scroll: this.scroll, bossScroll: this.bossScroll,
+      chrome: vm && vm.tab === "settings" ? chromeNodes() : { hud: null, stage: null },
     });
   }
 
@@ -784,6 +852,7 @@ export default class HerdPanel {
 
   close() {
     this.inputs?.herdName?.release?.();
+    this.bossScroll?.release?.();
   }
 }
 

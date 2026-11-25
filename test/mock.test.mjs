@@ -55,6 +55,25 @@ test("mock modules export exactly herdr's names", async () => {
   assert.deepEqual(Object.keys(await import("gpui-base")).sort(), [...allow.base_exports].sort());
 });
 
+test("the sample programs are herdr's records (programs.json through programs.rs shown())", (t) => {
+  // A wrong `tint` draws a full-colour icon as a one-colour mask: codex's white tile filled solid.
+  const file = path.join(process.env.HERDR_SRC ?? "/home/user/herdrdev/herdr-app", "defaults", "programs.json");
+  if (!fs.existsSync(file)) return t.skip("herdr source not found (set HERDR_SRC)");
+  const table = JSON.parse(fs.readFileSync(file, "utf8")).programs;
+  for (const [key, p] of Object.entries(M.PROGRAMS)) {
+    const e = table[key];
+    assert.ok(e, `${key}: not in herdr's programs.json`);
+    assert.equal(p.key, key);
+    assert.equal(p.name, p.shell ? p.name : e.name, `${key}: name`); // a shell is named after itself (zsh)
+    assert.equal(p.icon, e.icon ?? null, `${key}: icon`);
+    assert.equal(p.tint, e.tint ?? true, `${key}: tint`);
+    assert.equal(p.tile, e.tile ?? null, `${key}: tile`);
+    assert.equal(p.color, e.color ?? null, `${key}: color`);
+    assert.equal(p.shell, key === "shell", `${key}: shell`);
+    assert.equal(p.agent, key !== "shell", `${key}: agent`);
+  }
+});
+
 test("default theme carries every herdr token as hex", () => {
   const t = herdr.theme();
   for (const k of ["background", "surface", "canvas", "chrome", "popover", "raised", "hover", "selected", "border", "input", "foreground", "muted", "dim", "accent", "accent_foreground", "solid", "solid_foreground", "selection", "working", "blocked", "done", "idle", "unknown", "ansi0", "ansi15"]) {
@@ -100,6 +119,24 @@ test(".id() must be a string; tooltip a string", () => {
   assert.throws(() => div().id(3), (e) => e.code === "bad-id");
   assert.throws(() => div().tooltip(div()), TypeError);
   assert.doesNotThrow(() => div().id("x").tooltip("hi"));
+});
+
+test("a string with an unpaired surrogate (an emoji cut in half) throws wherever it crosses into herdr", async () => {
+  // rquickjs String::to_string runs str::from_utf8 over the string's bytes: half a pair is not UTF-8.
+  const cut = "Ship it now \ud83d"; // "🚀".slice(0, 1)
+  const low = "\ude80 then";
+  for (const s of [cut, low]) {
+    assert.throws(() => div().tooltip(s), (e) => e.code === "bad-string" && /unpaired/.test(e.message));
+    assert.throws(() => div().id(s), (e) => e.code === "bad-string");
+    assert.throws(() => div().child(s), (e) => e.code === "bad-string");
+    assert.throws(() => div().children(["ok", s]), (e) => e.code === "bad-string");
+  }
+  assert.doesNotThrow(() => div().id("ship-🚀").tooltip("Ship it now 🚀").child("🚀 rocket").child("✳ done"));
+  const r = await renderWith(() => div().child(cut.slice(0, -1) + "…").tooltip("fine 👍"));
+  assert.deepEqual(codes(r.mod), []);
+  const bad = await renderWith(() => div().child(cut));
+  assert.equal(bad.tree, null, "a render that throws draws nothing");
+  assert.deepEqual(codes(bad.mod), ["bad-string"]);
 });
 
 test(".child(null|undefined) throws; .child(false) is an error but renders", async () => {
@@ -367,6 +404,48 @@ test("timers let go of closed copies; reloadAll gives every copy one new module 
   assert.deepEqual([...a.errors, ...b.errors], []);
 });
 
+test("per-VM globals: a load that spans another VM's reload reads and writes its own VM's (herdr: one VM per window)", async () => {
+  // A copy's task sleeps, then reads globalThis[Symbol.for("<mod>.…")]: meanwhile another VM
+  // reloads. In herdr the two VMs never share globalThis; the read must see this VM's value.
+  M.resetState();
+  const src = tempMod("vmglobals", `
+    import { View, div } from "gpui-kit";
+    import { props, checking } from "herdr";
+    const KEY = Symbol.for("vmglobals.live.v1");
+    export default class X extends View {
+      init(p, cx) {
+        const me = props()?.who;
+        this.before = globalThis[KEY] ?? null;
+        if (!checking()) cx.spawn(async (tcx) => {
+          await tcx.sleep(1000);
+          this.late = globalThis[KEY] ?? null;
+          globalThis[KEY] = me + "-late";
+        });
+        if (props()?.write) globalThis[KEY] = me;
+      }
+      render() { return div(); }
+    }
+  `);
+  const a = await M.mountMod(src, { props: { who: "A", write: true }, graph: "vm-a" });
+  assert.equal(a.view.before, null, "a new VM has none");
+  const b = await M.mountMod(src, { props: { who: "B" }, graph: "vm-b" });
+  assert.equal(b.view.before, null, "nor does another window's VM");
+  await M.reloadAll([a]); // window A's VM is entered while B's task sleeps
+  assert.equal(a.view.before, "A", "a reload keeps its VM's globals");
+  await M.tickAll(2000);
+  assert.equal(b.view.late, null, "B's continuation never sees A's value");
+  assert.equal(a.view.late, "A", "A's own continuation does");
+  const a2 = await M.mountMod(src, { props: { who: "A2" }, graph: "vm-a" });
+  assert.equal(a2.view.before, "A-late", "a write from A's task stays A's");
+  const b2 = await M.mountMod(src, { props: { who: "B2" }, graph: "vm-b" });
+  assert.equal(b2.view.before, "B-late", "and B's late write is B's");
+  assert.equal(Object.getOwnPropertySymbols(globalThis).includes(Symbol.for("vmglobals.live.v1")), false, "never an own global");
+  M.resetState();
+  const c = await M.mountMod(src, { props: { who: "C" }, graph: "vm-a" });
+  assert.equal(c.view.before, null, "a reset forgets every VM's");
+  assert.deepEqual([...a.errors, ...b.errors, ...a2.errors, ...b2.errors, ...c.errors], []);
+});
+
 // Budgets under load: npm test runs files in parallel, and other work (a browser taking previews)
 // can hold the CPU. Waiting for a CPU must never put a callback over herdr's budget; work must.
 /** Busy until both `ms` of this process's CPU time and `ms` of wall time have passed (work, under any load). */
@@ -525,6 +604,35 @@ test("runCheck passes the sample mod and reports missing inputs", async () => {
   assert.ok(res.roles[0].renders > 10);
   const missing = await runCheck({ main: path.join(os.tmpdir(), "nope", "main.js") });
   assert.equal(missing.exitCode, 2);
+  // --role that names no fixture and no role checks nothing: never a pass
+  const typo = await runCheck({ main: DEMO, fixtures: fx, role: "stagee", widths: [360], zooms: [1] });
+  assert.equal(typo.roles.length, 0);
+  assert.equal(typo.exitCode, 2);
+  assert.match(typo.missing.join(" "), /a role named "stagee" \(a role: stage, party/);
+  const one = await runCheck({ main: DEMO, fixtures: fx, role: "party", widths: [360], zooms: [1] });
+  assert.equal(one.exitCode, 0);
+  assert.deepEqual(one.roles.map((r) => r.name), ["empty"]);
+});
+
+test("check's command line refuses an argument it does not know, or one without its value (exit 2)", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const run = (...args) => spawnSync(process.execPath, ["--import", path.join(M.REPO, "tools", "mock", "register.mjs"), path.join(M.REPO, "tools", "check.mjs"), ...args], { encoding: "utf8", timeout: 60000 });
+  for (const args of [["--bogus-flag"], ["--rol", "party"], ["--role"], ["--widths", "wide"], ["--zooms", "--json"]]) {
+    const r = run(...args);
+    assert.equal(r.status, 2, `${args.join(" ")}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /usage: /);
+  }
+  assert.equal(run("--help").status, 0);
+});
+
+test("npm run qjs refuses an argument it does not know, or one without its value (exit 2), before it runs anything", async (t) => {
+  const { spawnSync } = await import("node:child_process");
+  try { await import("quickjs-emscripten"); } catch { t.skip("the QuickJS-ng devDependencies are not installed"); return; }
+  const run = (...args) => spawnSync(process.execPath, [path.join(M.REPO, "tools", "qjs", "run.mjs"), ...args], { encoding: "utf8", timeout: 60000 });
+  for (const args of [["--stict"], ["--only"], ["--ticks", "--strict"], ["--seconds", "x"], ["--only", "nope"], ["lint"]]) {
+    const r = run(...args);
+    assert.equal(r.status, 2, `${args.join(" ")}: ${r.stdout}${r.stderr}`);
+  }
 });
 
 test("runCheck: a stage render over 400 elements or 150 animated nodes fails its role; other roles only warn", async () => {

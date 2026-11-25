@@ -732,6 +732,74 @@ test("review end: a won review leaves the Promotion banner in the slot for 3 tic
   }
 });
 
+test("a map pin shows wherever the map is named (header, hero tooltip, party row); the level gap shows when it binds", async () => {
+  const { partyView, sheetView } = await import("../mods/down-the-stack/game/view.js");
+  const { gap } = await import("../mods/down-the-stack/game/formulas.js");
+  const { MAP_BY_ID } = await import("../mods/down-the-stack/game/data.js");
+  const w = fresh("mid");
+  const ref = { now: NOW };
+  const echo = w.state.heroes.find((h) => h.id === 1);
+  assert.ok(echo.L >= 30 && w.rt.live.get(1).state === "questing");
+  // before: the 1-1 room (if any) is not pinned, and no why names a level gap
+  let vm = stageView(w, { width: 1600, height: 200, nowMs: ref.now });
+  assert.ok(vm.rooms.every((r) => !r.pin || r.pin.pinned === false));
+  assert.ok(vm.heroes.every((h) => !/levels? below/.test(h.tooltip) && !/\(pinned/.test(h.tooltip)));
+  // one click on a header pins; autopilot moves the hero there on the next ticks
+  assert.equal(command(w, "pinMap", { heroId: 1, mapId: "1-1" }, ref.now).ok, true);
+  for (let i = 0; i < 4; i++) step(w, ref);
+  assert.equal(w.rt.live.get(1).mapId, "1-1");
+  vm = stageView(w, { width: 1600, height: 200, nowMs: ref.now });
+  const room = vm.rooms.find((r) => r.mapId === "1-1");
+  assert.deepEqual(room.pin, { heroIds: [1], mapId: null, pinned: true }, "the header knows it is pinned (and unpins)");
+  assert.match(room.tooltip, /Pinned: this hero stays on 1-1 · click to unpin/);
+  const hv = vm.heroes.find((h) => h.heroId === 1);
+  assert.match(hv.tooltip, /1-1 Squiggle Path \(pinned: click the room header to unpin\)/);
+  // the level gap (D§6.2): ×gap(L − mid) on every why line, and in the sheet's XP breakdown
+  const mult = Math.round(gap(Math.round(echo.L - MAP_BY_ID["1-1"].mid)) * 100) / 100;
+  assert.ok(mult < 1);
+  const part = `1-1 is ${Math.round(echo.L - MAP_BY_ID["1-1"].mid)} levels below: ×${mult}`;
+  assert.ok(hv.tooltip.includes(part), hv.tooltip);
+  const row = partyView(w, { width: 268, nowMs: ref.now }).groups.flatMap((g) => g.rows).find((r) => r.heroId === 1);
+  assert.equal(row.mapLabel, "1-1 Squiggle Path (pinned)");
+  assert.ok(row.tooltip.includes(part), row.tooltip);
+  const filter = { slot: "all", minRar: 0, usable: false, sort: "score", focus: null, squash: [] };
+  const gp = sheetView(w, { heroId: 1, tab: "stats", filter }).stats.why.parts.find((p) => p.key === "gap");
+  assert.equal(gp.value, `×${mult}`);
+  assert.equal(gp.good, false);
+  // a hero on a map near its level names no gap and no pin
+  const other = vm.heroes.find((h) => h.heroId !== 1 && /XP\/min/.test(h.tooltip));
+  assert.ok(other && !/levels? below/.test(other.tooltip) && !/\(pinned/.test(other.tooltip), other?.tooltip);
+  // unpinned: the marks go
+  assert.equal(command(w, "pinMap", { heroId: 1, mapId: null }, ref.now).ok, true);
+  w.rt.version++;
+  vm = stageView(w, { width: 1600, height: 200, nowMs: ref.now });
+  assert.ok(vm.rooms.every((r) => !r.pin || r.pin.pinned === false));
+  assert.doesNotMatch(vm.heroes.find((h) => h.heroId === 1).tooltip, /\(pinned/);
+});
+
+test("a pinned hero in a mixed room is told the sheet's Map card unpins it (the header's click would pin the whole room)", () => {
+  const w = fresh("mid");
+  let vm = stageView(w, { width: 1200, height: 200, nowMs: NOW });
+  const room = vm.rooms.find((r) => r.pin && r.pin.heroIds.length >= 2);
+  assert.ok(room, "a room with two heroes or more");
+  const [first, ...rest] = room.pin.heroIds;
+  assert.equal(command(w, "pinMap", { heroId: first, mapId: room.mapId }, NOW).ok, true);
+  w.rt.version++;
+  vm = stageView(w, { width: 1200, height: 200, nowMs: NOW });
+  const mixed = vm.rooms.find((r) => r.mapId === room.mapId && r.pin && r.pin.heroIds.includes(first));
+  assert.equal(mixed.pin.pinned, false);
+  assert.equal(mixed.pin.mapId, room.mapId, "the header's click pins everyone here");
+  const tip = (id) => vm.heroes.find((h) => h.heroId === id).tooltip;
+  assert.match(tip(first), /\(pinned: Auto on the Career tab's Map card unpins\)/);
+  assert.doesNotMatch(tip(first), /click the room header to unpin/);
+  for (const id of rest) assert.doesNotMatch(tip(id), /\(pinned/);
+  // the whole room pinned: the header's click unpins, and the tooltips say so
+  for (const id of rest) assert.equal(command(w, "pinMap", { heroId: id, mapId: room.mapId }, NOW).ok, true);
+  w.rt.version++;
+  vm = stageView(w, { width: 1200, height: 200, nowMs: NOW });
+  for (const id of room.pin.heroIds) assert.match(tip(id), /\(pinned: click the room header to unpin\)/);
+});
+
 test("clicks in the VM: room pin, boss door challenge, boss retreat and loot pillar targets", () => {
   // pin: every hero of a room pinned here → the header unpins
   const w = fresh("mid");
@@ -744,6 +812,7 @@ test("clicks in the VM: room pin, boss door challenge, boss retreat and loot pil
   const again = vm.rooms.find((r) => r.key === room.key) || vm.rooms.find((r) => r.mapId === room.mapId);
   assert.equal(again.pin.mapId, null, "all pinned: the click unpins");
   assert.match(again.tooltip, /auto map choice/);
+  assert.equal(again.pin.pinned, true);
   // the boss door: a click target only where the challenge would start (the stage shows no command
   // result, so a door the engine refuses stays a sign and its header says why)
   let refused = 0;
@@ -820,6 +889,35 @@ test("perf: view and view + render stay fast for the biggest demo world", async 
   t.diagnostic(`stageView ${(viewMs / N).toFixed(2)} ms, view + render ${(allMs / N).toFixed(2)} ms (bounds ${8 * k} / ${25 * k} ms${PERF ? ", PERF=1" : ""})`);
   assert.ok(viewMs / N < 8 * k, `stageView ${(viewMs / N).toFixed(2)} ms`);
   assert.ok(allMs / N < 25 * k, `view + render ${(allMs / N).toFixed(2)} ms`);
+});
+
+test("a Staff Review's Nitpicks stand in lanes 1..n behind the opponent's lane 0 (a crowded stage culls them by lane)", async () => {
+  const { startFight } = await import("../mods/down-the-stack/game/boss.js");
+  const w = fresh("late");
+  const silent = { fx() {}, note() {}, banner() {}, major() {}, journal() {} };
+  const busy = new Set(w.rt.fights.flatMap((f) => f.heroIds));
+  const live = [...w.rt.live.values()].find((l) => l.state === "questing" && !busy.has(l.heroId) && w.state.heroes.find((h) => h.id === l.heroId).L >= 60);
+  const hero = w.state.heroes.find((h) => h.id === live.heroId);
+  hero.rev = [1, 0];
+  const f = startFight(w, "review", 1, [hero.id], silent);
+  assert.ok(f && f.kind === "review");
+  // past the first third of its HP the Reviewer calls two Nitpicks (boss.js staff_review)
+  f.parts.find((p) => p.kind === "boss").hp = Math.round(f.pool * 0.6);
+  step(w, { now: NOW });
+  assert.equal(f.parts.filter((p) => p.kind === "add" && p.hp > 0).length, 2, "two Nitpicks");
+  let seen = 0;
+  for (const width of [1200, 2400, 4000]) {
+    const vm = stageView(w, { width, height: 200, nowMs: NOW + 1000 });
+    const mine = vm.mobs.filter((m) => m.key.startsWith(`mob:${f.key}:`));
+    const opp = mine.find((m) => m.key.endsWith(":body"));
+    assert.ok(opp, `@${width}: the opponent`);
+    assert.equal(opp.lane, 0, `@${width}: the opponent at the front`);
+    const adds = mine.filter((m) => m !== opp);
+    assert.ok(adds.length >= 1, `@${width}: a Nitpick shows`);
+    assert.deepEqual(adds.map((m) => m.lane), adds.map((_, i) => i + 1), `@${width}: Nitpicks in lanes 1..n`);
+    seen += adds.length;
+  }
+  assert.ok(seen >= 3);
 });
 
 test("cues: a promotion review in the hero's own slot, a crash, a supervisor", async () => {
@@ -1040,11 +1138,128 @@ test("budget: most of 60 heroes blocked or holding chests: 30 slots at most, eve
   const vm = stageView(w, { width: 4000, height: 200, nowMs: NOW });
   assert.equal(vm.heroes.length, MAX_SLOTS);
   assert.ok(vm.heroes[0].slot.w > 120);
-  // past 4650 px 31 heroes would fit at 150 px each: the cap still holds, the rest camp
+  // 60 heroes on 6000 px: 100 px each is under SLOT_MIN, so this folds by width (the cap's own
+  // guard is the next test's, with 31-40 heroes that would all fit)
   const vw = stageView(w, { width: 6000, height: 200, nowMs: NOW });
   assert.equal(vw.heroes.length, MAX_SLOTS);
   assert.equal(vw.overflow.count, w.rt.live.size - MAX_SLOTS);
   assert.ok(vw.overflow.x + vw.overflow.w <= 6000.5);
+});
+
+test("layout: in a squeezed slot a working hero's chest stays clear of its body, and the front mob of the hero", async () => {
+  const G = {
+    Demo: await import("../mods/down-the-stack/game/demo.js"), W: await import("../mods/down-the-stack/game/world.js"),
+    liveHeroes: (await import("../mods/down-the-stack/game/agents.js")).liveHeroes, ...(await import("../mods/down-the-stack/game/herd.js")),
+  };
+  const { findHero } = await import("../mods/down-the-stack/game/combat.js");
+  const { world: w } = stressWorld(G, NOW, 30);
+  let i = 0;
+  for (const [id, live] of w.rt.live) {
+    findHero(w, id).pend = [{ min: 30, fmin: 0, title: "Bump deps", at: NOW - 60000, sealFactor: 1 }];
+    if (i++ % 2) { live.state = "waiting"; live.bubbleShown = true; live.blockedSince = w.rt.tick - 300; }
+    live.forklings = [];
+  }
+  w.rt.version++;
+  let checked = 0;
+  for (const width of [2700, 3600, 4500, 6000]) {
+    const vm = stageView(w, { width, height: 200, nowMs: NOW });
+    for (const h of vm.heroes) {
+      if (h.state !== "questing" && h.state !== "waiting") continue;
+      const c = vm.chests.find((x) => x.heroId === h.heroId);
+      if (!c) continue;
+      const where = `@${width} hero ${h.heroId} in a ${h.slot.w} px slot`;
+      const body = [h.x - 20 * h.scale, h.x + 20 * h.scale];
+      assert.ok(c.x - 14 >= h.slot.x - 0.5, `${where}: chest inside the slot`);
+      assert.ok(c.x + 14 <= body[0] + 4 + 0.01, `${where}: chest ${c.x - 14}..${c.x + 14} under the body ${body[0]}..${body[1]}`);
+      const front = vm.mobs.filter((m) => m.lane === 0 && m.x > h.slot.x && m.x < h.slot.x + h.slot.w)[0];
+      // (a mob that grows, D§7 traits, may still reach in: its base size at the slot's scale clears)
+      if (front) assert.ok(front.x - (front.px * h.scale) / 2 >= body[1] - 0.01, `${where}: front mob at ${front.x} (${front.px} px × ${front.growScale}, ${front.size}) over the body ..${body[1]} (hero at ${h.x}, scale ${h.scale}, slot ${h.slot.x})`);
+      // the hero stepping right never pushes a mob of its lanes out of its slot (a lane that would
+      // leave the slot is dropped): every mob standing in the slot keeps its centre inside it, and
+      // its body reaches at most 12 px past the slot's end (the last lane's spacing: 10 px measured)
+      for (const m of vm.mobs) {
+        if (m.x > h.slot.x && m.x < h.slot.x + h.slot.w) assert.ok(m.x + (m.px * h.scale) / 2 <= h.slot.x + h.slot.w + 12, `${where}: mob at ${m.x} (${m.px} px) runs past the slot's end ${h.slot.x + h.slot.w}`);
+      }
+      checked++;
+    }
+  }
+  assert.ok(checked >= 40, `checked ${checked}`);
+});
+
+test("budget: 31-40 heroes, all protected, past 4650 px (where 31+ slots of 150 px fit): the 30-slot cap holds, within budget", async (t) => {
+  const G = {
+    Demo: await import("../mods/down-the-stack/game/demo.js"), W: await import("../mods/down-the-stack/game/world.js"),
+    liveHeroes: (await import("../mods/down-the-stack/game/agents.js")).liveHeroes, ...(await import("../mods/down-the-stack/game/herd.js")),
+  };
+  const { findHero } = await import("../mods/down-the-stack/game/combat.js");
+  const { MAX_SLOTS, SLOT_MIN } = (await import("../mods/down-the-stack/game/view/stage.js"))._internal;
+  for (const n of [31, 35, 40]) {
+    const { world: w } = stressWorld(G, NOW, n);
+    // every hero blocked with a chest waiting: all protected, nothing folds for its status
+    for (const [id, live] of w.rt.live) {
+      live.state = "waiting"; live.bubbleShown = true; live.blockedSince = w.rt.tick - 300;
+      findHero(w, id).pend = [{ min: 30, fmin: 0, title: "Bump deps", at: NOW - 60000, sealFactor: 1 }];
+    }
+    w.rt.version++;
+    for (const width of new Set([Math.ceil((n * SLOT_MIN) / 100) * 100, 6000])) {
+      const where = `${n} heroes @${width}`;
+      assert.ok(width / w.rt.live.size >= SLOT_MIN, `${where}: every hero would fit by width alone`);
+      const vm = stageView(w, { width, height: 200, nowMs: NOW });
+      assert.equal(vm.heroes.length, MAX_SLOTS, `${where}: ${vm.heroes.length} slots`);
+      assert.equal(vm.overflow.count, w.rt.live.size - MAX_SLOTS, `${where}: the rest at camp`);
+      const { mod, stage } = await mountStage(vm, { width, height: 200 });
+      assert.deepEqual(problems(mod), [], where);
+      assert.ok(mod.stats.elements <= 400, `${where}: ${mod.stats.elements} elements`);
+      assert.ok(animatedIn(mod) <= 150, `${where}: ${animatedIn(mod)} animated`);
+      statusKept(mod, vm, where);
+      t.diagnostic(`${where}: ${vm.heroes.length} slots, ${vm.overflow.count} at camp, level ${stage.ui.detail?.level}, ${mod.stats.elements} elements, ${animatedIn(mod)} animated`);
+    }
+  }
+});
+
+test("budget: every room pinned (30 map pins) on a swamped strip stays within 400 elements; the pins go with the bare rooms' stats", async (t) => {
+  const G = {
+    Demo: await import("../mods/down-the-stack/game/demo.js"), W: await import("../mods/down-the-stack/game/world.js"),
+    liveHeroes: (await import("../mods/down-the-stack/game/agents.js")).liveHeroes, ...(await import("../mods/down-the-stack/game/herd.js")),
+  };
+  const { findHero } = await import("../mods/down-the-stack/game/combat.js");
+  const pend = () => [{ min: 30, fmin: 0, title: "Bump deps", at: NOW - 60000, sealFactor: 1 }];
+  const forks = (id) => [0, 1, 2].map((j) => ({ address: `pin${id}s${j}`, status: j === 0 ? "blocked" : "working", title: `sub ${j}`, since: 0 }));
+  for (const n of [30, 40]) {
+    for (const withForks of [false, true]) {
+      const { world: w } = stressWorld(G, NOW, n);
+      for (const [id, live] of w.rt.live) {
+        live.state = "waiting"; live.bubbleShown = true; live.blockedSince = w.rt.tick - 300;
+        if (withForks) live.forklings = forks(id);
+        const hero = findHero(w, id);
+        hero.pend = pend();
+        if (id > 0) hero.pinMap = live.mapId; // each room's header clicked: every room pinned
+      }
+      w.rt.version++;
+      for (const width of [3200, 4650]) {
+        const where = `${n} heroes${withForks ? " + Forklings" : ""} @${width}`;
+        const vm = stageView(w, { width, height: 200, nowMs: NOW });
+        assert.ok(vm.rooms.filter((r) => r.pin && r.pin.pinned).length >= 25, `${where}: the rooms are pinned`);
+        const { mod, stage } = await mountStage(vm, { width, height: 200 });
+        assert.deepEqual(problems(mod), [], where);
+        assert.ok(mod.stats.elements <= 400, `${where}: ${mod.stats.elements} elements`);
+        const level = stage.ui.detail?.level ?? 0;
+        const pins = vm.rooms.filter((r) => mod.node(`${r.key}/pin`)).length;
+        if (level >= 10) assert.equal(pins, 0, `${where}: bare rooms (level ${level}) draw no pins`);
+        t.diagnostic(`${where}: level ${level}, ${mod.stats.elements} elements, ${pins} pins drawn`);
+      }
+    }
+  }
+  // a calmer strip keeps its pins
+  const w = fresh("mid");
+  for (const [id, live] of w.rt.live) if (id > 0) findHero(w, id).pinMap = live.mapId;
+  w.rt.version++;
+  const vm = stageView(w, { width: 1600, height: 200, nowMs: NOW });
+  const { mod, stage } = await mountStage(vm, { width: 1600, height: 200 });
+  assert.ok((stage.ui.detail?.level ?? 0) < 10);
+  const pinned = vm.rooms.filter((r) => r.pin && r.pin.pinned);
+  assert.ok(pinned.length >= 2);
+  for (const r of pinned) assert.ok(mod.node(`${r.key}/pin`), `${r.key}: its pin`);
 });
 
 test("budget: a long day's herd (every slot holding status at once) holds ~400 elements and ~150 animated from 360 to 4000 px, every '!' and chest drawn", async (t) => {

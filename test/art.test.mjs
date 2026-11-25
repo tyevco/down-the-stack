@@ -215,11 +215,19 @@ async function imageDraws(body) {
 const softDraws = (worst) => [...worst].filter(([rel, d]) => d.scale > intrinsicScale(rel) + 1e-6)
   .map(([rel, d]) => `${rel} drawn ${d.at} (×${d.scale.toFixed(2)}) but k = ${intrinsicScale(rel)}`);
 
-test("every image() draw in the check role matrix fits within its art's intrinsic scale", async () => {
+test("every image() draw in the check role matrix fits within its art's intrinsic scale (and the matrix passes)", async () => {
+  // The only full run of npm run check's role matrix inside npm test: its errors fail here too, so
+  // npm test alone is a gate for what check finds (warnings, such as a slow first render under V8,
+  // are left to npm run check).
   const { runCheck } = await import("../tools/check.mjs");
-  const worst = await imageDraws(() => runCheck({ log: () => {} }));
+  let res = null;
+  const worst = await imageDraws(async () => { res = await runCheck({ log: () => {} }); });
   assert.ok(worst.size >= 40, `the role matrix drew only ${worst.size} art files with image()`);
   assert.deepEqual(softDraws(worst), [], "raise the art's intrinsic scale in tools/gen-art.mjs (INTRINSIC_SCALE)");
+  assert.ok(res && res.roles.length >= 40, `the matrix ran ${res ? res.roles.length : 0} roles`);
+  const errors = res.errors.map((e) => `[${e.code}] ${[e.where, e.ctx].filter(Boolean).join(" · ")}: ${String(e.message).split("\n")[0]}`);
+  assert.deepEqual(errors.slice(0, 12), [], `npm run check finds ${errors.length} errors`);
+  assert.equal(res.exitCode, 0);
 });
 
 test("every image() draw of the stage scenarios, the FIXED stamp's slam included, fits within k", async () => {

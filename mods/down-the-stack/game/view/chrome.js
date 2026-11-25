@@ -32,7 +32,7 @@
 // Pure: no herdr / gpui imports, no Date.now(), no Math.random(); never mutates the world.
 
 import { TUNING as T, PALETTE, MAP_BY_ID, BOSSES, REVIEWS, RARITIES, SKILL_BY_ID, BACKLOG } from "../data.js";
-import { fmtNum, fmtDuration, need, K } from "../formulas.js";
+import { fmtNum, fmtDuration, need, K, gap as gapMult, cutText, autoOn } from "../formulas.js";
 import { careerOf, stats } from "../heroes.js";
 import { liveHeroes, chestInfo, unblockedActive, unblockedLeft, tellingTitle } from "../agents.js";
 import { releaseInfo, sprintTarget, digestDot, freshEyesCapMin } from "../herd.js";
@@ -178,6 +178,34 @@ function shiftText(why) {
  * · Party +12% · Herd +23% · Shift: 3h 12m today (full rate until 4h)". opts.shift false leaves the
  * Shift part out (the nameplate shows it on its own line).
  */
+/**
+ * The level-gap XP factor (D§6.2) on the why's map for a hero of `level`, when it binds (below
+ * ×1): {mapId, below, mult}; else null. Autopilot keeps heroes on maps near their level, so it
+ * binds mainly under a manual map pin (the room header's click); the Backlog has none (D§9.8).
+ */
+export function gapPart(why, level) {
+  if (!why || !Number.isFinite(level) || !why.mapId || why.mapId === BACKLOG.id) return null;
+  const st = why.state;
+  if (st !== "questing" && st !== "crashed" && st !== "supervising") return null;
+  const m = Object.prototype.hasOwnProperty.call(MAP_BY_ID, why.mapId) ? MAP_BY_ID[why.mapId] : null;
+  if (!m || !Number.isFinite(m.mid)) return null;
+  const below = Math.round(level - m.mid);
+  const g = gapMult(below);
+  if (!(g < 1)) return null;
+  return { mapId: m.id, below, mult: Math.round(g * 100) / 100 };
+}
+
+/** "1-1 is 9 levels below: ×0.03" (the why line's and the sheet's level-gap part). */
+export function gapText(gp) {
+  return `${gp.mapId} is ${gp.below} ${gp.below === 1 ? "level" : "levels"} below: ×${gp.mult}`;
+}
+
+/** Is the hero pinned to the map its live copy is on (the room header's click, D§11.16)? */
+export function mapPinned(hero, live) {
+  return Boolean(hero && live && hero.pinMap && hero.pinMap === live.mapId);
+}
+
+/** opts: shift (default true), level (the hero's: adds the level-gap part when it binds). */
 export function whyLine(why, opts = {}) {
   if (!why) return "";
   const shift = opts.shift !== false;
@@ -196,6 +224,8 @@ export function whyLine(why, opts = {}) {
   if (why.unblocked > 0) parts.push(`Unblocked +${pct(why.unblocked)}`);
   if (why.onboarding > 0) parts.push(`Onboarding +${pct(why.onboarding)}`);
   if (why.gear > 0) parts.push(`Gear +${pct(why.gear)}`);
+  const gp = gapPart(why, opts.level);
+  if (gp) parts.push(gapText(gp));
   if (why.crowding < 1) parts.push(`Crowding ×${Math.round(why.crowding * 100) / 100}`);
   if (shift) parts.push(`Shift: ${shiftText(why)}`);
   if (why.flapPaused) parts.push("chests paused (the status is flapping)");
@@ -402,7 +432,9 @@ export function taskLabel(live) {
   // a name the person typed is shown as typed (the test only keeps out "zsh", "Claude Code", ...)
   const named = (v) => { const s = str(v).trim(); return s && tellingTitle(s, live) ? s : ""; };
   const label = title || named(live.paneName) || (/^\d+$/.test(str(live.tabName).trim()) ? "" : named(live.tabName));
-  return label.length > QUEST_NAME_MAX ? label.slice(0, QUEST_NAME_MAX).trimEnd() : label;
+  // cutText: never half an emoji (herdr's bridge refuses a lone surrogate, and the role would
+  // render as its error chip)
+  return label.length > QUEST_NAME_MAX ? cutText(label, QUEST_NAME_MAX).trimEnd() : label;
 }
 
 /** "Waiting for you for 2m on “Bump deps and fix types”". */
@@ -513,7 +545,8 @@ function liveChips(world, idx, hero, live, f) {
   if (drop) {
     const r = RARITIES[drop.rar] || RARITIES[4];
     rest.push(chip(hero.id, "star", "", r.color, { tooltip: `New ${r.name} drop: ${drop.text}` }));
-  } else if (hero.spFree > 0 && !hero.autoLearn) {
+  } else if (hero.spFree > 0 && !(hero.autoLearn !== false && autoOn(world.state, "learn"))) {
+    // points nobody spends: the hero's auto-learn is off, or the herd's (or the autopilot's)
     rest.push(chip(hero.id, "star", "", COL.xp, { tooltip: `${hero.spFree} skill ${plural(hero.spFree, "point")} to spend (character sheet)` }));
   }
   const forks = live.forklings || [];
@@ -537,7 +570,7 @@ function rowTooltip(world, idx, hero, live, f) {
   if (hold) lines.push(hold);
   const xp = hero.L >= T.levelCap ? "XP MAX" : `XP ${Math.floor(f.xpFrac * 100)}%`;
   lines.push(`HP ${fmtInt(live.hp)} / ${fmtInt(live.maxHp)} · ${xp}${hero.fe >= 1 ? ` · Fresh Eyes ${fmtMin(hero.fe)}` : ""}`);
-  const why = whyLine(f.why);
+  const why = whyLine(f.why, { level: hero.L });
   if (why) lines.push(why);
   if (unblockedActive(hero, world.rt.tick)) lines.push(unblockedLine(hero, world.rt.tick));
   if (f.chest && f.state !== "shipped") lines.push(`${f.chest.n} ${plural(f.chest.n, "chest")} waiting: click the chest to open`);
@@ -558,7 +591,7 @@ function liveRow(world, idx, hero, live, slim) {
   return {
     key: `h:${hero.id}`, heroId: hero.id, address: str(live.address), pane: live.pane ? str(live.pane) : null,
     name: str(hero.name, "Termling"), level: hero.L, careerTitle: f.career.title, clsName: f.career.clsName,
-    mapLabel: mapLabelOf(world, live), status: f.status, stripe: STATUS_COLOR[f.status] || COL.idle,
+    mapLabel: mapLabelOf(world, live) + (mapPinned(hero, live) ? " (pinned)" : ""), status: f.status, stripe: STATUS_COLOR[f.status] || COL.idle,
     face: faceOf(f.state), programIcon: programIconOf(live.program), focused: !!live.focused, pinned: !!live.pinned,
     hpFrac: f.hpFrac, xpFrac: f.xpFrac, feFrac: f.feFrac,
     chips: liveChips(world, idx, hero, live, f), tooltip: rowTooltip(world, idx, hero, live, f),
@@ -598,6 +631,8 @@ function offDutyRow(world, idx, hero, nowMs, slim) {
   const chips = [];
   if (f.chest) {
     lines.push(`${f.chest.n} ${plural(f.chest.n, "chest")} waiting (${f.chest.seals.toFixed(1)} Seals): click the chest to open`);
+    const left = unreviewedLeftMs(hero, nowMs);
+    if (left != null) lines.push(left > 0 ? `Unopened, it opens Unreviewed in ${fmtDuration(left / 1000)} (half value, no Seals)` : "It opens Unreviewed soon (half value, no Seals)");
     chips.push(chip(hero.id, "chest", f.chest.n > 1 ? `×${f.chest.n}` : "", COL.done,
       { tooltip: `${f.chest.n} ${plural(f.chest.n, "chest")} waiting · click to open` }));
   }
@@ -611,6 +646,20 @@ function offDutyRow(world, idx, hero, nowMs, slim) {
     chestPending: !!f.chest, colors: termlingColors(hero, key, "off"), levelUpAge: null, slim: !!slim, machine: null,
   };
 }
+
+/**
+ * How long until an off-duty hero's oldest pending chest opens Unreviewed (D§2.4: 24 h, half
+ * value, no Seals), in ms (≤ 0: due), or null with none.
+ */
+function unreviewedLeftMs(hero, nowMs) {
+  let oldest = Infinity;
+  for (const p of hero.pend || []) oldest = Math.min(oldest, num(p.at, Infinity));
+  if (!Number.isFinite(oldest) || !Number.isFinite(nowMs)) return null;
+  return T.seals.unreviewedAfterSec * 1000 - (nowMs - oldest);
+}
+
+/** An off-duty chest this close to opening Unreviewed lights the Herd button's dot (its Digest). */
+const EXPIRY_CUE_MS = 4 * 3600 * 1000;
 
 let PARTY = null;
 
@@ -675,13 +724,26 @@ export function partyView(world, args = {}) {
   // space's group is drawn earlier, so pushing in idx.pairs order would desync agent.next / .prev.
   const agentOrder = [];
   for (const g of groups) for (const r of g.rows) if (r.address) agentOrder.push(r.address);
+  // the off-duty group starts folded: it carries its pending chests (the folded header shows them,
+  // D§2.4 "one click still claims it fully"), and one near opening Unreviewed lights the Herd dot
+  let offChests = 0;
+  let expiring = false;
   if (off.length) {
-    groups.push({ key: "g:off", name: "Off duty", offDuty: true, rows: off.map((h) => offDutyRow(world, idx, h, nowMs, slimOff)) });
+    for (const h of off) {
+      const n = (h.pend || []).length;
+      if (!n) continue;
+      offChests += n;
+      const left = unreviewedLeftMs(h, nowMs);
+      if (left != null && left <= EXPIRY_CUE_MS) expiring = true;
+    }
+    groups.push({ key: "g:off", name: "Off duty", offDuty: true, chests: offChests, rows: off.map((h) => offDutyRow(world, idx, h, nowMs, slimOff)) });
   }
   const herd = world.state.herd;
+  const footer = footerOf(world, idx);
+  if (expiring) footer.digestDot = true;
   const vm = {
     compact, title: str(herd.name).trim() || "The Herd", count: liveN + off.length, version: num(rt.version),
-    calm: !!(herd.cfg && herd.cfg.calm), groups, footer: footerOf(world, idx), agentOrder, save,
+    calm: !!(herd.cfg && herd.cfg.calm), groups, footer, agentOrder, save,
   };
   PARTY = { rt, version: rt.version, compact, minute, saveKey, vm };
   return vm;
@@ -733,7 +795,7 @@ function plateTooltip(world, hero, live, f) {
   if (f.why) {
     const fe = hero.fe >= 1 ? `Fresh Eyes ${fmtMin(hero.fe)}` : "No Fresh Eyes yet";
     lines.push(`${fe} · Shift ${shiftText(f.why)}`);
-    lines.push(whyLine(f.why, { shift: false }));
+    lines.push(whyLine(f.why, { shift: false, level: hero.L }));
   }
   const buffs = buffLine(live);
   if (buffs) lines.push(buffs);
@@ -797,15 +859,24 @@ export function hudView(world, args = {}) {
   const rt = world.rt;
   const save = saveCue(args && args.save);
   const saveKey = save ? JSON.stringify(save) : "";
-  if (HUD && HUD.rt === rt && HUD.version === rt.version && HUD.saveKey === saveKey) return HUD.vm;
+  const nowMs = Number.isFinite(args && args.nowMs) ? args.nowMs : num(rt.nowMs);
+  const minute = Math.floor(nowMs / 60000);
+  if (HUD && HUD.rt === rt && HUD.version === rt.version && HUD.saveKey === saveKey && HUD.minute === minute) return HUD.vm;
   const idx = indexOf(world);
   const f = footerOf(world, idx);
   const herd = world.state.herd;
+  // as the party's Herd button: an off-duty chest near opening Unreviewed lights the dot
+  let expiring = false;
+  for (const h of world.state.heroes) {
+    if (rt.live && rt.live.has(h.id)) continue;
+    const left = unreviewedLeftMs(h, nowMs);
+    if (left != null && left <= EXPIRY_CUE_MS) { expiring = true; break; }
+  }
   const vm = {
     gold: f.gold, snippets: f.snippets, release: f.release, sprint: f.sprint,
-    working: idx.counts.working, blocked: idx.counts.blocked, shipped: idx.counts.done, digestDot: f.digestDot,
+    working: idx.counts.working, blocked: idx.counts.blocked, shipped: idx.counts.done, digestDot: f.digestDot || expiring,
     calm: !!(herd.cfg && herd.cfg.calm), save,
   };
-  HUD = { rt, version: rt.version, saveKey, vm };
+  HUD = { rt, version: rt.version, saveKey, minute, vm };
   return vm;
 }

@@ -19,7 +19,18 @@ npm run qjs                       # every phase; results in out/qjs/results.json
 npm run qjs -- --only fuzz        # one phase (comma-separated list)
 npm run qjs -- --only worlds --kinds mid,late --ticks 300
 npm run qjs -- --only reload --reload-kinds stress30
+npm run qjs -- --strict           # timing warnings fail the run too
 ```
+
+**Exit code.** 1 when anything is a failure: a throw or error chip, a render, view, task, host or
+shim error (a string herdr's bridge refuses included), a fuzz failure, a QuickJS-ng / V8
+difference, a reload or load failure, a save round trip that is not byte-identical, a role it
+cannot map, a phase that failed, or a time past one of herdr's budgets (render 50 ms, callbacks
+500 ms, module evaluation 500 ms). Half a budget, and the stress30 tick p95 over the ~5 ms target,
+are warnings: listed, exit 0 (they move with the machine's load), unless `--strict`. 2 for a usage
+error (an unknown argument such as `--stict`, an unknown phase, an option without its value, a
+non-positive `--ticks` / `--seconds` / `--long`: checked before anything runs) or missing packages. `results.json` keeps every finding in `flags`, split into `failures` and
+`warnings`.
 
 Phases: `lint` (acorn scan for engine and sandbox hazards), `builtins` (the same probes in
 QuickJS-ng and V8, every difference listed), `modeval` (module evaluation against herdr's

@@ -439,6 +439,34 @@ describe("skills (D§7)", () => {
     assert.equal(H.respec(h, 1000 + day, { resting: true }).free, true);
   });
 
+  test("respec, setClass and a provisional switch re-spend only while the herd's auto-learn is on", () => {
+    const spent = (h) => h.sp.reduce((a, b) => a + b, 0);
+    for (const off of [{ auto: { learn: false } }, { autopilot: false }]) {
+      const { state, h } = mk("hotfixer", 30, { rev: [1, 0] });
+      Object.assign(state.herd.cfg, off, off.auto ? { auto: Object.assign({}, state.herd.cfg.auto, off.auto) } : {});
+      assert.equal(F.autoOn(state, "learn"), false);
+      h.sp = H.autoRanks("hotfixer", 30);
+      assert.equal(H.respec(h, 1000, { resting: true, herd: state.herd }).ok, true);
+      assert.deepEqual([spent(h), h.spFree], [0, 30], "respec: the points wait for the person");
+      h.sp = H.autoRanks("hotfixer", 30);
+      h.spFree = 0;
+      state.herd.snip = 1e6;
+      assert.equal(H.setClass(state, h, "refactorer").ok, true);
+      assert.deepEqual([spent(h), h.spFree], [0, 30], "setClass: the points wait");
+      // recordTask: the caller (agents.closeTask) passes the herd's switch
+      const p = mk("refactorer", 12, { prov: 1, spFree: 11, sp: [0, 0, 0, 0, 0, 0, 0] }).h;
+      let r = null;
+      for (let i = 0; i < 6 && !(r && r.switched); i++) r = H.recordTask(p, { minutes: 3 }, { learn: false });
+      assert.equal(r.switched, true);
+      assert.deepEqual([spent(p), p.spFree], [0, 11], "a provisional switch: the points wait");
+    }
+    // on (the default): re-spent at once, as before
+    const { state, h } = mk("hotfixer", 30, { rev: [1, 0] });
+    h.sp = H.autoRanks("hotfixer", 30);
+    H.respec(h, 1000, { resting: true, herd: state.herd });
+    assert.deepEqual([spent(h), h.spFree], [30, 0]);
+  });
+
   test("skillValue resolves rank numbers and cooldowns", () => {
     const { h } = mk("refactorer", 40, { rev: [1, 0] });
     h.sp = [5, 3, 2, 4, 2, 0, 0];

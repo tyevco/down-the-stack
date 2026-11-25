@@ -11,13 +11,17 @@
 //  - while checking() (herdr-app check) there is no IO at all: an in-memory world, no timers;
 //  - module state dies on hot reload / VM restart, so the save file is the memory that matters:
 //    a fresh host resumes from it. On a hot reload (same VM) the previous build's host is still
-//    reachable through globalThis[Symbol.for("<mod>.live.v1")]; when its world is the
-//    continuation of the file just read, the new host takes that world over (decoded by the new
-//    code) instead of rolling back to the last save. Either way the new host retires the old one
-//    once it has loaded (one writer per VM: a copy whose reload failed keeps the old build
-//    running): it never loads, writes or registers again, and a save it still has in flight
-//    stands down (npm run qjs -- --only reload runs all of this in QuickJS-ng, the way herdr
-//    re-evaluates a mod in the same context);
+//    reachable through globalThis[Symbol.for("<mod>.live.v1")] (a host registers there when its
+//    load starts). The new host takes that world over (decoded by the new code) instead of rolling
+//    back to the last save when the world continues the file just read, and also when the file is
+//    unreadable, missing or garbage another program left (as conflict() and recoverRead() keep
+//    their world); it loads the file when another window saved since, or when the file reads again
+//    holding a herd the old world never had (that world is then kept aside as save.unsaved). What
+//    the player was told about the save, and the collapse countdown, carry over with the world.
+//    Either way the new host retires the earlier builds' hosts once it has loaded (one writer per
+//    VM: a copy whose reload failed keeps an old build running): they never load, write or
+//    register again, and a save one still has in flight stands down (npm run qjs -- --only reload
+//    runs this in QuickJS-ng, the way herdr re-evaluates a mod in the same context);
 //  - one writer: writeTextFile(path, text, lastText) where lastText is the exact text last read or
 //    written; save.bak gets the previous text first (same discipline); a conflict (someone else
 //    wrote the file) reloads their save instead of clobbering it, but a text this host wrote
@@ -25,13 +29,16 @@
 //  - nothing the player had is thrown away: a save that does not load is kept aside (save.broken,
 //    then save.broken-<ms>), a save whose only fault is its checksum is loaded anyway, an unreadable
 //    save.json is read again a few times and then on the 30 s beat;
-//  - a world that loaded read-only (a save from a newer version, rt.readOnly) is never written;
+//  - a world that loaded read-only (a save from a newer version, rt.readOnly) is never written, nor
+//    is such a save found when an unreadable save.json reads again (it is opened read-only then);
 //  - save trouble is shown to the player (saveStatus(): the views get it as args.save);
 //  - opt-in notifications (D§11.15) are posted with notify() only after a save that holds them
 //    landed (writeSave → post), so a restart, a hot reload or a second window sharing the save can
 //    never post one twice; never while checking(), never with a sound;
 //  - "collapse the stage when nothing is working" (D§11.15) hides and shows the layout's stage
-//    block on transitions only (stageAuto), and shows only a stage it hid itself.
+//    block on transitions only (stageAuto), and shows only a stage it hid itself (this window's
+//    own note, whatever another window saves); a restart or hot reload inside the minute goes on
+//    with the countdown (herd.cfg.idleAt).
 //
 // Public surface (roles and main.js use only these):
 //   getHost()                         the singleton
@@ -83,11 +90,12 @@ const READ_RETRY_MS = [1000, 3000, 6000]; // save.json that fails to read: tries
 const OWN_TEXTS = 4;          // texts this host wrote (or tried to) that may land without an answer
 const NOT_SAVING_AFTER = 2;   // consecutive failed writes before the player is told
 const STABLE_GAP_MS = 3000;   // short-lived copies (pane headers, dialogs) pump only as a fallback
-const MEMO_MAX = 48;          // view models kept per world version
+const MEMO_MAX = 64;          // view models kept per world version (then the oldest go, chrome last)
 const MEMO_AGE_MS = 1000;     // and never older than this (time-based strings)
 const PREWARM_MAX = 16;       // view models rebuilt in the pump (timer budget) instead of in render
 const PREWARM_SKIP_MS = 150;  // ...unless the tick itself was already slow
 const COLLAPSE_AFTER_MS = 60000; // nothing working this long (after something did) collapses the stage
+const RESUME_IDLE_MS = 10000;  // a countdown carried over a restart still waits this long in the new session
 const POSTED_KEEP = 32;       // milestone keys this host posted (a second guard against a repeat)
 // The always-visible roles, drawn by many copies every second (a dialog is one copy whose args
 // follow the pointer: it builds its own view in render).
@@ -154,6 +162,23 @@ const LIVE_KEY = Symbol.for(`${MOD}.live.v1`);
 export function getHost() {
   if (!HOST) HOST = new GameHost();
   return HOST;
+}
+
+/**
+ * The memo is full (many pane headers drawn in one frame, or a splitter drag's widths): drop the
+ * oldest entries, pane headers and dialogs before the stage, party and HUD, which every frame
+ * draws and the next pump prewarms. Dropping the whole map instead would lose those mid-frame,
+ * so their next build would land in a render rather than in the pump.
+ */
+const MEMO_KEEP = { stage: true, party: true, hud: true };
+function evictMemo(map) {
+  const target = MEMO_MAX - Math.max(1, Math.floor(MEMO_MAX / 4));
+  for (const pass of [0, 1]) {
+    for (const [k, e] of map) {
+      if (map.size <= target) return;
+      if (pass === 1 || !(e && MEMO_KEEP[e.kind] === true)) map.delete(k);
+    }
+  }
 }
 
 const msgOf = (e) => String((e && e.message) || e);
@@ -245,6 +270,8 @@ export class GameHost {
     this.sizeLogged = false;
     this.viewErrors = Object.create(null); // kind -> message of the last throwing build of it
     this.retired = false;      // a newer build took this world over (hot reload): never write
+    this.pred = null;          // the earlier build's host in this VM until this one has loaded (hot reload)
+    this.origin = null;        // how this herd started: save | bak | fresh | unchecked | new (kept across a hot reload)
     this.lastSaveMs = 0;
     this.majorSaved = 0;       // rt.majorAt covered by the last save
     this.saveSoonAt = null;
@@ -265,6 +292,8 @@ export class GameHost {
     this.stageWas = null;      // stageAuto: was anything working at the last pump (null: not seen yet)
     this.collapseWas = null;   // stageAuto: herd.cfg.collapse at the last pump
     this.idleSince = null;     // stageAuto: when the stage may collapse (armed by a transition)
+    this.idleNoted = undefined; // stageAuto: the idle start last written to herd.cfg.idleAt (undefined: not yet)
+    this.hidStage = null;      // stageAuto: this window's stage is hidden by this host (null: from cfg.collapsed)
   }
 
   /** The world can be shown (loaded, or put in place by a fixture). */
@@ -292,6 +321,9 @@ export class GameHost {
       }
       this.placeholder = createWorld({ nowMs: now, seed: 1 });
       if (!this.world) this.world = this.placeholder;
+      // a hot reload: the earlier build's host (its world, or the one it is still loading)
+      this.pred = this.previousHost();
+      this.register();
     }
     if (this.memoryOnly || this.loaded || this.retired) return;
     if (this.loadingSince != null && Date.now() - this.loadingSince < LOAD_RETRY_MS) return;
@@ -369,29 +401,72 @@ export class GameHost {
       const p = await this.keepBroken(t);
       if (p) kept.push(String(p).split("/").pop());
     };
-    // The previous build's host in this VM (a hot reload): it hands its world over when that world
-    // continues this very file, and is retired below whether it does or not.
-    const prevHost = this.previousHost();
-    const prev = readError || !prevHost ? null : this.previousBuild(prevHost, text);
-    if (prev) {
-      const r = this.decode(prev.text, now);
-      if (r && r.world && !r.world.rt.readOnly) {
-        world = r.world;
-        from = "reload";
-        warning = r.warning || null;
-        lastGood = prev.lastGood;
-        for (const t of prev.ownTexts) this.noteOwn(t);
+    let fileR; // save.json decoded, once
+    const fileDecoded = () => (fileR === undefined ? (fileR = this.decode(text, now)) : fileR);
+    // The previous builds' hosts in this VM (a hot reload): the newest one that finished loading is
+    // asked for its world (handover()), and every one of them is retired below whatever it answers.
+    const prevHost = this.pred;
+    const giver = this.giver();
+    const h = giver ? this.previousBuild(giver, readError ? null : text, { unreadable: !!readError }) : null;
+    const v2 = !!(h && h.v === 2);
+    let lastText = readError ? null : text;
+    if (h) {
+      // "take": its world goes on (it continues this file, or the file is unreadable, missing or
+      // garbage: the newest progress is in that world, as conflict() and recoverRead() keep theirs);
+      // "file": another window wrote a save since, so that save is loaded (as conflict() does);
+      // "unsaved": the file reads again after the previous build could never read it, and holds a
+      // herd that world never had (it started fresh) or one this build cannot write (newer
+      // version): the file is loaded and that world kept aside as save.unsaved (recoverRead()).
+      let plan = "take";
+      if (v2 && !readError && !h.continues && typeof text === "string") {
+        const r = fileDecoded();
+        if (r && r.world) plan = !h.ioBlocked ? "file" : r.world.rt.readOnly || h.origin === "fresh" ? "unsaved" : "take";
+      }
+      if (plan === "take") {
+        const r = this.decode(h.text, now);
+        if (r && r.world && !r.world.rt.readOnly) {
+          world = r.world;
+          from = "reload";
+          warning = r.warning || null;
+          for (const t of Array.isArray(h.ownTexts) ? h.ownTexts : []) this.noteOwn(t);
+          if (!v2) {
+            // an earlier build answers only when its world continues this very file
+            lastGood = !!h.lastGood;
+          } else if (readError) {
+            // never write what cannot be read; recoverRead() knows the file by this text again
+            lastText = typeof h.lastText === "string" ? h.lastText : null;
+            lastGood = !!h.lastGood;
+          } else if (typeof text !== "string") {
+            lastGood = false; // deleted: the next save creates it again
+          } else if (h.continues) {
+            lastGood = text === h.lastText ? !!h.lastGood : true;
+          } else {
+            const fr = fileDecoded();
+            lastGood = !!(fr && fr.world); // a save it could not read before becomes save.bak
+            if (!lastGood) {
+              // garbage another program wrote: kept aside, and the next save replaces it
+              this.error("load save.json (hot reload)", fr ? fr.error : "unreadable");
+              await keep(text);
+            }
+          }
+        }
+      } else if (plan === "unsaved") {
+        await this.keepAside(h.text, `${P.dir}/save.unsaved`);
       }
     }
     if (world) {
       // handed over by the previous build (hot reload)
+      if (readError) {
+        this.error("read save.json", readError);
+        this.ioBlocked = true;
+      }
     } else if (readError) {
       // It exists but cannot be read (too big, permissions, held open): never write over what we
       // cannot see. maybeSave reads it again on the 30 s beat; saving resumes once it reads.
       this.error("read save.json", readError);
       this.ioBlocked = true;
     } else if (typeof text === "string") {
-      const r = this.decode(text, now);
+      const r = fileDecoded();
       if (r && r.world) {
         world = r.world;
         from = "save";
@@ -441,10 +516,14 @@ export class GameHost {
     if (stale()) return false;
     const jsonWas = readError ? "unreadable" : missing ? "missing" : jsonFault ? (jsonFault.code === "crc" ? "checksum" : "damaged") : null;
     const bakWas = bakError ? "unreadable" : bakFault ? (bakFault.code === "crc" ? "checksum" : "damaged") : typeof bak === "string" ? "ok" : "absent";
-    this.restoreNote = restoreNote(from, jsonWas, bakWas, kept);
 
-    this.lastText = readError ? null : text;
-    this.lastGood = lastGood && typeof text === "string";
+    if (from === "reload") {
+      this.lastText = lastText;
+      this.lastGood = lastGood;
+    } else {
+      this.lastText = readError ? null : text;
+      this.lastGood = lastGood && typeof text === "string";
+    }
     this.bakText = bakError ? null : bak;
     this.loaded = true;
     this.loadingSince = null;
@@ -452,6 +531,29 @@ export class GameHost {
     this.lastSaveMs = now;
     this.stats.loadedFrom = from;
     if (warning) this.stats.warning = warning;
+    if (from === "reload" && v2) {
+      // the same world goes on: so does what the player is told about its save (the restore cue,
+      // its wording and age, failing writes, a dismissed notice)
+      this.origin = typeof h.origin === "string" ? h.origin : null;
+      this.restoreNote = typeof h.restoreNote === "string" ? h.restoreNote : null;
+      if (typeof h.warning === "string") this.stats.warning = h.warning;
+      if (Number.isFinite(h.loadedAt)) this.loadedAt = h.loadedAt;
+      this.failedWrites = Number.isFinite(h.failedWrites) ? h.failedWrites : 0;
+      if (typeof h.noticeSeen === "string") this.saveNoticeSeen = h.noticeSeen;
+    } else {
+      this.origin = from === "reload" ? null : from;
+      this.restoreNote = restoreNote(from, jsonWas, bakWas, kept);
+    }
+    // the collapse countdown and the stage this window's host hid are this window's, whatever world
+    // goes on
+    if (v2 && h.stage && typeof h.stage === "object") {
+      const s = h.stage;
+      if (typeof s.was === "boolean") this.stageWas = s.was;
+      if (typeof s.on === "boolean") this.collapseWas = s.on;
+      if (Number.isFinite(s.idleSince)) this.idleSince = s.idleSince;
+      if (typeof s.hid === "boolean") this.hidStage = s.hid;
+      if (s.idleNoted === null || Number.isFinite(s.idleNoted)) this.idleNoted = s.idleNoted;
+    }
     // A world put in place while loading (tools/check fixtures) stays; it saves over the file.
     if (!this.world || this.world === this.placeholder) this.world = world;
     this.placeholder = null;
@@ -463,20 +565,27 @@ export class GameHost {
       if (!rt.readOnly) rt.dirty = true;
       this.saveSoonAt = now + SAVE_MAJOR_MS;
     }
-    // One writer per VM: the previous build's host never writes again, whether it handed its world
-    // over or not (it declines when another window wrote save.json, or while it cannot read it). A
-    // copy whose reload failed keeps running that build (watch.rs reload), and its host would fight
-    // this one over save.json.
+    // One writer per VM: the previous builds' hosts never write again, whether one handed its world
+    // over or not (it declines when another window wrote save.json), and one still loading never
+    // finishes. A copy whose reload failed keeps running that build (watch.rs reload), and its host
+    // would fight this one over save.json.
     if (prevHost) {
       try { if (typeof prevHost.retire === "function") prevHost.retire(); } catch (e) { /* an old build */ }
+      if (giver && giver !== prevHost) {
+        try { if (typeof giver.retire === "function") giver.retire(); } catch (e) { /* an old build */ }
+      }
     }
-    this.register();
+    this.pred = null; // the earlier builds can go
     this.statusKey = JSON.stringify(this.saveStatus());
     this.version++;
     return true;
   }
 
-  /** Leave this host where the next build finds it after a hot reload (same VM only). */
+  /**
+   * Leave this host where the next build finds it after a hot reload (same VM only). Done when the
+   * load starts (ensure), not when it ends: a reload that lands while this host is still loading
+   * must find it, retire it and take the world from the build before it, or two hosts would run.
+   */
   register() {
     if (this.memoryOnly || this.retired) return;
     try { globalThis[LIVE_KEY] = this; } catch (e) { /* no handover then */ }
@@ -489,11 +598,25 @@ export class GameHost {
     return prev && prev !== this && typeof prev === "object" ? prev : null;
   }
 
+  /**
+   * The newest earlier build's host that finished its load (back-to-back reloads: the build right
+   * before this one may still be loading, and the one before it still has the world), or null.
+   */
+  giver() {
+    let h = this.pred;
+    for (let n = 0; h && typeof h === "object" && h !== this && n < 16; n++) {
+      if (h.retired) return null;
+      if (h.loaded) return h;
+      h = h.pred;
+    }
+    return null;
+  }
+
   /** The previous build's handover (see handover()), or null. */
-  previousBuild(prev, fileText) {
+  previousBuild(prev, fileText, info) {
     if (!prev || prev === this || typeof prev.handover !== "function") return null;
     try {
-      const h = prev.handover(fileText);
+      const h = prev.handover(fileText, info);
       return h && typeof h.text === "string" ? Object.assign({}, h, { host: prev }) : null;
     } catch (e) {
       this.error("hot reload", e);
@@ -502,28 +625,49 @@ export class GameHost {
   }
 
   /**
-   * Called on this (old) host by the next build after a hot reload: this world as save text, if
-   * it is the continuation of `fileText` (the save.json the new host just read), so the progress
-   * since the last save survives the reload. Null otherwise (the new host loads the file).
+   * Called on this (old) host by the next build after a hot reload, with the save.json text that
+   * build just read (null when missing or unreadable) and `info` ({unreadable}). Answers this world
+   * as save text with what the new build needs to decide (load()): whether the world continues
+   * that file, the expected text, the texts this host wrote, whether it could read the file, how
+   * the herd started (the restore cue) and the collapse countdown. Null when it has no world to
+   * give (still loading, retired, checking, read-only). Called with one argument (by an earlier
+   * build's load), it answers only when the world continues this very file, as that build expects.
    */
-  handover(fileText) {
-    if (!this.loaded || this.memoryOnly || this.retired || this.ioBlocked || !this.world || this.world.rt.readOnly) return null;
-    const own = fileText != null && this.ownTexts.includes(fileText);
-    if (this.lastText !== fileText && !own) return null;
-    return { text: serialize(this.world), lastGood: this.lastText === fileText ? this.lastGood : true, ownTexts: this.ownTexts.slice() };
+  handover(fileText, info) {
+    if (!this.loaded || this.memoryOnly || this.retired || !this.world || this.world.rt.readOnly) return null;
+    const continues = this.lastText === fileText || (fileText != null && this.ownTexts.includes(fileText));
+    if (!info || typeof info !== "object") {
+      if (this.ioBlocked || !continues) return null;
+      return { text: serialize(this.world), lastGood: this.lastText === fileText ? this.lastGood : true, ownTexts: this.ownTexts.slice() };
+    }
+    return {
+      v: 2, text: serialize(this.world), continues,
+      lastText: this.lastText, lastGood: this.lastGood, ownTexts: this.ownTexts.slice(), ioBlocked: this.ioBlocked,
+      origin: this.origin, restoreNote: this.restoreNote, warning: this.stats.warning, loadedAt: this.loadedAt,
+      failedWrites: this.failedWrites, noticeSeen: this.saveNoticeSeen,
+      stage: { was: this.stageWas, on: this.collapseWas, idleSince: this.idleSince, hid: this.hidStage, idleNoted: this.idleNoted },
+    };
   }
 
   /**
-   * The next build took this world over: never write again. A save of ours still in flight stands
-   * down when it resumes (a copy whose reload failed keeps this build running, and its pending
-   * write is answered after the handover): its save.json write would otherwise land over the new
-   * host's expected text, and the new host would reload it as someone else's save.
+   * A newer build took over: never write again. A save of ours still in flight stands down when it
+   * resumes (a copy whose reload failed keeps this build running, and its pending write is
+   * answered after the handover): its save.json write would otherwise land over the new host's
+   * expected text, and the new host would reload it as someone else's save. The builds before this
+   * one that it never retired (it was still loading) are retired with it.
    */
   retire() {
+    if (this.retired) return;
     this.retired = true;
     this.saveGen++;
     this.saving = null;
     this.outbox = [];
+    const p = this.pred;
+    this.pred = null;
+    try { if (globalThis[LIVE_KEY] === this) globalThis[LIVE_KEY] = null; } catch (e) { /* nothing registered */ }
+    if (p && p !== this && typeof p.retire === "function") {
+      try { p.retire(); } catch (e) { /* an old build */ }
+    }
   }
 
   /**
@@ -783,7 +927,9 @@ export class GameHost {
     const collapseWas = !!(this.world.state.herd.cfg && this.world.state.herd.cfg.collapse);
     let res;
     try {
-      res = worldCommand(this.world, name, args || {}, now);
+      // with the local time zone, so a milestone a click raises counts toward the local day at
+      // once (the engine would otherwise hold it until the next tick, world.js raiseMilestone)
+      res = worldCommand(this.world, name, args || {}, now, new Date(now).getTimezoneOffset());
     } catch (e) {
       this.error(`command ${name}`, e, true);
       res = { ok: false, error: msgOf(e) };
@@ -816,8 +962,10 @@ export class GameHost {
     if (!fn) return null;
     const world = this.world;
     const m = this.memo;
-    if (m.world !== world || m.rtv !== world.rt.version || m.hv !== this.version || m.map.size > MEMO_MAX) {
+    if (m.world !== world || m.rtv !== world.rt.version || m.hv !== this.version) {
       this.memo = { world, rtv: world.rt.version, hv: this.version, map: new Map() };
+    } else if (m.map.size >= MEMO_MAX) {
+      evictMemo(m.map);
     }
     const key = `${kind}|${argsKey(args)}`;
     const now = Date.now();
@@ -1216,30 +1364,63 @@ export class GameHost {
     const wasOn = this.collapseWas;
     this.stageWas = working;
     this.collapseWas = on;
+    // Whether this window's stage is hidden by this host is this window's own: it starts from the
+    // saved note (a restart), and a save another window wrote (a conflict reload) never changes it.
+    if (this.hidStage == null) this.hidStage = cfg.collapsed === true;
     // nothing works: arm on a transition (something stopped, or the setting was just turned on,
-    // here or in a save another window wrote)
+    // here or in a save another window wrote). A host that starts while nothing works goes on
+    // with the countdown the previous session saved (herd.cfg.idleAt), never a new one.
     if (!on || working) this.idleSince = null;
     else if (wasWorking === true) this.idleSince = nowMs;
     else if ((opts && opts.turnedOn) || wasOn === false) this.idleSince = nowMs - COLLAPSE_AFTER_MS;
+    else if (wasWorking === null && this.idleSince == null && Number.isFinite(cfg.idleAt)) {
+      // (at least a few seconds of this session's own idling: herdr may not have reported the
+      // agents' work yet right after a start)
+      this.idleSince = Math.min(nowMs, Math.max(cfg.idleAt, nowMs - COLLAPSE_AFTER_MS + RESUME_IDLE_MS));
+    }
+    this.noteIdle(world);
     const due = on && !working && this.idleSince != null && nowMs - this.idleSince >= COLLAPSE_AFTER_MS;
     // layout() only when there is something to do: a stage this host holds hidden, or a collapse due
-    if (!cfg.collapsed && !due) return null;
+    const held = this.hidStage === true;
+    if (!held && !due) return null;
     const node = stageNode(live(layout, null));
     if (!node) {
       this.idleSince = null;
+      this.noteIdle(world);
       return null;
     }
     const hidden = node.hidden === true;
-    if (cfg.collapsed) {
+    if (held) {
       if (!hidden) this.holdStage(false); // shown since (by hand, or a layout reset): not ours any more
       else if (!on || working) return this.showStage(node); // turned off, or a hero works again
     }
     if (!due) return null;
     this.idleSince = null;
+    this.noteIdle(world);
     if (hidden) return null; // hidden by hand already: not ours to show later
     if (!this.layoutCmd("layout.hide", node.id)) return null;
     this.holdStage(true);
     return "hidden";
+  }
+
+  /**
+   * Keep the countdown's start in the save (herd.cfg.idleAt, the host's own note like
+   * cfg.collapsed), so a restart inside the minute goes on with it. Written only when this host's
+   * countdown changes: a save another window wrote is never answered with ours (no back and forth).
+   */
+  noteIdle(world) {
+    const v = this.idleSince == null ? null : this.idleSince;
+    if (v === this.idleNoted) return;
+    this.idleNoted = v;
+    const cfg = world.state.herd.cfg;
+    if (!cfg || typeof cfg !== "object") return;
+    if (v == null) {
+      if (cfg.idleAt == null) return;
+      delete cfg.idleAt;
+    } else {
+      cfg.idleAt = v;
+    }
+    world.rt.dirty = true;
   }
 
   showStage(node) {
@@ -1248,8 +1429,13 @@ export class GameHost {
     return "shown";
   }
 
-  /** herd.cfg.collapsed: the stage is hidden by the host, which owes it a layout.show. */
+  /**
+   * The stage is hidden by this host, which owes it a layout.show: this.hidStage (this window), and
+   * herd.cfg.collapsed (saved, so that a restart knows), written soon: herdr keeps the hidden
+   * block hidden across a restart, so a crash before the next periodic save must not lose the note.
+   */
   holdStage(held) {
+    this.hidStage = held;
     const cfg = this.world.state.herd.cfg || {};
     if (!!cfg.collapsed === held) return;
     try {
@@ -1359,8 +1545,10 @@ export class GameHost {
 
   /**
    * save.json reads again. Our world goes on (the file becomes save.bak on the next save), unless
-   * this session never had the herd (a new one started because nothing loaded): then the herd in
-   * the file comes back, and this session's world is kept aside as save.unsaved.
+   * this session never had the herd (a new one started because nothing loaded), or the file is a
+   * save from a newer version (D§13.4: read-only, never written): then the herd in the file comes
+   * back (read-only for a newer one), and this session's world is kept aside as save.unsaved. A
+   * file this host wrote itself (unreadable for a while after a hot reload) is just ours again.
    */
   async recoverRead() {
     const P = this.paths();
@@ -1379,15 +1567,19 @@ export class GameHost {
       this.lastGood = false;
     } else {
       const r = this.decode(cur, Date.now());
-      if (r && r.world && this.stats.loadedFrom === "fresh" && !r.world.rt.readOnly) {
+      const ours = cur === this.lastText || this.ownTexts.includes(cur);
+      if (r && r.world && !ours && (this.origin === "fresh" || r.world.rt.readOnly)) {
         let mine = null;
         try { mine = serialize(world); } catch (e) { /* nothing to keep */ }
         if (mine) await this.keepAside(mine, `${P.dir}/save.unsaved`);
-        if (world !== this.world) return false;
+        if (world !== this.world || this.retired) return false;
         this.world = r.world;
         this.lastText = cur;
-        this.lastGood = true;
+        this.lastGood = !r.world.rt.readOnly;
         this.majorSaved = r.world.rt.majorAt || 0;
+        this.saveSoonAt = null;
+        this.origin = "save";
+        this.restoreNote = null;
         this.stats.loadedFrom = "save";
         this.stats.reloads++;
         this.version++;
@@ -1426,7 +1618,7 @@ export class GameHost {
       notSaving = true;
       lines.push(SAVE_TEXTS.writes);
     }
-    const from = this.stats.loadedFrom;
+    const from = this.origin;
     const restoredFrom = from === "bak" || from === "fresh" || from === "unchecked" ? from : null;
     if (restoredFrom) lines.push(this.restoreNote || SAVE_TEXTS[restoredFrom]);
     if (!lines.length) return null;

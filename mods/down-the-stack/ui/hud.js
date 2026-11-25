@@ -19,7 +19,7 @@
 import { div, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { C, T, MONO, art, zoom, kids } from "./kit.js";
-import { tone, track, thinBar, lift, stripeColor, openHerd, chromeCommand, saveCueEl } from "./party.js";
+import { tone, track, thinBar, lift, stripeColor, openHerd, chromeCommand, saveCueEl, onChrome } from "./party.js";
 
 /** Width tiers (logical px): the words go first, then the sprint label, then the sprint. */
 export const HUD_TIERS = { words: 720, sprintLabel: 560, sprint: 420 };
@@ -70,7 +70,7 @@ function stat(icon, color, value, t, tip) {
  * @param {object} env see the typedef above
  */
 export function renderHud(vm, env) {
-  const t = env.theme ?? T();
+  const t = onChrome(env.theme ?? T());
   const ui = env.ui ?? { size: null };
   const W = ui.size?.w ?? env.width ?? 960;
   const root = h_flex().id("hud").size_full().px(12).gap(14).items_center().overflow_hidden()

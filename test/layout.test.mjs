@@ -525,11 +525,23 @@ describe("mods/down-the-stack/mod.json", () => {
     }
   });
 
-  test("offers the sheet, the Herd panel and calm mode", () => {
+  test("every entry works from any layout: the Herd panel through mod.open, no <mod>.<command>", () => {
+    // herdr lists every mod's palette entries in every layout (palette/main.js modPalettes), but
+    // `<mod>.<command>` reaches shown copies only (mods.rs send_command): picked while another
+    // layout shows, it fails with a "<mod>.<command> failed" toast (window.rs command_error).
+    // mod.open is an app command that opens mod.json's "overlay" anywhere (window.rs "mod.open");
+    // the palette keeps it only when its name is a mod folder with a main.js (modPalettes). The
+    // sheet and calm mode stay in the Herd panel (Roster, Settings) and the layout's keys.
     const entries = Object.fromEntries(manifest.palette.map((p) => [p.title, [p.command, p.args ?? {}]]));
-    assert.deepEqual(entries["Down the Stack: character sheet"], ["down-the-stack.sheet", {}]);
-    assert.deepEqual(entries["Down the Stack: Herd panel"], ["down-the-stack.herd", {}]);
-    assert.deepEqual(entries["Down the Stack: calm mode"], ["down-the-stack.calm", {}]);
+    assert.deepEqual(entries["Down the Stack: Herd panel"], ["mod.open", { name: MOD }]);
+    assert.ok(fs.existsSync(path.join(REPO, "mods", MOD, "main.js")), "mod.open names this mod folder");
+    for (const p of manifest.palette) {
+      assert.ok(APP_COMMANDS[p.command], `${p.title}: ${p.command} reaches shown copies only (fails outside this layout)`);
+      assert.notEqual(p.command, "layout.toggle", `${p.title}: names a node of this layout only`);
+    }
+    // what the Herd panel holds, so the palette finds it by these words too
+    for (const w of ["roster", "settings", "sheet", "calm"]) assert.ok(manifest.palette[0].words.includes(w), w);
+    assert.equal(manifest.overlay.props.role, "herd", "mod.open opens the Herd panel");
   });
 
   test("no entry duplicates one herdr's palette builds itself (herdr drops those silently)", () => {
@@ -582,9 +594,10 @@ describe("keys.example.json", () => {
     for (const k of Object.keys(keys[`layout:${name}`])) assert.ok(!taken.has(normKey(k)), `${k} is a herdr default`);
   });
 
-  test("actions are valid: layout toggles of real nodes, or the mod's commands the palette also offers", () => {
-    const manifest = readJson(path.join(MOD_DIR, "mod.json"));
-    const offered = new Set(manifest.palette.map((p) => p.command));
+  test("actions are valid: layout toggles of real nodes, or the mod's own commands (this layout's section only)", () => {
+    // `<mod>.<command>` reaches shown copies only: bound in this layout's section it fires only
+    // while this layout (and so a copy of the mod) shows.
+    assert.deepEqual(Object.keys(keys), [`layout:${name}`]);
     for (const [k, action] of Object.entries(keys[`layout:${name}`])) {
       assert.equal(typeof action, "string", `${k}: string actions only`);
       const [cmd, value] = action.split(/:(.*)/s);
@@ -596,7 +609,6 @@ describe("keys.example.json", () => {
         assert.ok(cmd.startsWith(`${MOD}.`), `${k}: unknown action ${action}`);
         assert.ok(MOD_COMMANDS.has(cmd.slice(MOD.length + 1)), `${k}: ${cmd} is not a ${MOD} command`);
         assert.equal(value, undefined, `${k}: mod commands take no argument`);
-        assert.ok(offered.has(cmd), `${k}: ${cmd} should also be in the palette`);
       }
     }
   });
@@ -630,7 +642,9 @@ describe("the mod folder name (herdr shows it to players)", () => {
   });
 
   test("every <mod>.<command> id parses back to this mod the way herdr parses it", () => {
-    assert.ok(ids.length >= 4, ids.join(", "));
+    assert.ok(ids.length >= 3, ids.join(", "));
+    // and the palette's mod.open names this folder (palette/main.js modPalettes drops one that does not)
+    for (const p of manifest.palette.filter((e) => e.command === "mod.open")) assert.equal(p.args.name, MOD);
     for (const id of ids) {
       // window.rs run_as: `name:value` shorthand first (split_once(':')), then a mod's
       // `<mod>.<command>` (split_once('.')) → mods::send_command(m, c)

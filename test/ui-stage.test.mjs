@@ -365,6 +365,14 @@ test("clicks: a room header pins the room's heroes (unpins when all are), the bo
   const { mod: m2, host: h2 } = await mountStage(scenarios.promoted);
   m2.fire(`${pinned.key}/hdr`);
   assert.deepEqual(h2.log.commands.at(-1), { name: "pinMap", args: { heroId: pinned.pin.heroIds.at(-1), mapId: null } });
+  // the pinned room's header shows its pin (head and needle) before the title; the others none
+  const mark = m2.node(`${pinned.key}/pin`);
+  assert.ok(mark, "a pinned room draws its pin");
+  assert.equal(mark.parent.id, `${pinned.key}/hdr`);
+  assert.equal(mark.parent.children.indexOf(mark), 0, "before the title");
+  assert.equal(mark.children.length, 1, "two elements: head and needle");
+  for (const r of scenarios.promoted.rooms) if (r !== pinned) assert.equal(m2.node(`${r.key}/pin`), null, r.key);
+  assert.equal(mod.findAll((n) => typeof n.id === "string" && n.id.endsWith("/pin")).length, 0, "midgame: nothing pinned");
   // the arena's header is not a pin target
   const { mod: m3, host: h3 } = await mountStage(scenarios.boss);
   const arena = scenarios.boss.rooms.find((r) => r.key.startsWith("room:arena:"));
@@ -445,8 +453,50 @@ test("a loot pillar on a short stage (120 px) starts below the header band, its 
       assert.ok(top >= 18 && Math.abs(top + h - ground) < 0.01, `${id} @${height}: ${top}..${top + h}, ground ${ground}`);
     }
     const label = methodsOf(mod.node(`${p.key}/t`), "top").at(-1)[0];
-    assert.ok(label >= 18 && label + 12 <= ground, `label @${height}: ${label}`);
-    if (height === 200) assert.equal(label, 24, "unchanged on a 200 px stage");
+    assert.ok(label >= 18 && label + 14 <= ground, `label @${height}: ${label}`);
+    if (height === 200) assert.equal(label + 7, 30, "its middle unchanged on a 200 px stage");
+  }
+});
+
+test("a loot pillar's rarity name sits on a dark plate, painted over the damage numbers", async () => {
+  const { contrast } = await import("../mods/down-the-stack/ui/party.js");
+  for (const height of [200, 120]) {
+    const vm = makeScenario("boss-won", { height });
+    const p = vm.fx.find((f) => f.kind === "pillar");
+    // a damage number rising through the column, at the label's height
+    vm.fx = [...vm.fx, { key: "fx:n:over", kind: "num", x: p.x, y: 20 - (height - 200) + 2, text: "1.2k", color: null, age: 0, dx: 0, dy: -28, size: 11 }];
+    const { mod } = await mountStage(vm, { height });
+    const label = mod.node(`${p.key}/t`);
+    const bg = methodsOf(label, "bg").at(-1)?.[0];
+    assert.match(String(bg), /^#0B0A12[0-9A-Fa-f]{2}$/, `@${height}: the stage's dark plate (${bg})`);
+    assert.ok(parseInt(bg.slice(7, 9), 16) / 255 >= 0.8, "nearly opaque");
+    // the rarity colour on that plate, over the lightest zone sky, reads (it was 1.4–1.6:1 bare)
+    const plate = (sky) => { const a = parseInt(bg.slice(7, 9), 16) / 255; return "#" + [1, 3, 5].map((i) => Math.round(parseInt(sky.slice(i, i + 2), 16) * (1 - a) + parseInt(bg.slice(i, i + 2), 16) * a).toString(16).padStart(2, "0")).join(""); };
+    const fg = methodsOf(label, "text_color").at(-1)[0];
+    for (const sky of ["#f6ca8c", "#dcd7a9", "#dccecb", "#ffffff"]) assert.ok(contrast(fg.slice(0, 7), plate(sky)) >= 4.5, `${fg} on ${plate(sky)}`);
+    // painted after the number (later siblings paint on top)
+    const kids = mod.node("stage-scene").children.map((c) => c.id);
+    assert.ok(kids.indexOf(`${p.key}/t`) > kids.indexOf("fx:n:over"), `@${height}: label over the number`);
+    assert.ok(kids.indexOf(p.key) < kids.indexOf("fx:n:over"), "the light column stays under it");
+  }
+});
+
+test("the level-up column pulses at most once a second and starts below the header band on short stages", async () => {
+  for (const height of [200, 120]) {
+    const vm = makeScenario("midgame", { height });
+    const h = vm.heroes[0];
+    vm.fx = [...vm.fx, { key: "fx:lvl:1", kind: "levelup", x: h.x, y: 160 - 48, text: "LEVEL UP", color: null, age: 0 }];
+    const { mod } = await mountStage(vm, { height });
+    const col = mod.node("fx:lvl:1");
+    assert.ok(col, `@${height}`);
+    // herdr's loop period is one whole there-and-back (materialize.rs apply_loops): ≥ 1000 ms is ≤ 1 Hz
+    for (const [name, args] of col.methods) if (name === "loop") assert.ok(args[3] >= 1000, `period ${args[3]}`);
+    assert.ok(col.methods.some((m) => m[0] === "loop"), "it still pulses");
+    const top = methodsOf(col, "top").at(-1)[0];
+    const hh = methodsOf(col, "h").at(-1)[0];
+    assert.ok(top >= 18, `@${height}: column top ${top} below the 18 px header band`);
+    assert.ok(Math.abs(top + hh - (height - 200 + 160)) < 0.01, `@${height}: down to the ground`);
+    assert.ok(methodsOf(mod.node("fx:lvl:1/t"), "top").at(-1)[0] >= 18, "its label too");
   }
 });
 
@@ -554,10 +604,12 @@ test("header notes stay inside the header band (D§11.15): truncated into a head
         const l = methodsOf(n, "left").at(-1)[0];
         const w = methodsOf(n, "w").at(-1)[0];
         assert.ok(w >= 60 || w >= String(note.text).length * 6, `${where}: ${w} px`);
-        // never over a room title: right of the header's contents, inside one room
+        // never over a room title: right of the header's contents, inside one room, or in the
+        // Localhost scenery beside the rooms (no title there)
         const room = vm.rooms.find((r) => l >= r.x - 0.5 && l + w <= r.x + r.w + 0.5);
-        assert.ok(room, `${where}: inside one room's header`);
-        if (vm.boss && height < 160) assert.ok(!room.key.startsWith("room:arena:"), `${where}: not over the slim boss HUD`);
+        const scenery = !vm.rooms.some((r) => l < r.x + r.w - 0.5 && l + w > r.x + 0.5) && (!vm.overflow || l + w <= vm.overflow.x + 0.5);
+        assert.ok(room || scenery, `${where}: inside one room's header or the scenery`);
+        if (room && vm.boss && height < 160) assert.ok(!room.key.startsWith("room:arena:"), `${where}: not over the slim boss HUD`);
       }
     }
   }
@@ -566,6 +618,24 @@ test("header notes stay inside the header band (D§11.15): truncated into a head
   const { mod } = await mountStage(vm, { height: 120 });
   const n = mod.node(note.key);
   assert.ok(!n || methodsOf(n, "top").at(-1)[0] === 1);
+});
+
+test("a lone hero's header note uses the scenery beside its slot instead of truncating (the first hire)", async () => {
+  // the first hire: one hero, its slot at the 320 px clamp in the middle of a 1171 px stage
+  const base = makeScenario("first-day", { width: 1171, height: 200 });
+  const r = { ...base.rooms[0], x: 425.5, w: 320 };
+  const h = { ...base.heroes[0], x: r.x + 160 };
+  Object.assign(base, { rooms: [r], heroes: [h], chests: [], mobs: (base.mobs ?? []).slice(0, 1).map((m) => ({ ...m, x: h.x + 56 })), fx: [], signs: [] });
+  assert.ok(r.x > 200 && base.width - (r.x + r.w) > 200, "scenery on both sides");
+  const note = { key: "note:hire", text: "New hire: Tamsin the Composable", color: "#FFF4D6" };
+  const { mod } = await mountStage({ ...base, headerNote: note }, { width: 1171 });
+  const n = mod.node(note.key);
+  assert.ok(n, "shown");
+  const l = methodsOf(n, "left").at(-1)[0];
+  const w = methodsOf(n, "w").at(-1)[0];
+  assert.ok(w >= note.text.length * 6 + 24 - 0.5, `whole: ${w} px`);
+  assert.ok(l + w <= r.x + 0.5 || l >= r.x + r.w - 0.5, "beside the room, not over its title");
+  assert.ok(Math.abs(l + w - (r.x - 4)) < 0.5 || Math.abs(l - (r.x + r.w + 4)) < 0.5, "next to the slot");
 });
 
 test("stillness: only campfire glows and blocked bubbles move", async () => {
@@ -840,6 +910,9 @@ test("the last levels merge status into fewer elements and never drop it (swampe
       const n = h.forklings.length + h.forklingExtra;
       const blocked = h.forklings.find((f) => f.bubble);
       assert.equal(textOf(counter), blocked ? `+${n} !` : `+${n}`);
+      // clear of the hero's 40 px body at its scale (it overlapped it by 2-4 px)
+      const cl = methodsOf(counter, "left").at(-1)[0];
+      assert.ok(cl >= h.x + 20 * (h.scale ?? 1) || cl + methodsOf(counter, "w").at(-1)[0] >= width - 1.5, `${where}: ${h.key} counter at ${cl}, body to ${h.x + 20 * (h.scale ?? 1)}`);
       assert.equal(methodsOf(counter, "text_color").at(-1)[0], blocked ? "#F2A93B" : methodsOf(counter, "text_color").at(-1)[0]);
       assert.ok(mod.fire(counter).stopped);
       assert.deepEqual(lastRun(), { name: "terminal.peek", args: { terminal: (blocked ?? h.forklings[0]).address } });

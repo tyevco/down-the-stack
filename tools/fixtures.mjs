@@ -40,11 +40,33 @@ const SHELL = { pane: "p_sh", terminal: "t_sh", title: "zsh", program: MOCK_PROG
 const MODPANE = { pane: "p_mod", terminal: null, mod: "files", title: "Files" };
 
 /**
+ * Text whose UTF-16 unit `at` starts an emoji (a surrogate pair): cut at `at + 1` units, it would
+ * end in half a pair, which herdr's bridge refuses (rquickjs String::to_string). `glyph` leads it
+ * the way Claude Code's titles start ("✳ ").
+ */
+export function emojiAcross(at, glyph = "") {
+  const words = "Wire the release checklist into the deploy train and ship it now ";
+  let head = "";
+  while (head.length < at) head += words;
+  return `${glyph}${head.slice(0, at)}\u{1F680} then tag the release`;
+}
+
+/**
  * herdr live data (tools/mock/samples.mjs shapes) for a demo snapshot.
- * extra: { agents: [AgentInfo], shell: boolean, modPane: boolean }
+ * extra: { agents: [AgentInfo], shell: boolean, modPane: boolean, cut: boolean (emoji across the
+ * engine's cuts: a title at 40 units, a pane name at 40, a tab and a space name at 32) }
  */
 export function liveFromSnapshot(snap, extra = {}) {
   const rows = [...(snap?.agents ?? []), ...(extra.agents ?? [])].map((a) => ({ ...a }));
+  if (extra.cut && rows.length >= 3) {
+    rows[0].title = emojiAcross(39, "\u2733 ");
+    rows[1].pane_name = emojiAcross(39);
+    rows[2].tab_name = emojiAcross(31);
+    // (a space's name is its heroes' seat, D§3.1: cutWorld saves their seats the way an older
+    // build cut that name, so the heroes stay seated once loadWorld mends them)
+    const space = rows[0].space;
+    for (const a of rows) if (a.space === space) a.space_name = emojiAcross(31);
+  }
   const focus = snap?.focusedTerminal ?? null;
   for (const a of rows) a.focused = focus != null && a.address === focus;
   const agents = rows;
@@ -60,7 +82,8 @@ export function liveFromSnapshot(snap, extra = {}) {
   const spaceOrder = [];
   const bySpace = new Map();
   for (const sp of snap?.spaces ?? []) {
-    if (!bySpace.has(sp.id)) { bySpace.set(sp.id, { id: sp.id, name: sp.name, tabs: new Map() }); spaceOrder.push(sp.id); }
+    const name = extra.cut && rows.length >= 3 && sp.id === rows[0].space ? rows[0].space_name : sp.name;
+    if (!bySpace.has(sp.id)) { bySpace.set(sp.id, { id: sp.id, name, tabs: new Map() }); spaceOrder.push(sp.id); }
   }
   for (const a of agents) {
     if (!bySpace.has(a.space)) { bySpace.set(a.space, { id: a.space, name: a.space_name, tabs: new Map() }); spaceOrder.push(a.space); }
@@ -233,6 +256,16 @@ export const roles = [
     },
   },
 
+  // titles, pane, tab and space names with an emoji across the engine's cuts (40 / 32 UTF-16
+  // units), and a save an older build wrote with such halves in a seat, a chest title and the
+  // journal (loadWorld mends them): nothing herdr's bridge refuses may reach an element
+  onDemo("stage-emoji-cut", "mid", { role: "stage" }, { widths: [960], extra: { cut: true }, world: cutWorld }),
+  onDemo("party-emoji-cut", "mid", { role: "party" }, { widths: [248], extra: { cut: true }, world: cutWorld }),
+  onDemo("nameplate-emoji-cut", "mid", { role: "nameplate", pane: "p_t1", terminal: "t1" }, { widths: [700], extra: { cut: true }, world: cutWorld }),
+  onDemo("nameplate-emoji-name", "mid", { role: "nameplate", pane: "p_t2", terminal: "t2" }, { widths: [700], extra: { cut: true }, world: cutWorld }),
+  onDemo("sheet-emoji-cut", "mid", { role: "sheet", overlay: "o1", heroId: 1, tab: "journal" }, { ...DIALOG, extra: { cut: true }, world: cutWorld }),
+  onDemo("herd-emoji-cut", "mid", { role: "herd", overlay: "o2", tab: "digest" }, { ...DIALOG, extra: { cut: true }, world: cutWorld }),
+
   // the optional HUD strip
   onDemo("hud", "mid", { role: "hud" }, { widths: [960, 1600] }),
   onDemo("hud-empty", "empty", { role: "hud" }, { widths: [960] }),
@@ -314,6 +347,27 @@ function lootWorld(glow) {
   };
 }
 
+/**
+ * The "mid" world as an older build saved it once its first space was renamed with an emoji across
+ * the seat's 32 units (liveFromSnapshot extra.cut): that build cut the seats through the emoji,
+ * and a journal line through one at 40 units. Loaded back through loadWorld, which mends both
+ * (the seats then match the space again, as normSeat now cuts them).
+ */
+async function cutWorld({ nowMs, mod }) {
+  const D = await mod.import("./game/demo.js");
+  const W = await mod.import("./game/world.js");
+  const now = nowMs ?? NOW;
+  const { world, snapshot } = D.demoWorld("mid", now);
+  const oldCut = (s, n) => s.trim().toLowerCase().slice(0, n); // ends in a lone high surrogate
+  const was = String(snapshot.agents[0]?.space_name ?? "").trim().toLowerCase();
+  for (const h of world.state.heroes) {
+    if (typeof h.seat === "string" && was && h.seat.startsWith(`${was}/`)) h.seat = `${oldCut(emojiAcross(31), 32)}/${h.seat.slice(was.length + 1)}`;
+  }
+  const first = world.state.heroes[0];
+  world.state.herd.log.push([now - 60000, "note", first ? first.id : 1, emojiAcross(39).slice(0, 40), 0]);
+  return W.loadWorld(W.serialize(world), { nowMs: now }).world;
+}
+
 /** A role setup that stops the host's pump (the preview and check tick 2-3 s): the world stays as built. */
 function freeze({ host }) {
   if (host) host.retired = true;
@@ -327,10 +381,10 @@ function saveTrouble(kind) {
       host.world.rt.readOnly = true;
       host.stats.warning = "Save is from a newer version (v2); opened read-only";
     } else if (kind === "restored") {
-      host.stats.loadedFrom = "bak";
+      host.origin = host.stats.loadedFrom = "bak";
     } else if (kind === "unreadable") {
       host.ioBlocked = true;
-      host.stats.loadedFrom = "bak";
+      host.origin = host.stats.loadedFrom = "bak";
       host.lastSaveMs = Date.now(); // the next re-read is 30 s away, after the check
     }
     host.version++;

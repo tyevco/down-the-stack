@@ -11,6 +11,7 @@ import * as Hr from "../mods/down-the-stack/game/heroes.js";
 import * as I from "../mods/down-the-stack/game/items.js";
 import * as W from "../mods/down-the-stack/game/world.js";
 import * as A from "../mods/down-the-stack/game/agents.js";
+import * as AP from "../mods/down-the-stack/game/autopilot.js";
 import { encodeState, decodeState, SAVE_VERSION, crc32 } from "../mods/down-the-stack/game/save.js";
 
 const T0 = 1_790_000_000_000;
@@ -89,6 +90,37 @@ describe("create, load, serialize", () => {
     assert.equal(W.serialize(world), t1);
     assert.deepEqual(world.state, decodeState(t1).state);
     assert.equal(world.rt.tick, w.state.herd.tick);
+  });
+
+  test("loadWorld mends half emoji an older build cut into seats, chest titles and journal lines", () => {
+    const w = W.createWorld({ nowMs: T0, seed: 2 });
+    run(w, T0, 3, () => [ag("t1", "working", 1, { space_name: "Payments platform rewrite 2026 🚀" })]);
+    const h = w.state.heroes[0];
+    assert.equal(h.seat, "payments platform rewrite 2026 /claude", "a new seat never ends in half an emoji");
+    // what the old cut saved: a lone high surrogate at the cut
+    h.seat = "payments platform rewrite 2026 \ud83d/claude";
+    h.pend = [{ min: 10, fmin: 0, title: "Wire the release checklist into CI now \ud83d", at: T0, sealFactor: 1 }];
+    w.state.herd.log.push([T0, "ship", h.id, "Wire the release checklist into CI now \ud83d", 1]);
+    w.state.herd.log.push([T0, "ship", h.id, "Ship 🚀 it", 1]);
+    const back = W.loadWorld(W.serialize(w), { nowMs: T0 + 3000 }).world;
+    const b = back.state.heroes[0];
+    assert.equal(b.seat, "payments platform rewrite 2026 /claude");
+    assert.equal(b.pend[0].title, "Wire the release checklist into CI now");
+    const texts = back.state.herd.log.slice(-2).map((e) => e[3]);
+    assert.deepEqual(texts, ["Wire the release checklist into CI now", "Ship 🚀 it"], "whole emoji stay");
+    for (const e of back.state.herd.log) assert.ok(String(e[3]).isWellFormed());
+    // the hero still sits in its space's seat
+    W.tick(back, snap(T0 + 4000, [ag("t9", "working", 1, { space_name: "Payments platform rewrite 2026 🚀", space: "s7" })]));
+    assert.equal(back.rt.bind.get("t9"), b.id);
+  });
+
+  test("loadWorld drops Contractor ids from the paused boss fight (Contractors are numbered afresh)", () => {
+    const w = W.createWorld({ nowMs: T0, seed: 2 });
+    run(w, T0, 2, () => [ag("t1", "working")]);
+    const id = w.state.heroes[0].id;
+    w.state.herd.fight = { k: "b", i: 0, ids: [id, -1, -2], hl: [-2], t: 10, ph: 1, p: [[0, 100, 500]], m: {}, pool: 500, dl: 400, sq: 0 };
+    const f = W.loadWorld(W.serialize(w), { nowMs: T0 + 2000 }).world.state.herd.fight;
+    assert.deepEqual([f.ids, f.hl, f.n], [[id], [], 3], "the boss keeps the pool it was given for three");
   });
 
   test("a newer save loads read-only with a warning: no accrual, no commands", () => {
@@ -727,6 +759,44 @@ describe("commands (ARCHITECTURE §3.5)", () => {
     assert.equal(W.command(w, "setClass", { heroId: 999, cls: 1 }).error, "No such hero");
   });
 
+  test("respec, setClass and autoLearn re-spend points only while auto-learn is on for the herd (and the autopilot master switch)", () => {
+    for (const mode of ["on", "learn off", "master off"]) {
+      const { w, h1, h2 } = cmdWorld();
+      const cfg = w.state.herd.cfg;
+      if (mode === "learn off") assert.equal(W.command(w, "setting", { key: "auto.learn", value: false }).ok, true);
+      if (mode === "master off") assert.equal(W.command(w, "setting", { key: "auto", value: false }).ok, true);
+      assert.equal(autoOn(w.state, "learn"), mode === "on");
+      w.state.herd.snip = 1e6;
+      const spent = (h) => h.sp.reduce((a, b) => a + b, 0);
+      for (const h of [h1, h2]) Object.assign(h, { L: 30, cls: 3, rev: [1, 0], sp: Hr.autoRanks(3, 30, true).slice(), spFree: 0 });
+      const total = spent(h1);
+      // a paid respec: the person wants to place the points by hand
+      assert.equal(W.command(w, "respec", { heroId: h1.id }, T0 + 9000).ok, true, mode);
+      assert.equal(spent(h1) + h1.spFree, total, `${mode}: nothing lost`);
+      assert.equal(spent(h1), mode === "on" ? total : 0, `${mode}: respec`);
+      // a Career Change from Lv 20 (25 x L Snippets)
+      assert.equal(W.command(w, "setClass", { heroId: h2.id, cls: "refactorer" }).ok, true, mode);
+      assert.equal(spent(h2), mode === "on" ? total : 0, `${mode}: setClass`);
+      // the hero's own switch turned back on: the herd's switch still rules
+      h1.autoLearn = false;
+      const r = W.command(w, "autoLearn", { heroId: h1.id, on: true });
+      assert.equal(r.ok, true);
+      assert.equal(r.msg, {
+        on: "Auto-learn on", "learn off": "Auto-learn on, but it is off for the herd (Settings)", "master off": "Auto-learn on, but the Autopilot is off (Settings)",
+      }[mode], `${mode}: the sheet's flash says why nothing was spent`);
+      assert.equal(h1.autoLearn, true);
+      assert.equal(spent(h1), mode === "on" ? total : 0, `${mode}: autoLearn on`);
+      // the points wait for the herd's switch: the next autopilot pass spends them once it is on
+      if (mode !== "on") {
+        cfg.autopilot = true;
+        cfg.auto.learn = true;
+        AP.autopilot(w, W.makeEmitter(w));
+        assert.equal(spent(h1), total, `${mode}: spent once the switch is back on`);
+        assert.equal(spent(h2), total);
+      }
+    }
+  });
+
   test("pinMap", () => {
     const { w, h1 } = cmdWorld();
     assert.equal(W.command(w, "pinMap", { heroId: h1.id, mapId: "7-7" }).error, "No such map");
@@ -788,6 +858,22 @@ describe("commands (ARCHITECTURE §3.5)", () => {
     assert.ok(!w.rt.live.has(h1.id));
     run(w, now, 2, () => agents);
     assert.ok(w.rt.bind.has("t1"), "the agent plays on with another hero");
+    assert.deepEqual(w.rt.errors, []);
+  });
+
+  test("retire takes the hero out of a paused boss fight; one nobody is left in ends as a Postmortem", () => {
+    const { w, h1, h2, now } = cmdWorld();
+    h1.L = 35;
+    h2.L = 35;
+    const herd = w.state.herd;
+    const paused = () => ({ k: "b", i: 2, ids: [h1.id, h2.id], t: 10, ph: 1, p: [[0, 1000, 5000]], m: {}, pool: 5000, dl: 4000, sq: 0, hl: [h2.id] });
+    herd.fight = paused();
+    assert.equal(W.command(w, "retire", { heroId: h1.id }, now).ok, true);
+    assert.deepEqual([herd.fight.ids, herd.fight.hl, herd.fight.n], [[h2.id], [h2.id], 2], "the pool stays sized for two");
+    assert.equal(W.command(w, "retire", { heroId: h2.id }, now).ok, true);
+    assert.equal(herd.fight, null, "nobody left: closed");
+    assert.ok(herd.log.some((e) => e[1] === "boss" && /Postmortem/.test(e[3])), "as a Postmortem");
+    assert.ok(herd.wounds["2"][0] > 0, "its Wounds are kept");
     assert.deepEqual(w.rt.errors, []);
   });
 

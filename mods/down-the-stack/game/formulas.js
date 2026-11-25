@@ -433,3 +433,36 @@ export function fmtDuration(sec, opts = {}) {
   if (h < 24) return `${h}h ${String(m).padStart(2, "0")}m`;
   return `${Math.floor(h / 24)}d ${String(h % 24).padStart(2, "0")}h`;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Text that goes to herdr
+// ---------------------------------------------------------------------------------------------
+
+// A surrogate pair, or a surrogate on its own (half of an emoji). Without the u flag a regex
+// matches UTF-16 units, so one pattern finds both.
+const SURROGATES = /[\uD800-\uDBFF][\uDC00-\uDFFF]|[\uD800-\uDFFF]/g;
+const ANY_SURROGATE = /[\uD800-\uDFFF]/;
+
+/**
+ * `s` cut to at most `n` UTF-16 units, never through the middle of a character: a cut that would
+ * keep only the first half of a surrogate pair (an emoji) stops before it. herdr turns every text
+ * a mod hands it into UTF-8 (rquickjs from_utf8), which rejects a lone surrogate: the call throws
+ * and the whole role renders as its error chip.
+ */
+export function cutText(s, n) {
+  const t = String(s ?? "");
+  if (t.length <= n) return t;
+  const c = t.charCodeAt(n - 1);
+  return t.slice(0, c >= 0xd800 && c <= 0xdbff ? n - 1 : n);
+}
+
+/**
+ * `s` with every lone surrogate (half of an emoji) replaced by `repl` (default U+FFFD, the
+ * replacement character; "" drops it); well-formed text comes back as it is. A regex rather than
+ * String.prototype.toWellFormed, which an older QuickJS lacks.
+ */
+export function wellFormed(s, repl = "�") {
+  const t = String(s ?? "");
+  if (!ANY_SURROGATE.test(t)) return t;
+  return t.replace(SURROGATES, (m) => (m.length === 2 ? m : repl));
+}

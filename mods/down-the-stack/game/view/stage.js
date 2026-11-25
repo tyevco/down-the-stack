@@ -80,6 +80,7 @@ const COL = {
   num: "#FFFFFFD9", crit: "#FFF4D6", abs: "#9EE6FF",
 };
 const SIZE_PX = { S: 28, M: 40, L: 56 };
+const CHEST_BODY_HALF = 20; // half a Termling's 40 px body at scale 1 (ui/termling.js)
 const FACE = { questing: ">_", waiting: "o_o", shipped: "^_^", resting: "-_-", supervising: ">_", crashed: ":(" };
 const WORD = { questing: "Questing", waiting: "Waiting for you", shipped: "Shipped", resting: "Resting", supervising: "Supervising", crashed: "Rebooting" };
 const DOT = { questing: COL.working, crashed: COL.hp, supervising: COL.working, waiting: COL.blocked, shipped: COL.done, resting: COL.idle };
@@ -169,8 +170,8 @@ export function programIconOf(program) {
  * Fresh Eyes ×1.5 · Party +12% · Herd +23% · Shift: 3h 12m today (full rate until 4h)"; the same
  * text the sidebar and nameplate tooltips show. Empty string without numbers.
  */
-export function whyText(why) {
-  return whyLine(why);
+export function whyText(why, level) {
+  return whyLine(why, { level });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -344,6 +345,15 @@ function build(world, memo, wm, W, H) {
   const mobPos = new Map(); //   mob uid -> {x, top, showHp, size, mid}
   const chestPos = new Map(); // heroId -> {x, top}
 
+  // the rooms' heroes, before their tooltips: a pinned hero's says how to unpin it, and the room
+  // header's click unpins only a room whose heroes are all pinned (pinVM; else it pins them all)
+  const groups = roomGroups(L);
+  ctx.headerUnpins = new Set();
+  for (const g of groups) {
+    const pin = pinVM(g);
+    if (pin && pin.pinned) for (const id of pin.heroIds) ctx.headerUnpins.add(id);
+  }
+
   // home slots (participants' adjacent home slots in one room share one sign, centred on them)
   let run = null; // {sign, from, to, roomOf}
   for (const s of L.slots) {
@@ -390,7 +400,7 @@ function build(world, memo, wm, W, H) {
   // a Holo Rubber Duck's kill: its Duck Chest pops where it stood (D§9.7, D§11.8)
   duckChests(ctx, chests, heroPos, fxs);
 
-  const rooms = buildRooms(ctx, L, fight);
+  const rooms = buildRooms(ctx, L, fight, groups);
   const fx = buildFx(ctx, fxs, heroPos, mobPos, chestPos, boss);
 
   let stillness = true;
@@ -614,9 +624,14 @@ function slotContents(ctx, e, s, L, out) {
   let chestX = null;
   if (pend) {
     if (st === "shipped" || st === "resting") chestX = Math.max(sx + 0.42 * w, hx + 34 * scale);
-    // behind a working hero: the 40 px ribbon (chest x ± 20) ends left of the screen (hero x − 14)
-    // and the crate; only a slot under ~210 px cannot keep it fully clear
-    else chestX = Math.max(sx + 14, hx - 38 * scale);
+    else {
+      // behind a working hero: the 40 px ribbon (chest x ± 20) ends left of the screen (hero x − 14)
+      // and the crate. A slot under ~210 px cannot keep the 28 px chest clear at the hero's usual
+      // place, so there the hero steps right until the chest clears its body (but for 4 px); a hero
+      // with Forklings keeps its place (its row of sub-agents starts after it)
+      chestX = Math.max(sx + 14, hx - 38 * scale);
+      if (!forks.length) hx = Math.max(hx, chestX + 14 + CHEST_BODY_HALF * scale - 4);
+    }
   }
 
   // Forklings from 0.30w (after the chest when the hero sits by one), as many as fit
@@ -636,7 +651,14 @@ function slotContents(ctx, e, s, L, out) {
   const vm = heroVM(ctx, e, { x: hx, scale, slot: { x: r1(sx), w: r1(w) }, plateMax: w - 12, forklings: fkVMs, extra, inArena: false });
   if (st === "resting") vm.campfire = { x: r1(sx + 0.08 * w), y: GROUND };
   if (review && st !== "waiting") vm.tag = { text: "REVIEW", color: COL.hp };
-  const lanePos = w < 180 ? [0.58, 0.84] : [0.52, 0.70, 0.88];
+  let lanePos = w < 180 ? [0.58, 0.84] : [0.52, 0.70, 0.88];
+  // the front lane stays clear of a hero that stepped right for its chest (a large mob's half
+  // width past the hero's body); the lanes behind move with it, and one pushed out of the slot goes
+  const front = (hx - sx + (CHEST_BODY_HALF + SIZE_PX.L / 2) * scale + 2) / w;
+  if (front > lanePos[0]) {
+    const d = front - lanePos[0];
+    lanePos = lanePos.map((p) => p + d).filter((p, j) => j === 0 || p * w + (SIZE_PX.L / 2) * scale <= w);
+  }
   out.heroes.push(vm);
   out.heroPos.set(e.id, posOf(vm, { x: r1(sx + lanePos[0] * w), top: GROUND - 40 }));
 
@@ -832,14 +854,18 @@ function heroTooltip(ctx, e, career, inArena) {
   const lines = [];
   lines.push(`${hero.name} · Lv ${hero.L} ${career.title}${hero.contractor ? " · Contractor" : ""}`);
   const xpPct = hero.L >= T.levelCap ? 100 : Math.floor(frac(hero.xp, need(hero.L)) * 100);
-  const where = inArena && ctx.fight ? ctx.fight.f.name : mapLabel(state, e.mapId);
+  // pinned: the room header unpins a room whose heroes are all pinned; in a mixed room its click
+  // pins them all, so there the sheet's Map card is the way back to auto
+  const pinned = Boolean(hero.pinMap) && hero.pinMap === e.mapId;
+  const unpin = ctx.headerUnpins && ctx.headerUnpins.has(e.id) ? "click the room header to unpin" : "Auto on the Career tab's Map card unpins";
+  const where = inArena && ctx.fight ? ctx.fight.f.name : `${mapLabel(state, e.mapId)}${pinned ? ` (pinned: ${unpin})` : ""}`;
   lines.push(`HP ${fmtNum(Math.max(0, live.hp || 0))}/${fmtNum(live.maxHp || 0)} · XP ${xpPct}% · ${where}`);
   const since = Math.max(0, tick - (st === "waiting" && live.blockedSince != null ? live.blockedSince : live.statusSince || 0));
   // while a task is open, the label the party and pane header give it (chrome.taskLabel): never a
   // bare program, shell or path title
   const quest = live.task ? taskLabel(live) : "";
   lines.push(`${WORD[st] || "Resting"} ${fmtDuration(since)}${quest ? ` · ${quest}` : ""}`);
-  const why = whyText(live.why);
+  const why = whyText(live.why, hero.L);
   if (why) lines.push(why);
   if ((hero.fe || 0) >= 1) lines.push(`Fresh Eyes ${fmtDuration(Math.floor(hero.fe) * 60)} banked (×${T.freshEyes.xpMult} kill XP while questing)`);
   const forks = live.forklings || [];
@@ -1117,7 +1143,8 @@ function bossTooltip(ctx, f, def) {
   const lines = [`${f.name} · Lv ${f.level}${f.kind === "backlog" ? ` · Backlog floor ${f.floor}` : ""}`];
   if (def && def.flavor) lines.push(def.flavor);
   if (def && def.enrage) lines.push(`Enrage at ${Math.round(T.boss.enrageAt * 100)}% of the timer: ${def.enrage.name}`);
-  lines.push(`Timer ${Math.max(0, f.timer - f.t)} of ${f.timer} ticks (runs while someone is questing)`);
+  // f.t counts the ticks used (boss.js: one a questing tick), so the first number is what is left
+  lines.push(`Timer: ${Math.max(0, f.timer - f.t)} of ${f.timer} ticks left (runs while someone is questing)`);
   let E = ctx.memo.est.get(f.key);
   if (E == null) {
     try {
@@ -1136,7 +1163,8 @@ function bossTooltip(ctx, f, def) {
 // Rooms (D§9.2, D§11.2, D§11.3.3)
 // ---------------------------------------------------------------------------------------------
 
-function buildRooms(ctx, L, fight) {
+/** The rooms: adjacent shown slots of one space and map (one room's heroes, {space, mapId, x, w, es}). */
+function roomGroups(L) {
   const groups = [];
   for (const s of L.slots) {
     if (!s.shown) continue;
@@ -1150,6 +1178,10 @@ function buildRooms(ctx, L, fight) {
     }
     groups.push({ space, mapId: e.mapId, x: s.x, w: s.w, es: [e] });
   }
+  return groups;
+}
+
+function buildRooms(ctx, L, fight, groups = roomGroups(L)) {
   const rooms = [];
   let prevZone = null;
   for (const g of groups) {
@@ -1236,7 +1268,9 @@ function roomVM(ctx, g, slotW, prevZone) {
   // D§11.16: a header click pins the room's heroes to this map (unpins them when all already are);
   // the door icon challenges the zone's boss
   const pin = pinVM(g);
-  if (pin) tip.push(pin.mapId == null ? "Click: back to auto map choice" : `Click: keep ${pin.heroIds.length === 1 ? "this hero" : "these heroes"} on ${g.mapId === "backlog" ? BACKLOG.name : g.mapId}`);
+  const mapName = g.mapId === "backlog" ? BACKLOG.name : g.mapId;
+  const who = pin && pin.heroIds.length === 1 ? "this hero" : "these heroes";
+  if (pin) tip.push(pin.pinned ? `Pinned: ${who} stay${pin.heroIds.length === 1 ? "s" : ""} on ${mapName} · click to unpin (back to auto map choice)` : `Click: keep ${who} on ${mapName}`);
   const challenge = can && can.ok
     ? { kind: "boss", idx: zIdx, tooltip: `${BOSSES[zIdx].name}: the boss door is open\nClick to challenge` } : null;
   const stats = [quota ? `${quota.have}/${quota.need}` : null, sprint ? `Sprint ${sprint.have}/${sprint.need}` : null].filter(Boolean).join(" · ");
@@ -1262,7 +1296,8 @@ function pinVM(g) {
   const list = g.es.filter((e) => !e.hero.contractor && e.id > 0);
   if (!list.length) return null;
   const all = list.every((e) => e.hero.pinMap === g.mapId);
-  return { heroIds: list.map((e) => e.id), mapId: all ? null : g.mapId };
+  // pinned: every hero here stays on this map (the header draws a pin; a click unpins)
+  return { heroIds: list.map((e) => e.id), mapId: all ? null : g.mapId, pinned: all };
 }
 
 function arenaRoom(ctx, fight, L) {

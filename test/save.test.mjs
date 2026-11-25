@@ -368,6 +368,21 @@ describe("size budget (D§13.3)", () => {
     assert.equal(decodeState(resign(edited)).state.herd.cfg.glow, 5);
   });
 
+  test("the host's collapse countdown start (cfg.idleAt) is saved only while one runs, and round-trips", () => {
+    const s = populated(1);
+    const plain = JSON.parse(encodeState(s)).herd.cfg;
+    assert.equal("idle" in plain, false);
+    assert.equal("idleAt" in decodeState(encodeState(s)).state.herd.cfg, false, "absent: no countdown (older saves too)");
+    s.herd.cfg.idleAt = 1794999940123;
+    const text = encodeState(s);
+    assert.deepEqual(JSON.parse(text).herd.cfg, { ...plain, idle: 1794999940123 });
+    const back = decodeState(text).state;
+    assert.equal(back.herd.cfg.idleAt, 1794999940123);
+    assert.equal(encodeState(back), text, "byte-identical");
+    delete back.herd.cfg.idleAt;
+    assert.deepEqual(JSON.parse(encodeState(back)).herd.cfg, plain, "cleared: gone from the save");
+  });
+
   test("saveSize counts UTF-8 bytes", () => {
     assert.equal(saveSize("abc").bytes, 3);
     assert.equal(saveSize("é").bytes, 2);

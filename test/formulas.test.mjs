@@ -494,6 +494,33 @@ describe("formulas: formatting (D§11.7)", () => {
 // rng.js
 // ---------------------------------------------------------------------------------------------
 
+describe("formulas: text that goes to herdr", () => {
+  // herdr turns every text into UTF-8 (rquickjs from_utf8), which rejects a lone surrogate
+  test("cutText never keeps half of a surrogate pair", () => {
+    const rocket = "\u{1F680}";
+    assert.equal(F.cutText("abcdef", 4), "abcd");
+    assert.equal(F.cutText("abc", 4), "abc");
+    assert.equal(F.cutText(null, 4), "");
+    assert.equal(F.cutText(`abc${rocket}`, 4), "abc", "the pair straddles the cut: dropped whole");
+    assert.equal(F.cutText(`ab${rocket}c`, 4), `ab${rocket}`, "a pair that ends at the cut stays");
+    assert.equal(F.cutText(`${rocket}${rocket}${rocket}`, 5), `${rocket}${rocket}`);
+    for (let n = 1; n < 12; n++) {
+      const t = F.cutText(`x${rocket.repeat(6)}`, n);
+      assert.ok(t.isWellFormed() && t.length <= n && t.length >= n - 1, `n = ${n}`);
+    }
+  });
+
+  test("wellFormed replaces (or drops) lone surrogates and keeps pairs", () => {
+    assert.equal(F.wellFormed("plain"), "plain");
+    assert.equal(F.wellFormed("ship \u{1F680} it"), "ship \u{1F680} it");
+    assert.equal(F.wellFormed("a\ud83db"), "a\ufffdb");
+    assert.equal(F.wellFormed("a\ude80b"), "a\ufffdb", "a lone low surrogate too");
+    assert.equal(F.wellFormed("now \ud83d", ""), "now ");
+    assert.equal(F.wellFormed("\ude80\ud83d\ude80\ud83d"), "\ufffd\u{1F680}\ufffd");
+    assert.equal(F.wellFormed(undefined), "");
+  });
+});
+
 describe("rng", () => {
   test("xorshift32 matches Marsaglia's sequence", () => {
     assert.equal(R.xs32(2463534242), 723471715);

@@ -7,7 +7,9 @@
 // push, the same order as herdr's native __applyParamStyle bridge call).
 //
 // Enforced here (herdr throws): .child(null|undefined) / bad child, element reused under two
-// parents, non-string .id(), colors that are not #rgb/#rrggbb/#rrggbbaa on the color styles.
+// parents, non-string .id(), colors that are not #rgb/#rrggbb/#rrggbbaa on the color styles, and a
+// string that is not valid UTF-8 anywhere it crosses into Rust (a child, a tooltip, an id, any
+// style argument): rquickjs String::to_string runs str::from_utf8, which refuses a lone surrogate.
 // Recorded (herdr would render it wrong): boolean children, non-finite numbers.
 // No parent back-pointers: the tree must stay acyclic so QuickJS frees it by refcount alone.
 
@@ -23,6 +25,21 @@ const HANDLES = new Set(["track_focus", "track_scroll", "content_focus_handle"])
 
 const proto = {};
 const styleProto = {};
+
+// An unpaired UTF-16 surrogate (an emoji cut in half) is not UTF-8: herdr's bridge throws on it.
+const SURROGATE = /[\uD800-\uDFFF]/;
+function utf8(s, where) {
+  if (!SURROGATE.test(s)) return;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const d = s.charCodeAt(i + 1);
+      if (d >= 0xdc00 && d <= 0xdfff) { i++; continue; }
+    } else if (c < 0xdc00 || c > 0xdfff) continue;
+    throw new TypeError(`${where}: invalid utf-8: an unpaired surrogate at index ${i}`);
+  }
+}
+const strArgs = (args, where) => { for (let i = 0; i < args.length; i++) if (typeof args[i] === "string") utf8(args[i], where); };
 
 function El(type, src) {
   this.t = type;
@@ -42,7 +59,7 @@ function attach(parent, value, where) {
     return;
   }
   const t = typeof value;
-  if (t === "string") { parent.c.push(value); return; }
+  if (t === "string") { utf8(value, where); parent.c.push(value); return; }
   if (t === "number") {
     if (!Number.isFinite(value)) err("non-finite", `${where}(${value})`);
     parent.c.push(String(value));
@@ -67,22 +84,25 @@ for (let i = 0; i < names.length; i++) {
     proto[name] = function (a, b) {
       STATS.calls++;
       if (typeof a === "number" && !Number.isFinite(a)) err("non-finite", `.${name}(${a})`);
+      strArgs(arguments, name);
       this.m.push(arguments.length > 1 ? [name, a, b] : [name, a]);
       return this;
     };
   }
-  styleProto[name] = function (a) { this.m.push([name, a]); return this; };
+  styleProto[name] = function (a) { if (typeof a === "string") utf8(a, name); this.m.push([name, a]); return this; };
 }
 
 proto.id = function (v) {
   STATS.calls++;
   if (typeof v !== "string") throw new TypeError(`id(value) expects a string, got ${typeof v}`);
+  utf8(v, "id");
   this.m.push(["id", v]);
   return this;
 };
 proto.tooltip = function (v) {
   STATS.calls++;
   if (typeof v !== "string") throw new TypeError(`tooltip(text) expects a string, got ${typeof v}`);
+  utf8(v, "tooltip");
   this.m.push(["tooltip", v]);
   return this;
 };
@@ -142,8 +162,8 @@ export class View {
 }
 
 export const div = () => new El("div");
-export const svg = (path) => new El("svg", String(path));
-export const image = (path) => new El("image", String(path));
+export const svg = (path) => { const p = String(path); utf8(p, "svg"); return new El("svg", p); };
+export const image = (path) => { const p = String(path); utf8(p, "image"); return new El("image", p); };
 export const list = (id, count, getKey, render) => new El("list", String(id));
 export const uniform_list = (id, count, getKey, render) => new El("uniform_list", String(id));
 export const PathBuilder = { fill: () => ({ move_to() {}, line_to() {}, close() {} }), stroke: () => ({ move_to() {}, line_to() {}, close() {} }) };

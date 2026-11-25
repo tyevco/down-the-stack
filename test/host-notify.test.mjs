@@ -115,8 +115,12 @@ test("checking(): no milestone is ever taken or posted", async () => {
   assert.equal(host.memoryOnly, true);
   notifyOn(host.world);
   host.world.rt.nowMs = NOW;
+  // the time zone known (as after a tick), so the milestone is queued rather than held for it
+  // (world.js raiseMilestone) and only the checking() guard can keep takeMilestones from taking it
+  host.world.rt.tzOffsetMin = 0;
   const { raiseMilestone } = await mod.import("./game/world.js");
-  raiseMilestone(host.world, "boss", { title: "x", body: "" });
+  assert.equal(raiseMilestone(host.world, "boss", { title: "x", body: "" }), true);
+  assert.equal(host.world.state.herd.milestones.length, 1, "queued in the world");
   assert.equal(host.takeMilestones(NOW), 0);
   assert.equal(host.post([{ m: { n: 1, kind: "boss", at: Date.now(), title: "x", body: "" }, world: host.world }]), 0);
   assert.equal(host.pump(NOW + 1000), false);
@@ -178,6 +182,76 @@ for (const diverged of [false, true]) {
     assert.equal(notes().length, 1);
   });
 }
+
+test("hot reload over a save.json another program left as garbage: the world goes on, so its kill is never posted twice", async () => {
+  // Before: the new build rolled back to save.bak, where the boss was still alive, and its second
+  // kill posted the same "herd-first" toast again.
+  M.resetState();
+  const g = `ng-${++graphN}`;
+  const a = await mount({ role: "party" }, { graph: g, fixture: FX.demoFixture("mid"), files: { [SAVE]: saveWith("mid", notifyOn) } });
+  const h1 = await hostOf(a);
+  await M.tickAll(31000);
+  await M.tickAll(31000); // save.bak now holds a save without the kill
+  const i = killNextBoss(h1);
+  await M.tickAll(3000);
+  assert.equal(notes().length, 1);
+  await M.tickAll(10000);
+  M.memfs.write(SAVE, '{"v":1,"herd":{"name":"half-written');
+  await M.reloadAll([a]);
+  const h2 = await hostOf(a);
+  await M.tickAll(1000);
+  assert.equal(h2.stats.loadedFrom, "reload");
+  assert.equal(h2.world.state.herd.bossKills[i], 1, "the kill is in the world that goes on");
+  await M.tickAll(10000);
+  assert.equal(notes().length, 1);
+  assert.deepEqual(a.errors, []);
+});
+
+test("a milestone whose save hit a plain IO error (the file unchanged) is posted after the next save lands", async () => {
+  M.resetState();
+  const mod = await mount({ role: "party" }, { fixture: FX.demoFixture("mid"), files: { [SAVE]: saveWith("mid", notifyOn) } });
+  const host = await hostOf(mod);
+  await M.tickAll(1000);
+  const real = M.memfs.write.bind(M.memfs);
+  let failOnce = 1;
+  M.memfs.write = (p, ...rest) => {
+    if (p === SAVE && failOnce-- > 0) throw new Error("ENOSPC: no space left on device");
+    return real(p, ...rest);
+  };
+  try {
+    killNextBoss(host);
+    await M.tickAll(1000);
+    await M.tickAll(2000);
+    assert.ok(failOnce <= 0, "the write failed once");
+    assert.equal(host.failedWrites, 1, "a plain IO failure (conflict() answered io)");
+    assert.deepEqual(notes(), [], "not posted while no save holding it is on disk");
+    await M.tickAll(40000); // the 30 s beat
+    assert.equal(notes().length, 1, "posted once a save that took it landed");
+    assert.match(notes()[0].n.title, /: FIXED$/);
+    await M.tickAll(35000);
+    assert.equal(notes().length, 1);
+  } finally {
+    M.memfs.write = real;
+  }
+  assert.deepEqual(mod.errors, []);
+});
+
+test("post(): the same milestone is never posted twice, and one dated ahead of the clock is never posted", async () => {
+  M.resetState();
+  const mod = await mount({ role: "party" }, { fixture: FX.demoFixture("mid"), files: { [SAVE]: saveWith("mid", notifyOn) } });
+  const host = await hostOf(mod);
+  await M.tickAll(1000);
+  const m = { n: 7, kind: "boss", at: Date.now(), title: "Twice: FIXED", body: "" };
+  assert.equal(host.post([{ m, world: host.world }]), 1);
+  assert.equal(host.post([{ m: { ...m }, world: host.world }]), 0, "postedKeys: never the same one twice");
+  assert.equal(notes().length, 1);
+  // a save made on a machine whose clock ran ahead: its queued milestone is not a fresh one
+  host.world.state.herd.milestones.push({ n: 8, kind: "lts", at: Date.now() + 3 * 3600000, title: "Ahead", body: "" });
+  host.world.state.herd.milestones.push({ n: 9, kind: "lts", at: Date.now() - 20 * MIN, title: "Stale", body: "" });
+  await M.tickAll(5000);
+  assert.deepEqual(notes().map((c) => c.n.title), ["Twice: FIXED"]);
+  assert.deepEqual(host.world.state.herd.milestones, [], "both taken out of the queue");
+});
 
 test("the cap: at most 3 posted a local day, and the count survives a restart", async () => {
   M.resetState();
@@ -331,6 +405,157 @@ test("collapse: after a restart with the stage still hidden, the first work show
   assert.equal(host.world.state.herd.cfg.collapsed, false);
 });
 
+/** Every agent of the live fixture stops (herdr says idle, seq moves on), sub-agents gone. */
+const allIdle = (fx) => ({ ...fx, agents: fx.agents.map((a) => ({ ...a, status: "idle", seq: (a.seq || 0) + 1 })), terminals: (fx.terminals || []).filter((t) => !t.parent).map((t) => ({ ...t, status: "idle" })) });
+
+for (const how of ["restart", "hot reload"]) {
+  test(`collapse: a ${how} inside the minute goes on with the countdown (from when the last hero stopped)`, async () => {
+    M.resetState();
+    const g = `cd-${++graphN}`;
+    const party = await mount({ role: "party" }, { graph: g, fixture: FX.demoFixture("mid"), files: { [SAVE]: saveWith("mid", (w) => { w.state.herd.cfg.collapse = true; }) } });
+    const stage = await mount({ role: "stage" }, { graph: g, fixture: null });
+    const host = await hostOf(party);
+    await M.tickAll(2000);
+    M.updateFixture(allIdle(M.fixture()));
+    await M.tickAll(1000);
+    const stopped = host.idleSince;
+    assert.ok(stopped != null, "armed: the last hero stopped");
+    await M.tickAll(20000);
+    assert.equal(runs("layout.hide").length, 0);
+    let h2;
+    if (how === "restart") {
+      await party.close();
+      await stage.close();
+      assert.equal(JSON.parse(M.memfs.readText(SAVE)).herd.cfg.idle, stopped, "the countdown's start is saved");
+      const g2 = `cd-${++graphN}`;
+      const p2 = await mount({ role: "party" }, { graph: g2, fixture: null });
+      await mount({ role: "stage" }, { graph: g2, fixture: null });
+      h2 = await hostOf(p2);
+    } else {
+      await M.reloadAll([party, stage]);
+      h2 = await hostOf(party);
+    }
+    assert.notEqual(h2, host);
+    await M.tickAll(Math.max(0, stopped + 64000 - M.mockNow()));
+    assert.deepEqual(runs("layout.hide").map((c) => c.args), [{ id: "stage" }], "a minute after the last hero stopped, not a minute after the start");
+    assert.equal(h2.world.state.herd.cfg.collapsed, true);
+    assert.equal(h2.world.state.herd.cfg.idleAt, undefined, "the countdown is done");
+  });
+}
+
+test("collapse: a restart long after the countdown started still gives the new session a few seconds before it hides", async () => {
+  // herdr was closed inside the minute and opened again five minutes later: the countdown is over,
+  // but herdr may not have reported the agents' work yet right after a start (RESUME_IDLE_MS).
+  M.resetState();
+  const g = `cl-${++graphN}`;
+  const party = await mount({ role: "party" }, { graph: g, fixture: FX.demoFixture("mid"), files: { [SAVE]: saveWith("mid", (w) => { w.state.herd.cfg.collapse = true; }) } });
+  const stage = await mount({ role: "stage" }, { graph: g, fixture: null });
+  const host = await hostOf(party);
+  await M.tickAll(2000);
+  M.updateFixture(allIdle(M.fixture()));
+  await M.tickAll(1000);
+  assert.ok(host.idleSince != null, "armed: the last hero stopped");
+  await M.tickAll(20000);
+  await party.close();
+  await stage.close();
+  assert.ok(Number.isFinite(JSON.parse(M.memfs.readText(SAVE)).herd.cfg.idle), "the countdown's start is saved");
+  await M.tickAll(5 * MIN); // herdr closed
+  const g2 = `cl-${++graphN}`;
+  const p2 = await mount({ role: "party" }, { graph: g2, fixture: null });
+  await mount({ role: "stage" }, { graph: g2, fixture: null });
+  const h2 = await hostOf(p2);
+  await M.tickAll(8000);
+  assert.ok(h2.idleSince != null, "it goes on with the saved countdown");
+  assert.equal(runs("layout.hide").length, 0, "not in the first seconds of the new session");
+  await M.tickAll(6000);
+  assert.deepEqual(runs("layout.hide").map((c) => c.args), [{ id: "stage" }], "then it hides");
+  assert.deepEqual(p2.errors, []);
+});
+
+test("collapse: a start while nothing works never starts a countdown of its own (a stage shown by hand stays)", async () => {
+  M.resetState();
+  const fx = allIdle(FX.demoFixture("mid"));
+  const g = `cs-${++graphN}`;
+  const party = await mount({ role: "party" }, { graph: g, fixture: fx, files: { [SAVE]: saveWith("mid", (w) => { w.state.herd.cfg.collapse = true; }) } });
+  await mount({ role: "stage" }, { graph: g, fixture: null });
+  const host = await hostOf(party);
+  await M.tickAll(5 * MIN);
+  assert.equal(host.idleSince, null);
+  assert.equal(runs("layout.hide").length, 0, "no saved countdown: nothing to go on with");
+});
+
+test("collapse: turned on in a save another window wrote, while nothing works here, hides at once", async () => {
+  M.resetState();
+  const g = `ow-${++graphN}`;
+  const party = await mount({ role: "party" }, { graph: g, fixture: allIdle(FX.demoFixture("mid")), files: { [SAVE]: saveWith("mid", () => {}) } });
+  await mount({ role: "stage" }, { graph: g, fixture: null });
+  const host = await hostOf(party);
+  await M.tickAll(5000);
+  assert.equal(host.world.state.herd.cfg.collapse, false);
+  assert.equal(runs("layout.hide").length, 0, "collapse is off");
+  // another window turned collapse on and saved; our next write conflicts and loads theirs
+  M.memfs.write(SAVE, saveWith("mid", (w) => { w.state.herd.cfg.collapse = true; }), { mkdirs: true });
+  host.world.rt.dirty = true;
+  host.saveSoonAt = M.mockNow();
+  await M.tickAll(3000);
+  assert.equal(host.stats.reloads, 1, "their save was loaded");
+  await M.tickAll(2000);
+  assert.deepEqual(runs("layout.hide").map((c) => c.args), [{ id: "stage" }], "as when turned on here");
+});
+
+test("collapse: the note that the host hid the stage is saved within seconds (a crash must not lose it)", async () => {
+  const { host, set } = await collapseRig();
+  const t = M.mockNow();
+  host.stageAuto(t);
+  set("resting");
+  host.stageAuto(t + 1000);
+  host.saveSoonAt = null;
+  assert.equal(host.stageAuto(t + 62000), "hidden");
+  assert.ok(host.saveSoonAt != null && host.saveSoonAt <= Date.now() + 2000, `saveSoonAt ${host.saveSoonAt}`);
+  assert.equal(host.world.rt.dirty, true);
+});
+
+test("collapse: a layout.hide herdr refuses is not recorded as a stage the host hid", async () => {
+  const { host, party, set } = await collapseRig();
+  let refuse = true;
+  M.updateFixture({ runError: (name) => (refuse && name === "layout.hide" ? new Error("no such node") : null) });
+  const t = M.mockNow();
+  host.stageAuto(t);
+  set("resting");
+  host.stageAuto(t + 1000);
+  assert.equal(host.stageAuto(t + 62000), null);
+  assert.equal(host.world.state.herd.cfg.collapsed, false, "nothing is owed a layout.show");
+  assert.ok(host.errors.some((e) => /layout\.hide/.test(e.where)), JSON.stringify(host.errors));
+  refuse = false;
+  set("questing");
+  host.stageAuto(t + 63000);
+  set("resting");
+  host.stageAuto(t + 64000);
+  assert.equal(host.stageAuto(t + 125000), "hidden", "the next stop of work hides it");
+  assert.deepEqual(party.errors, []);
+});
+
+test("collapse, two windows on one save: a window that hid its stage shows it again although the other cleared the saved note", async () => {
+  const { host, set } = await collapseRig();
+  const t = M.mockNow();
+  host.stageAuto(t);
+  set("resting");
+  host.stageAuto(t + 1000);
+  assert.equal(host.stageAuto(t + 62000), "hidden");
+  assert.equal(stageNode().hidden, true);
+  // the other window (its own stage shown) saved a world whose note says nothing is held; this
+  // window's next write conflicts and loads it
+  M.memfs.write(SAVE, saveWith("mid", (w) => Object.assign(w.state.herd.cfg, { collapse: true, collapsed: false })), { mkdirs: true });
+  host.world.rt.dirty = true;
+  await host.maybeSave(true);
+  assert.equal(host.stats.reloads, 1, "their save was loaded");
+  assert.equal(host.world.state.herd.cfg.collapsed, false);
+  // a hero works again here (the next pump ticks the loaded world from herdr's live data)
+  assert.equal(host.pump(M.mockNow() + 5000), true);
+  assert.deepEqual(runs("layout.show").map((c) => c.args), [{ id: "stage" }], "this window's stage comes back");
+  assert.equal(stageNode().hidden, false);
+});
+
 test("collapse never acts while checking(), for a read-only world, or in a layout without the stage", async () => {
   M.resetState();
   const mod = await mount({ role: "stage" }, { fixture: FX.demoFixture("mid"), checking: true });
@@ -347,4 +572,19 @@ test("collapse never acts while checking(), for a read-only world, or in a layou
   r.host.stageAuto(M.mockNow() + 121000);
   assert.equal(r.host.stageAuto(M.mockNow() + 300000), null);
   assert.equal(runs("layout.hide").length, 0);
+});
+
+test("a command gives the engine the local time zone, so a milestone a click raises before the first tick counts at once", async () => {
+  M.resetState();
+  const mod = await mount({ role: "party" }, { fixture: FX.demoFixture("mid"), files: { [SAVE]: saveWith("mid", notifyOn) } });
+  const host = await hostOf(mod);
+  await M.tickAll(1000);
+  host.world.rt.tzOffsetMin = undefined; // as right after a load, before its first tick
+  assert.equal(host.command("setting", { key: "glow", value: 3 }).ok, true);
+  assert.equal(host.world.rt.tzOffsetMin, new Date(Date.now()).getTimezoneOffset());
+  const { raiseMilestone } = await mod.import("./game/world.js");
+  raiseMilestone(host.world, "boss", { title: "x", body: "" });
+  assert.equal(host.world.state.herd.milestones.length, 1, "queued, not held for the time zone");
+  assert.deepEqual(host.world.rt.msHeld || [], []);
+  assert.deepEqual(mod.errors, []);
 });

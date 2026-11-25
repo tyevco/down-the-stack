@@ -574,6 +574,34 @@ test("layout: the career boss card's Retreat is in view at 760 × 500 during a f
   }
 });
 
+test("layout: outside a fight a Lv 60+ hero's career boss card shows whole (name, status, button, estimate) at 760 × 500", async (t) => {
+  let pw;
+  try { pw = (await import("node:module")).createRequire(import.meta.url)("playwright"); } catch { return t.skip("playwright not installed"); }
+  const browser = await pw.chromium.launch();
+  try {
+    const page = await browser.newPage();
+    let cards = 0;
+    for (const kind of D.DEMO_KINDS) {
+      const world = D.demoWorld(kind, NOW).world;
+      for (const h of world.state.heroes) {
+        if (h.L < 60) continue;
+        const boss = V.sheetView(world, { heroId: h.id, tab: "career", filter: FILTER }).career.boss;
+        if (!boss || boss.fighting) continue;
+        const { m } = await mount("sheet", world, { props: { heroId: h.id, tab: "career" } });
+        const want = ["sh-boss-name", "sh-boss-status", boss.challenge ? "sh-boss-go" : null, boss.estimate ? "sh-boss-est" : null].filter(Boolean);
+        const L = await layoutOf(page, m, { height: 500, buttons: want });
+        for (const id of want) assert.ok(L.buttons[id]?.inView, `${kind}/${h.id} (Lv ${h.L}): ${id} in view (${JSON.stringify(L.buttons[id])})`);
+        assert.deepEqual(L.spills, [], `${kind}/${h.id} career`);
+        cards++;
+      }
+    }
+    t.diagnostic(`Lv 60+ boss cards checked: ${cards}`);
+    assert.ok(cards >= 3, `cards checked: ${cards}`);
+  } finally {
+    await browser.close();
+  }
+});
+
 test("layout: no tab of either dialog runs under its footer; skill effects, zone names and building effects stay whole", async (t) => {
   let pw;
   try { pw = (await import("node:module")).createRequire(import.meta.url)("playwright"); } catch { return t.skip("playwright not installed"); }
@@ -695,6 +723,24 @@ test("settings (D§11.15): loot glow, collapse the stage, and the autopilot mast
   assert.equal(r.collapse.value, true);
   // the Upgrades tab says autopilot buildings are off too
   assert.match(V.herdView(world, { tab: "upgrades", filter: FILTER }).upgrades.note, /Auto buildings: off/);
+});
+
+test("settings: each autopilot switch says what it does (auto.career gates only the promotion reviews; thresholds from TUNING)", () => {
+  const world = D.demoWorld("mid", NOW).world;
+  const auto = Object.fromEntries(V.herdView(world, { tab: "settings", filter: FILTER }).settings.groups
+    .find((g) => g.key === "autopilot").rows.map((r) => [r.key, r]));
+  // autopilot.autoChallenge reads auto.career for the Senior / Staff Reviews only; the Lv 10 class
+  // and its provisional switches ignore it (heroes.js), so the row must not promise a class
+  const career = auto["auto.career"];
+  assert.equal(career.setting, "auto.career");
+  assert.equal(career.label, "Promotion reviews");
+  assert.doesNotMatch(`${career.label} ${career.hint}`, /class|Lv 10/i);
+  assert.match(career.hint, /Senior and Staff Reviews/);
+  // the thresholds are the engine's (T.boss.autoAt / farmAt), in the percent the boss cards show
+  const pct = (x) => `${Math.round(x * 100)}%`;
+  assert.ok(career.hint.includes(`${pct(DATA.TUNING.boss.autoAt)} or more`), career.hint);
+  assert.ok(auto["auto.boss"].hint.includes(`${pct(DATA.TUNING.boss.autoAt)} or more`), auto["auto.boss"].hint);
+  assert.ok(auto["auto.farm"].hint.includes(`${pct(DATA.TUNING.boss.farmAt)} or more`), auto["auto.farm"].hint);
 });
 
 test("memo: the same world version and args give the same VM; a tick or a command gives a fresh one", () => {
@@ -1396,4 +1442,54 @@ test("rules: the sheet names a terminal's work as the party does, never a bare p
   hero.pend[0].title = "zsh";
   fd.rt.version++;
   assert.equal(waiting().sub, null);
+});
+
+test("rules: a chest that opened Unreviewed reads in the hero's journal and the digest (where the chest went)", () => {
+  const world = D.demoWorld("first-day", NOW).world;
+  const hero = world.state.heroes[0];
+  Herd.journal(world.state, "unrev", hero.id, "Add retry to webhook sender", 1, NOW - 60000);
+  Herd.journal(world.state, "unrev", hero.id, "", 3, NOW - 30000);
+  world.rt.version++;
+  const j = V.sheetView(world, { heroId: hero.id, tab: "journal", filter: FILTER }).journal.lines.map((l) => l.text);
+  assert.ok(j.includes("Chest opened Unreviewed: “Add retry to webhook sender” (half value, no Seals)"), j.join(" | "));
+  assert.ok(j.includes("3 chests opened Unreviewed (half value, no Seals)"), j.join(" | "));
+  const d = V.herdView(world, { tab: "digest", filter: FILTER }).digest;
+  const sec = d.sections.find((x) => x.key === "unreviewed");
+  assert.ok(sec, "an 'Opened Unreviewed' section");
+  assert.equal(sec.title, "Opened Unreviewed");
+  const first = hero.name.split(" ")[0];
+  assert.deepEqual(sec.lines.map((l) => [l.text, l.sub]), [
+    [`${first}: 3 chests opened Unreviewed`, "half value, no Seals"],
+    [`${first}'s chest opened Unreviewed`, "“Add retry to webhook sender” · half value, no Seals"],
+  ]);
+});
+
+test("rules: with auto-learn off for the herd (or the autopilot off), the sheet and the party never promise that points get spent", () => {
+  const world = D.demoWorld("mid", NOW).world;
+  const hero = world.state.heroes.find((h) => h.cls > 0 && world.rt.live.has(h.id));
+  hero.autoLearn = true;
+  hero.spFree = 3;
+  const skills = () => V.sheetView(world, { heroId: hero.id, tab: "skills", filter: FILTER }).skills;
+  const star = () => {
+    const vm = V.partyView(world, {});
+    for (const g of vm.groups) for (const r of g.rows || []) if (r.heroId === hero.id) return (r.chips || []).find((c) => c.kind === "star" && /skill point/.test(c.tooltip || ""));
+    return undefined;
+  };
+  world.rt.version++;
+  assert.match(skills().sp.tooltip, /Auto-learn spends them within a minute/);
+  assert.equal(skills().autoLearn.hint, "Spends points on the lowest-ranked skill");
+  assert.equal(star(), undefined, "auto-learn on everywhere: no unspent-points star");
+  for (const off of [(c) => { c.auto = Object.assign({}, c.auto, { learn: false }); }, (c) => { c.autopilot = false; }]) {
+    const cfg = world.state.herd.cfg = Object.assign({}, world.state.herd.cfg, { auto: Object.assign({}, world.state.herd.cfg.auto) });
+    off(cfg);
+    world.rt.version++;
+    const s = skills();
+    assert.doesNotMatch(s.sp.tooltip, /spends them within a minute/);
+    assert.match(s.sp.tooltip, /off in Settings, so they wait/);
+    assert.equal(s.autoLearn.on, true, "the hero's own switch still reads on");
+    assert.match(s.autoLearn.hint, /^Waits/);
+    if (s.respec.enabled !== false && s.respec.tooltip) assert.doesNotMatch(s.respec.tooltip, /re-spends/);
+    assert.ok(star(), "the party row shows the unspent-points star");
+    world.state.herd.cfg = Object.assign({}, cfg, { autopilot: true, auto: Object.assign({}, cfg.auto, { learn: true }) });
+  }
 });

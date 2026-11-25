@@ -74,7 +74,11 @@ Anything I could not prove from source is marked **UNCONFIRMED**.
 
 ### Hot reload (new source version)
 - Herdr watches the app home itself (`src/files.rs`). `files_changed` (`src/window.rs:4357-4430`) reloads **every loaded copy**
-  of an edited mod with `runtime.reload_now(root, …)` (`src/window.rs:4415-4426`).
+  of an edited mod with `runtime.reload_now(root, …)` (`src/window.rs:4415-4426`). The window collects app-home events for
+  **80 ms** before it calls `files_changed` (`src/window.rs:673-684`: "an editor's save is several events"), so new code runs
+  about 0.1 s after a save (batch plus module evaluation). The 150 ms `BATCH` in `src/files.rs:155` is only the
+  `watchFolder()` API's, for mods that watch a folder. Copies exist only for visible blocks and open overlays
+  (`sync` walks `self.visible()`, `src/window.rs:1282-1307`), so "every loaded copy" means every copy on screen.
 - What counts as an edit: any path under `mods/<name>/` that passes `application_file_counts`. That excludes hidden path parts,
   `*~`, `node_modules`, `jsconfig.json` and `gpui-kit.d.ts` (`shell/watch.rs:59-64`, `src/files.rs:123-142`). The mod's
   `mod_stamp` (size+mtime of all such files, any extension) must also change (`src/files.rs:462-484`, `src/window.rs:4381-4389`).
@@ -379,6 +383,13 @@ processed; `checking()` → `true`; `exec`/`hc`/`writeTextFile` **run for real**
   - Class method definitions and object literals are fine.
   - You can't polyfill or extend `Array.prototype`.
   - `Map`/`Set` prototypes are not in the list.
+- **Strings crossing into Rust must be well-formed UTF-16.** The bridge converts every string argument with rquickjs's
+  `String` / `to_string()` (element text `Bridged::Str(text.to_string()?)`, `quickjs/mod.rs:10258`; ids and other string
+  parameters typed `value: String`, `:9201`, `:9224`), which converts to UTF-8 and refuses a lone surrogate. So a title cut
+  with `slice(0, 40)` through an emoji (half a surrogate pair) throws in render, and the copy shows its error. Cut outside
+  text so that it never splits a pair. Strings herdr hands *in* (titles, names) come from Rust and are always well-formed.
+  QuickJS-ng's `JSON.stringify` escapes a lone surrogate (`"\ud83d"`), so a save holding one still writes; it breaks only
+  where it is shown.
 
 ## 9. Overlays, windows, floats, pane headers
 
@@ -442,7 +453,9 @@ processed; `checking()` → `true`; `exec`/`hc`/`writeTextFile` **run for real**
   - **It ignores `settings().sounds.enabled`.** herdr checks that only for its own attention sounds (`src/window.rs:2378`).
     Mods must check it, e.g. `settings().sounds?.enabled !== false`. `HERDR_APP_NO_SOUND` mutes everything (`sound.rs:31-33`).
   - No volume or stop control. Rate-limit it (e.g. ≤ 2/s, and never per hit).
-- `notify()`: see §9. It is a full overlay copy each time.
+- `notify()`: see §9. It is a full overlay copy each time. Without a `timeout` a toast lives 5 s (8 s for `error` and
+  `warning`, `src/window.rs:4049-4053`); `poll()` closes expired overlays every 400 ms whether or not the window is active
+  (`:665-671`, `:4329-4333`). herdr's own agent toasts expire the same way; its layout notes use 12000 ms (`:661`).
 
 ## Appendix: other facts that matter
 

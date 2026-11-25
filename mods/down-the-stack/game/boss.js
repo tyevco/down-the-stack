@@ -612,6 +612,24 @@ function abandonSaved(world, ev) {
   if (f) endFight(world, f, "lost", ev);
 }
 
+/**
+ * A hero leaves the roster (retired, or let go to make room): it leaves the paused fight in
+ * herd.fight too, whose boss keeps the HP pool it was given. A paused fight nobody is left in
+ * closes as a Postmortem (its Wounds are kept) instead of waiting for a participant who never
+ * comes back (D§9.5). A running fight is left alone (it rewrites herd.fight every tick). Returns
+ * true when the hero was in the paused fight.
+ */
+export function leaveSavedFight(world, heroId, ev) {
+  const s = world.state.herd.fight;
+  if (!s || bossFightRunning(world) || !Array.isArray(s.ids) || s.ids.indexOf(heroId) < 0) return false;
+  const n = s.n || s.ids.length;
+  s.ids = s.ids.filter((id) => id !== heroId);
+  if (Array.isArray(s.hl)) s.hl = s.hl.filter((id) => id !== heroId);
+  if (n !== s.ids.length) s.n = n;
+  if (!s.ids.length) abandonSaved(world, ev);
+  return true;
+}
+
 // Coffee is refilled before every fight (D§5.6), at the usual price per cup (as far as the herd's
 // gold goes: a broke herd still gets its coffee).
 function refillCoffee(world, hero) {
@@ -1380,7 +1398,7 @@ function postmortem(world, fight, ev) {
   const text = `Postmortem: ${Math.round(frac * 100)}% wounds kept · Lessons Learned +${lessons}% · retry in ${Math.round(B.retryWorkingSec / 60)} working min`;
   fight.stamp = { key: `${fight.key}:pm`, text: "POSTMORTEM", tick: world.rt.tick };
   note(ev, text);
-  jot(world, ev, "boss", fight.heroIds[0], `${fight.name}: Postmortem`, Math.round(frac * 100));
+  jot(world, ev, "boss", fight.heroIds[0] || 0, `${fight.name}: Postmortem`, Math.round(frac * 100));
   major(ev);
 }
 
@@ -1406,13 +1424,19 @@ function winFight(world, fight, ev) {
   const t = itemTier(Lb);
   const first = fight.kind === "boss" && !((herd.boss || [])[idx] > 0);
   const heroes = fight.heroIds.map((id) => findHero(world, id)).filter(Boolean);
-  // Keepsake: herd-first kill always, repeats 15% (D§8.6); it goes to the stash
+  // Keepsake: herd-first kill always, repeats 15% (D§8.6); it goes to the stash. Herd.logDrop
+  // gives it what every notable drop gets: the journal line, the header note, the digest count,
+  // its pillar (before the boss) and the opt-in "LTS or Keepsake drop" milestone (D§11.15). A
+  // herd-first kill's Keepsake is part of that kill: while the boss-kill notification is on, the
+  // boss toast names it (world.js bossKills) rather than spend a second of the day's three.
   if (fight.kind === "boss" && (first || rngNext(herd) < 0.15)) {
     const finder = heroes[0];
     const ks = rollKeepsake(herd, { bossIdx: idx, ilvl: Lb, classId: finder ? finder.cls : null, state });
     stashPut(state, ks);
-    fx(ev, FX.pillar, { heroId: finder ? finder.id : undefined, roomId: "arena", rar: 5, value: ks.uid, text: KEEPSAKES[ks.prop] ? KEEPSAKES[ks.prop].name : itemName(ks) });
-    jot(world, ev, "drop", finder ? finder.id : 0, itemName(ks), 5);
+    const notify = (herd.cfg && herd.cfg.notify) || {};
+    const viaBoss = first && notify.boss === true;
+    if (first) rt.firstKeepsake = { i: idx, name: KEEPSAKES[ks.prop] ? KEEPSAKES[ks.prop].name : itemName(ks) };
+    if (typeof Herd.logDrop === "function") Herd.logDrop(world, finder, ks, ev, { roomId: "arena", milestone: !viaBoss });
   }
   const w = first ? 60 : 30;
   const sn = (first ? 10 : 5) * t;

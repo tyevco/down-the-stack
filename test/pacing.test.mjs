@@ -9,7 +9,7 @@
 //   - the always-working bot (D§12.2) on days 1 and 7;
 //   - real autopilot gear (recorded during the Typical run) in the sustain sweep: 0 crashes, at
 //     most 3 cups per on-level hour on every map x class, kill pace around the reference kit's.
-import { test, describe } from "node:test";
+import { test, describe, before } from "node:test";
 import assert from "node:assert/strict";
 import {
   simPersona, simBot, PERSONAS, DESIGN, BOT_DESIGN, compare, gearRecorder, sweep, SWEEP_TARGET,
@@ -56,9 +56,13 @@ describe("day 1 of every persona (D§12.1)", () => {
 });
 
 describe("whole games: Typical and Casual to Lv 100 and the Heisenbug (D§12.1)", () => {
+  // simulated in before() hooks, not while the file's tests are collected: a filtered run
+  // (--test-name-pattern) skips them, and a throw is reported against this suite
   const rec = gearRecorder();
-  const typical = simPersona(PERSONAS.typical, { seed: 1, until: ["B9", "L100"], onTick: rec.onTick });
-  const casual = simPersona(PERSONAS.casual, { seed: 1, until: ["B9", "L100"] });
+  let typical;
+  let casual;
+  before(() => { typical = simPersona(PERSONAS.typical, { seed: 1, until: ["B9", "L100"], onTick: rec.onTick }); });
+  before(() => { casual = simPersona(PERSONAS.casual, { seed: 1, until: ["B9", "L100"] }); });
 
   test("Typical: every milestone within 15%", () => assertMilestones("typical", typical, "L100"));
   test("Casual: every milestone within 15%", () => assertMilestones("casual", casual, "L100"));
@@ -100,4 +104,21 @@ test("the always-working bot (D§12.2): days 1 and 7 within tolerance, never lea
   assert.equal(b.world.state.herd.zone, 0);
   assert.equal(b.world.state.herd.seals, 0, "never seen: no Seals");
   assert.equal(b.world.state.heroes[0].fe, 0, "no Fresh Eyes without a credited Seal");
+});
+
+test("the CLI: --json carries the verdicts and the same exit code as the text output; a bad argument exits 2", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const sim = fileURLToPath(new URL("../tools/pacing-sim.mjs", import.meta.url));
+  const run = (...args) => spawnSync(process.execPath, [sim, ...args], { encoding: "utf8" });
+  const j = run("--persona", "bot", "--quick", "--json", "--no-ref");
+  assert.equal(j.status, 0, j.stderr);
+  const out = JSON.parse(j.stdout);
+  assert.equal(out.bad, 0);
+  assert.deepEqual(out.bot.verdicts.map((v) => [v.day, v.verdict]), [[1, "ok"]]);
+  for (const bad of [["--persnoa", "bot"], ["--persona", "nobody"], ["--days", "x"]]) {
+    const r = run(...bad);
+    assert.equal(r.status, 2, `${bad.join(" ")}: ${r.stderr}`);
+    assert.match(r.stderr, /usage: node tools\/pacing-sim\.mjs/);
+  }
 });

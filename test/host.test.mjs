@@ -609,6 +609,251 @@ test("hot reload hands over a world whose load finished after its mount (a retri
   assert.equal(hb.retired, false, "the other window's host is not touched");
 });
 
+/** A stage and a party on one VM whose world saved twice (save.bak holds the first save). */
+async function reloadRig(kind = "mid", files) {
+  M.resetState();
+  const g = `rl-${++graphN}`;
+  const a = await mount({ role: "stage" }, { graph: g, fixture: FX.demoFixture(kind), files });
+  const b = await mount({ role: "party" }, { graph: g, fixture: null });
+  const h1 = await hostOf(a);
+  await M.tickAll(31000);
+  await M.tickAll(31000);
+  assert.ok(M.memfs.readText(BAK) && M.memfs.readText(SAVE) === h1.lastText, "two saves landed");
+  await M.tickAll(20000); // progress the file does not have yet
+  return { a, b, h1 };
+}
+const diskTick = (p) => { try { return JSON.parse(M.memfs.readText(p)).tick; } catch (e) { return null; } };
+
+test("hot reload over a save.json another program left as garbage: the world goes on, the garbage is kept aside", async () => {
+  const { a, b, h1 } = await reloadRig();
+  const liveTick = h1.world.state.herd.tick;
+  const bakText = M.memfs.readText(BAK);
+  assert.ok(diskTick(BAK) < liveTick);
+  const garbage = '{"v":1,"herd":{"name":"half-written';
+  M.memfs.write(SAVE, garbage);
+  await M.reloadAll([a, b]);
+  const h2 = await hostOf(a);
+  assert.equal(h2.stats.loadedFrom, "reload", "no rollback to save.bak");
+  assert.ok(h2.world.state.herd.tick >= liveTick, `${h2.world.state.herd.tick} < ${liveTick}`);
+  assert.equal(h1.retired, true);
+  assert.equal(M.memfs.readText(BROKEN), garbage, "the garbage is kept aside");
+  assert.equal(h2.lastText, garbage);
+  assert.equal(h2.lastGood, false, "the garbage never becomes the bak");
+  await M.tickAll(3000);
+  assert.ok(diskTick(SAVE) >= liveTick, "the world is on disk again, over the garbage");
+  assert.equal(writes(SAVE).at(-1).expected, garbage);
+  assert.equal(M.memfs.readText(BAK), bakText, "save.bak untouched by the garbage");
+  assert.equal(h2.saveStatus(), null, "nothing was restored: nothing to tell");
+  assert.deepEqual([...a.errors, ...b.errors], []);
+});
+
+test("hot reload while save.json cannot be read: the world goes on, never written over, saved once it reads", async () => {
+  const { a, b, h1 } = await reloadRig();
+  const liveTick = h1.world.state.herd.tick;
+  const onDisk = M.memfs.readText(SAVE);
+  let busy = true;
+  M.updateFixture({ readError: (p) => (busy && p === SAVE ? new Error("EBUSY: held by a sync tool") : null) });
+  await M.reloadAll([a, b]);
+  await M.tickAll(11000); // the load reads again after 1, 3 and 6 s
+  const h2 = await hostOf(a);
+  assert.equal(h2.stats.loadedFrom, "reload", "no rollback to save.bak");
+  assert.ok(h2.world.state.herd.tick >= liveTick);
+  assert.equal(h2.ioBlocked, true);
+  assert.equal(h2.saveStatus().notSaving, true, "the player is told it is not saving");
+  await M.tickAll(40000);
+  assert.equal(M.memfs.readText(SAVE), onDisk, "never written while it cannot be read");
+  busy = false;
+  await M.tickAll(31000);
+  await M.tickAll(3000);
+  assert.equal(h2.ioBlocked, false);
+  assert.ok(diskTick(SAVE) > liveTick, "this world, not the bak's, is saved over it");
+  assert.equal(names().filter((n) => n.startsWith("save.unsaved")).length, 0, "its own file: nothing to keep aside");
+  assert.equal(h2.saveStatus(), null);
+});
+
+test("hot reload as save.json reads again after the previous build never could: recoverRead's rule", async () => {
+  // A herd that started fresh (nothing loaded): the file's herd comes back and this session's
+  // world is kept aside as save.unsaved. A herd restored from the bak: that world goes on.
+  for (const withBak of [false, true]) {
+    M.resetState();
+    let busy = true;
+    const json = saveOf("mid");
+    const files = { [SAVE]: json };
+    if (withBak) files[BAK] = saveOf("first-day");
+    const g = `rr-${++graphN}`;
+    const a = await mount({ role: "stage" }, { graph: g, fixture: { ...FX.demoFixture("mid"), readError: (p) => (busy && p === SAVE ? new Error("EACCES") : null) }, files });
+    const h1 = await hostOf(a);
+    await M.tickAll(12000);
+    assert.equal(h1.stats.loadedFrom, withBak ? "bak" : "fresh");
+    assert.equal(h1.ioBlocked, true);
+    h1.world.state.herd.name = "This session's herd"; // a marker of this session's world
+    busy = false;
+    await M.reloadAll([a]);
+    await M.tickAll(3000);
+    const h2 = await hostOf(a);
+    const unsaved = names().filter((n) => n.startsWith("save.unsaved"));
+    if (withBak) {
+      assert.equal(h2.stats.loadedFrom, "reload", "restored from the bak: this world goes on");
+      assert.equal(h2.world.state.herd.name, "This session's herd");
+      assert.equal(h2.ioBlocked, false);
+      assert.equal(unsaved.length, 0);
+      assert.equal(M.memfs.readText(BAK), json, "the file it could not read became the bak");
+      assert.equal(h2.saveStatus().restoredFrom, "bak", "still told it was restored");
+    } else {
+      assert.equal(h2.stats.loadedFrom, "save", "the herd in the file comes back");
+      assert.equal(h2.world.state.heroes.length, 6);
+      assert.equal(unsaved.length, 1, names().join(", "));
+      assert.equal(JSON.parse(M.memfs.readText(`${DIR}/${unsaved[0]}`)).herd.name, "This session's herd", "this session's world is kept aside");
+      assert.notEqual(h2.world.state.herd.name, "This session's herd");
+    }
+    assert.equal(h1.retired, true);
+    assert.deepEqual(a.errors, []);
+  }
+});
+
+test("hot reloads while save.json is briefly unreadable and then reads again as this world's own save: it goes on", async () => {
+  // A new herd (both files damaged) that has saved since: its own save.json must never be taken
+  // for a herd it never had, even though the herd started fresh and a reload saw the file unreadable.
+  M.resetState();
+  const files = { [SAVE]: "{not json", [BAK]: "{also not json" };
+  const g = `own-${++graphN}`;
+  const a = await mount({ role: "stage" }, { graph: g, fixture: FX.demoFixture("mid"), files });
+  const h1 = await hostOf(a);
+  await M.tickAll(3000);
+  assert.equal(h1.stats.loadedFrom, "fresh");
+  await M.tickAll(31000);
+  const own = M.memfs.readText(SAVE);
+  assert.equal(own, h1.lastText, "the new herd is on disk");
+  h1.world.state.herd.name = "This session's herd";
+  let busy = true;
+  M.updateFixture({ readError: (p) => (busy && p === SAVE ? new Error("EBUSY") : null) });
+  await M.reloadAll([a]);
+  await M.tickAll(11000);
+  const h2 = await hostOf(a);
+  assert.equal(h2.ioBlocked, true);
+  busy = false;
+  await M.reloadAll([a]);
+  await M.tickAll(2000);
+  const h3 = await hostOf(a);
+  assert.equal(h3.stats.loadedFrom, "reload");
+  assert.equal(h3.world.state.herd.name, "This session's herd");
+  assert.equal(h3.ioBlocked, false);
+  assert.equal(names().filter((n) => n.startsWith("save.unsaved")).length, 0);
+  assert.equal(h3.saveStatus().restoredFrom, "fresh", "still told the herd started fresh");
+  assert.deepEqual(a.errors, []);
+});
+
+test("a hot reload while save.json is briefly unreadable, then it reads again on the 30 s beat as this world's own save: no rollback", async () => {
+  // The same new herd, but no second reload: recoverRead() finds the text it wrote itself (handed
+  // over with the world), not a herd this session never had, so nothing is kept aside or rolled back.
+  M.resetState();
+  const files = { [SAVE]: "{not json", [BAK]: "{also not json" };
+  const g = `own30-${++graphN}`;
+  const a = await mount({ role: "stage" }, { graph: g, fixture: FX.demoFixture("mid"), files });
+  const h1 = await hostOf(a);
+  await M.tickAll(3000);
+  assert.equal(h1.stats.loadedFrom, "fresh");
+  await M.tickAll(31000);
+  const own = M.memfs.readText(SAVE);
+  assert.equal(own, h1.lastText, "the new herd is on disk");
+  h1.world.state.herd.name = "This session's herd"; // progress the file does not have yet
+  let busy = true;
+  M.updateFixture({ readError: (p) => (busy && p === SAVE ? new Error("EBUSY") : null) });
+  await M.reloadAll([a]);
+  await M.tickAll(11000);
+  const h2 = await hostOf(a);
+  assert.equal(h2.stats.loadedFrom, "reload");
+  assert.equal(h2.ioBlocked, true);
+  busy = false;
+  await M.tickAll(31000); // the 30 s beat reads it again: its own text
+  await M.tickAll(3000);
+  assert.equal(h2.ioBlocked, false);
+  assert.equal(h2.world.state.herd.name, "This session's herd", "this world goes on");
+  assert.equal(names().filter((n) => n.startsWith("save.unsaved")).length, 0, names().join(", "));
+  assert.equal(JSON.parse(M.memfs.readText(SAVE)).herd.name, "This session's herd", "and is saved over its own file");
+  assert.equal(h2.saveStatus().restoredFrom, "fresh", "still told the herd started fresh");
+  assert.deepEqual(a.errors, []);
+});
+
+test("hot reload keeps the save-trouble cue: a world restored from the bak still says so", async () => {
+  M.resetState();
+  const good = saveOf("mid");
+  const files = { [SAVE]: good.replace(/"crc":"[0-9a-f]+"/, '"crc":"00000000"'), [BAK]: good };
+  const g = `cue-${++graphN}`;
+  const a = await mount({ role: "stage" }, { graph: g, fixture: FX.demoFixture("mid"), files });
+  const b = await mount({ role: "party" }, { graph: g, fixture: null });
+  const h1 = await hostOf(a);
+  await M.tickAll(1000);
+  const st1 = h1.saveStatus();
+  assert.equal(st1.restoredFrom, "bak");
+  h1.saveNoticeSeen = st1.message; // the player dismissed the stage notice
+  h1.failedWrites = 1;
+  await M.reloadAll([a, b]);
+  await M.tickAll(1000);
+  const h2 = await hostOf(a);
+  assert.equal(h2.stats.loadedFrom, "reload");
+  const st2 = h2.saveStatus();
+  assert.ok(st2, "the same world goes on, so does what the player was told");
+  assert.equal(st2.restoredFrom, "bak");
+  assert.equal(st2.message, st1.message);
+  assert.equal(st2.since, st1.since);
+  assert.equal(h2.view("party", { width: 260 }).save?.title, st1.title, "the party cue");
+  assert.equal(h2.saveNoticeSeen, st1.message, "a dismissed notice stays dismissed");
+  assert.equal(h2.failedWrites, 1, "failing writes keep counting");
+  assert.deepEqual([...a.errors, ...b.errors], []);
+});
+
+test("hot reload while the old host is still loading, next to a copy whose reload failed: one host", async () => {
+  // The old host registers as soon as it starts loading, so the next build finds it, retires it
+  // (its load never finishes) and loads the file; the copy that kept the old build calls a retired
+  // host from then on.
+  M.resetState();
+  let fails = 1;
+  const fixture = { ...FX.demoFixture("mid"), readError: (p) => (p === SAVE && fails-- > 0 ? new Error("os error 32") : null) };
+  const g = `still-${++graphN}`;
+  const a = await mount({ role: "stage" }, { graph: g, fixture, files: { [SAVE]: saveOf("mid") } });
+  const b = await mount({ role: "party" }, { graph: g, fixture: null });
+  const h1 = await hostOf(a);
+  assert.equal(h1.loaded, false, "still loading: its read is retried after 1 s");
+  await M.reloadAll([a]); // b's new instance failed: b keeps build 1
+  const h2 = await hostOf(a);
+  assert.notEqual(h2, h1);
+  assert.equal(b.view.host, h1);
+  await M.tickAll(1000);
+  assert.equal(h2.stats.loadedFrom, "save");
+  assert.equal(h1.retired, true, "the old host is retired although it never finished loading");
+  await M.tickAll(70000); // b's timer still calls h1 every second (its load would restart after 10 s)
+  assert.equal(h1.loaded, false, "it never loads");
+  assert.equal(h1.stats.pumps, 0);
+  assert.ok(writes(SAVE).length >= 2 && writes(SAVE).every((w) => w.copy === a.copy.label), JSON.stringify(writes(SAVE).map((w) => w.copy)));
+  assert.equal(h2.stats.reloads, 0, "no write conflict");
+  assert.deepEqual([...a.errors, ...b.errors], []);
+});
+
+test("back-to-back hot reloads (the next build lands before the last one loaded): no rollback, one host", async () => {
+  M.resetState();
+  const g = `b2b-${++graphN}`;
+  const a = await mount({ role: "stage" }, { graph: g, fixture: FX.demoFixture("mid") });
+  const h1 = await hostOf(a);
+  await M.tickAll(31000);
+  await M.tickAll(10000);
+  const liveTick = h1.world.state.herd.tick;
+  let fails = 1;
+  M.updateFixture({ readError: (p) => (p === SAVE && fails-- > 0 ? new Error("os error 32") : null) });
+  await M.reloadAll([a]); // build 2: its read fails once, so it is still loading
+  const h2 = await hostOf(a);
+  assert.equal(h2.loaded, false);
+  await M.reloadAll([a]); // build 3
+  const h3 = await hostOf(a);
+  await M.tickAll(2000);
+  assert.equal(h3.stats.loadedFrom, "reload", "build 1 handed its world to build 3");
+  assert.ok(h3.world.state.herd.tick >= liveTick);
+  assert.equal(h1.retired, true);
+  assert.equal(h2.retired, true);
+  assert.equal(h2.loaded, false);
+  assert.equal(h3.pred, null, "the earlier builds can go");
+});
+
 test("a new VM (or another window) never takes another VM's world: it loads the file", async () => {
   M.resetState();
   const a = await mount({ role: "stage" }, { graph: "vm-a", fixture: FX.demoFixture("mid") });
@@ -959,6 +1204,31 @@ test("an unreadable save.json and no bak: once it reads, the herd comes back and
   assert.equal(writes(SAVE).length ? writes(SAVE)[0].expected : json, json);
 });
 
+test("a save from a newer version that could not be read at start is never written once it reads (D§13.4)", async () => {
+  M.resetState();
+  const text = newerSave(saveOf("idle"));
+  let busy = 6; // unreadable for the load's reads (1 + 3 retries), then fine
+  const mod = await mount({ role: "hud" }, { fixture: { ...FX.demoFixture("idle"), readError: (p) => (p === SAVE && busy-- > 0 ? new Error("EBUSY") : null) }, files: { [SAVE]: text } });
+  const host = await hostOf(mod);
+  await M.tickAll(12000);
+  assert.equal(host.stats.loadedFrom, "fresh");
+  assert.equal(host.ioBlocked, true);
+  host.world.state.herd.name = "This session's herd"; // a marker of this session's world
+  await M.tickAll(31000); // the 30 s beat reads it again: a newer version's save
+  await M.tickAll(35000);
+  await M.tickAll(35000);
+  assert.equal(M.memfs.readText(SAVE), text, "never written over");
+  assert.equal(M.memfs.readText(BAK), undefined, "never rotated into save.bak either");
+  assert.equal(writes(SAVE).length, 0);
+  assert.equal(host.world.rt.readOnly, true, "the newer herd is open read-only, as at a start");
+  assert.equal(host.world.state.heroes.length, 4);
+  assert.equal(host.saveStatus().readOnly, true, "and the player is told");
+  const kept = names().filter((n) => n.startsWith("save.unsaved"));
+  assert.equal(kept.length, 1, names().join(", "));
+  assert.equal(JSON.parse(M.memfs.readText(`${DIR}/${kept[0]}`)).herd.name, "This session's herd", "this session's world is kept aside");
+  assert.deepEqual(mod.errors, []);
+});
+
 test("a save whose host call never came back (its copy closed) is given up after 15 s", async () => {
   M.resetState();
   const mod = await mount({ role: "stage" }, { fixture: FX.demoFixture("first-day") });
@@ -1042,5 +1312,31 @@ test("pump prewarms the view models the copies used, so the renders after a broa
   const stageKeys = [...host.memo.map.keys()].filter((k) => k.startsWith("stage|"));
   assert.equal(stageKeys.length, 1, stageKeys.join(", "));
   assert.match(stageKeys[0], /"width":915/);
+  assert.deepEqual(mod.errors, []);
+});
+
+test("a frame drawing more views than the memo keeps drops pane headers first: stage, party and HUD stay prewarmed", async () => {
+  // herdr draws a header copy for every pane on screen; past the memo's size the whole map used to
+  // go mid-frame, so the stage, party and HUD were never prewarmed and rebuilt in their renders.
+  M.resetState();
+  const mod = await mount({ role: "stage" }, { fixture: FX.demoFixture("mid") });
+  const host = await hostOf(mod);
+  host.world = (await mod.import("./game/demo.js")).demoWorld("mid", NOW).world;
+  host.version++;
+  const frame = () => {
+    host.view("stage", { width: 960, height: 200 });
+    host.view("party", { width: 260 });
+    host.view("hud", { width: 960 });
+    for (let i = 0; i < 90; i++) host.view("nameplate", { terminal: `t${i}`, pane: `p_${i}` });
+  };
+  frame();
+  assert.ok(host.memo.map.size <= 64, `bounded: ${host.memo.map.size}`);
+  const kinds = new Set([...host.memo.map.values()].map((e) => e.kind));
+  for (const k of ["stage", "party", "hud"]) assert.ok(kinds.has(k), `${k} kept through the frame`);
+  assert.equal(host.pump(NOW + 1000), true);
+  const built = [...host.memo.map.values()].filter((e) => e.kind !== "nameplate").map((e) => e.kind).sort();
+  assert.deepEqual(built, ["hud", "party", "stage"], "the pump prewarmed them for the next frame");
+  const vm = host.memo.map.get('stage|{"width":960,"height":200}').vm;
+  assert.equal(host.view("stage", { width: 960, height: 200 }), vm, "the render after the broadcast hits the memo");
   assert.deepEqual(mod.errors, []);
 });

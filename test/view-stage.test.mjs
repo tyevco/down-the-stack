@@ -1485,3 +1485,65 @@ test("tooltips: the stage names a terminal's work as the party does (hero, Forkl
   const chest = stageView(fd, { width: 1600, height: 200, nowMs: NOW }).chests.find((c) => c.heroId === hero.id);
   assert.match(chest.tooltip.split("\n")[0], /^Shipped: a task · /);
 });
+
+// ---------------------------------------------------------------------------------------------
+// round 4b U3: the hires of one tick are one header note
+// ---------------------------------------------------------------------------------------------
+
+test("header note: the hires of one tick (the 04:00 game day turn) are one note, 'Hired 6 contractors: Zed, Coda and 4 more', every hire's line in its tooltip, for the time the queue gave them (round 4b U3)", async () => {
+  const { makeEmitter } = await import("../mods/down-the-stack/game/world.js");
+  const { journal } = await import("../mods/down-the-stack/game/herd.js");
+  const w = fresh("mid");
+  const ref = { now: w.state.herd.lastMs };
+  // the demo's own notes first (and no autopilot buying buildings meanwhile)
+  w.state.herd.cfg.autopilot = false;
+  for (let k = 0; k < 120 && w.rt.notes.length; k++) step(w, ref);
+  assert.equal(w.rt.notes.length, 0);
+  const heroes = w.state.heroes.slice(0, 6);
+  assert.equal(heroes.length, 6);
+  // what agents.promoteContractors does for each hire: a "hired" journal line and a header note
+  const hireAll = (list, { queued = 0 } = {}) => {
+    const ev = makeEmitter(w, { live: true });
+    for (let i = 0; i < queued; i++) ev.note(`Badge: Something ${i}`);
+    for (const h of list) {
+      const text = `Hired: ${h.name} (was a contractor)`;
+      journal(w.state, "hired", h.id, text, h.L, w.rt.nowMs, h.name);
+      ev.note(text);
+    }
+    w.rt.version++;
+  };
+  hireAll(heroes);
+  const first = (n) => n.split(" ")[0];
+  const seen = [];
+  for (let k = 0; k < 20; k++) {
+    const vm = stageView(w, { width: 1600, height: 200 });
+    seen.push(vm.headerNote);
+    step(w, ref);
+  }
+  const merged = seen[0];
+  assert.ok(merged, "shown at once");
+  assert.equal(merged.text, `Hired 6 contractors: ${first(heroes[0].name)}, ${first(heroes[1].name)} and 4 more`);
+  assert.equal(merged.tooltip, heroes.map((h) => `Hired: ${h.name} (was a contractor)`).join("\n"));
+  assert.equal(merged.heroId, null, "herd-wide");
+  assert.equal(merged.short, "Hired 6 contractors", "its short form, for a strip with no room for the names (round 4b integrator)");
+  // one note, the same key and text, while any of its hires' 3 s slots runs (6 × 3 s)
+  const shown = seen.filter((n) => n && n.key === merged.key);
+  assert.ok(shown.length >= 17 && shown.length <= 18, `${shown.length} ticks`);
+  assert.ok(shown.every((n) => n.text === merged.text && n.tooltip === merged.tooltip));
+  assert.ok(seen.every((n) => !n || n.key === merged.key), "no single hire note in between");
+  // the queue had room for five: the journal still gives all six
+  hireAll(heroes, { queued: 1 });
+  let vm = null;
+  for (let k = 0; k < 6 && !(vm && vm.headerNote && /^Hired/.test(vm.headerNote.text)); k++) { step(w, ref); vm = stageView(w, { width: 1600, height: 200 }); }
+  assert.match(vm.headerNote.text, /^Hired 6 contractors: /);
+  // one hire alone: its own line, about that hero (the stage puts it over the hero's room)
+  for (let k = 0; k < 40 || (w.rt.notes.length && k < 400); k++) step(w, ref);
+  hireAll([heroes[2]]);
+  const one = stageView(w, { width: 1600, height: 200 }).headerNote;
+  assert.equal(one.text, `Hired: ${heroes[2].name} (was a contractor)`);
+  assert.equal(one.heroId, heroes[2].id);
+  // two and three read whole
+  for (let k = 0; k < 40 || (w.rt.notes.length && k < 400); k++) step(w, ref);
+  hireAll(heroes.slice(0, 3));
+  assert.equal(stageView(w, { width: 1600, height: 200 }).headerNote.text, `Hired 3 contractors: ${first(heroes[0].name)}, ${first(heroes[1].name)} and ${first(heroes[2].name)}`);
+});

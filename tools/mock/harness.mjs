@@ -101,6 +101,7 @@ export class Mounted {
     this.live = null;
     this.tree = null;
     this.size_ = null;
+    this._pendingSize = null; // a root size given before a root could take it (size(), render())
     // lastRenderMs / maxRenderMs / evalMs / initMs: budget time (stopwatch); lastRenderWallMs: wall time
     this.stats = { renders: 0, lastRenderMs: 0, lastRenderWallMs: 0, maxRenderMs: 0, nodes: 0, elements: 0, created: 0, evalMs: 0, initMs: 0 };
   }
@@ -154,6 +155,13 @@ export class Mounted {
     copy.dirty = false;
     this.live = root;
     this.tree = serialize(root);
+    // a root size given before a root could take it (size()): herdr reports it after this layout
+    const pending = this._pendingSize;
+    const onSize = root.handlers?.on_size_change ?? [];
+    if (pending && onSize.length) {
+      this._pendingSize = null;
+      for (const fn of onSize) this._callHandler(fn, { ...pending }, "on_size_change");
+    }
     let n = 0, els = 0;
     walkLive(root, (x) => { n++; if (x.type !== "text" && x.type !== "view") els++; });
     this.stats.nodes = n;
@@ -342,8 +350,12 @@ export class Mounted {
   size(width, height, { id } = {}) {
     this.size_ = { width, height };
     const node = id ? this.node(id) : this.live;
-    if (!node) return 0;
-    const fns = node.handlers.on_size_change ?? [];
+    const fns = node ? node.handlers.on_size_change ?? [] : [];
+    // herdr reports a size after a layout, to the element that asked (gpui-shell materialize.rs
+    // SizeObserver, in prepaint): a root size given before any render drew a root with an
+    // on_size_change handler (a copy's first frame, or one still loading) is kept and delivered
+    // after the next render that does (render()), so that frame is drawn without a size first
+    if (!id) this._pendingSize = fns.length ? null : { width, height };
     for (const fn of fns) this._callHandler(fn, { width, height }, "on_size_change");
     return fns.length;
   }

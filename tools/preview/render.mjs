@@ -140,7 +140,8 @@ const FLAT = {
   flex_row: { "flex-direction": "row" }, flex_row_reverse: { "flex-direction": "row-reverse" }, flex_col: { "flex-direction": "column" }, flex_col_reverse: { "flex-direction": "column-reverse" },
   flex_wrap: { "flex-wrap": "wrap" }, flex_wrap_reverse: { "flex-wrap": "wrap-reverse" }, flex_nowrap: { "flex-wrap": "nowrap" },
   flex_1: { flex: "1 1 0%" }, flex_auto: { flex: "1 1 auto" }, flex_initial: { flex: "0 1 auto" }, flex_none: { flex: "none" },
-  flex_grow_0: { "flex-grow": "0" }, flex_grow_1: { "flex-grow": "1" }, flex_grow: { "flex-grow": "1" }, flex_shrink_0: { "flex-shrink": "0" }, flex_shrink_1: { "flex-shrink": "1" }, flex_shrink: { "flex-shrink": "1" },
+  flex_grow_0: { "flex-grow": "0" }, flex_grow_1: { "flex-grow": "1" }, flex_shrink_0: { "flex-shrink": "0" }, flex_shrink_1: { "flex-shrink": "1" },
+  // (flex_grow(n) / flex_shrink(n) take a number in herdr, style.rs: the switch in applyMethod)
   items_start: { "align-items": "flex-start" }, items_end: { "align-items": "flex-end" }, items_center: { "align-items": "center" }, items_baseline: { "align-items": "baseline" }, items_stretch: { "align-items": "stretch" },
   justify_start: { "justify-content": "flex-start" }, justify_end: { "justify-content": "flex-end" }, justify_center: { "justify-content": "center" }, justify_between: { "justify-content": "space-between" }, justify_around: { "justify-content": "space-around" }, justify_evenly: { "justify-content": "space-evenly" },
   content_normal: { "align-content": "normal" }, content_center: { "align-content": "center" }, content_start: { "align-content": "flex-start" }, content_end: { "align-content": "flex-end" }, content_between: { "align-content": "space-between" }, content_around: { "align-content": "space-around" }, content_evenly: { "align-content": "space-evenly" }, content_stretch: { "align-content": "stretch" },

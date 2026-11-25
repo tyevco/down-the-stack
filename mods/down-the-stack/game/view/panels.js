@@ -60,7 +60,7 @@ import * as Herd from "../herd.js";
 import { bossApi } from "../autopilot.js";
 import { heroCtx } from "../combat.js";
 import { fnv1a32 } from "../rng.js";
-import { statusWord, programIconOf, termlingColors, faceOf, xpFracOf, feFracOf, whyLine, taskLabel, tellingTitle, gapPart, gapText } from "./chrome.js";
+import { statusWord, programIconOf, termlingColors, faceOf, xpFracOf, feFracOf, whyLine, taskLabel, tellingTitle, gapPart, gapText, needYou, needYouText } from "./chrome.js";
 
 // ---------------------------------------------------------------------------------------------
 // Constants
@@ -89,8 +89,8 @@ const DAY_MS = 86400000;
 const MINUS = "−";
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const RESPEC_FREE_MS = DAY_MS;
-// The stage's hat tints (game/view/stage.js), so the sheet's rig wears the same hat colour.
-const HAT_COLORS = ["#E86F9C", "#5FB0E8", "#8FBF5A", "#E8B84A", "#C47BE8", "#F07D5C"];
+// The hat tints the stage uses too (data.js PALETTE.hatTint), so the sheet's rig wears the same hat colour.
+const HAT_COLORS = PALETTE.hatTint;
 const FORGE = BUILDING_IDX.ci_forge;
 const FORGE_SQUASH = Number(Object.keys(BUILDINGS[FORGE].unlocks).find((k) => BUILDINGS[FORGE].unlocks[k] === "squashMerge"));
 const FORGE_REROLL = Number(Object.keys(BUILDINGS[FORGE].unlocks).find((k) => BUILDINGS[FORGE].unlocks[k] === "reroll"));
@@ -951,7 +951,7 @@ function rigOf(hero, live, state) {
     colors: termlingColors(hero, programKey, state),
     face: faceOf(state),
     weapon: wpn ? { clsId, color: ITEM_BASES.weaponTierTones[wt - 1], edge: wt === 5 } : null,
-    hat: ht ? { tier: ht, color: HAT_COLORS[(hat.uid || 0) % HAT_COLORS.length] } : null,
+    hat: ht ? { tier: ht, color: HAT_COLORS[(((hat.uid || 0) % HAT_COLORS.length) + HAT_COLORS.length) % HAT_COLORS.length] } : null,
     accessory: clsId,
     programIcon: live ? programIconOf(live.program) : programIconOf(shippedProgram(programKey)),
   };
@@ -1073,6 +1073,15 @@ function hireOf(world, hero, clock) {
       short = at != null ? `Hired ${aheadText(at, clock, true)}` : "Hired at 04:00";
       color = COL.xp;
       break;
+    case "grace": {
+      // a hero below Lv 10 off duty on a full roster makes room once its off-duty grace runs out
+      // (round 4b), unless its agent comes back for it first: "about", from the engine's atMs
+      const min = at != null ? Math.max(1, Math.ceil((at - clock.now) / 60000)) : null;
+      long = min != null ? `hired in about ${min} min` : "hired when a roster slot frees";
+      short = min != null ? `Hired in ~${min} min` : "Hired when a slot frees";
+      color = COL.idle;
+      break;
+    }
     case "never": long = "never hired here: this save is read-only"; short = "Not hired (read-only)"; color = COL.idle; break;
     default: long = "hired when a roster slot frees"; short = "Hired when a slot frees"; color = COL.idle; break;
   }
@@ -1970,8 +1979,10 @@ function herdHeader(world, idx) {
   const parts = [`${n} ${plural(n, "hero", "heroes")}`];
   if (contractors) parts.push(`${contractors} ${plural(contractors, "contractor")}`);
   parts.push(`${idx.counts.working} working`);
-  // The blocked count also goes apart (`waiting`): the panel draws it in the blocked colour.
-  const waiting = idx.counts.blocked ? `${idx.counts.blocked} waiting for you` : null;
+  // What waits for the person goes apart (`waiting`, drawn in the blocked colour): the party's
+  // "N need you", blocked heroes plus blocked sub-agents (chrome.needYou, owner decision 3).
+  const need = needYou(world).n;
+  const waiting = need ? needYouText(need) : null;
   if (waiting) parts.push(waiting);
   const nextLabel = `v${Math.floor((rel.r + 1) / 10)}.${(rel.r + 1) % 10}`;
   const next = rel.capped ? `${nextLabel} at ${fmtInt(rel.next)} (bonuses stop at +${Math.round(T.release.bonusPer * T.release.maxRelease * 100)}%)` : `${nextLabel} at ${fmtInt(rel.next)}`;
@@ -2379,10 +2390,12 @@ function rosterRow(world, idx, hero, live, clock) {
         tone: "danger", confirm: `Retire ${first}?`, tooltip: "Joins the Hall of Fame (+0.5% herd XP); its gear goes to vendor/",
       });
   }
-  // a Contractor's row says when it joins the roster (owner decision, round 4)
+  // a Contractor's row says when it joins the roster (owner decision, round 4); that line says it
+  // is a Contractor, so its name carries no "(contractor)" then (a slim row at 640 px cut both)
   const h = hireOf(world, hero, clock);
   return {
-    key: `r:${hero.id}`, heroId: hero.id, name: `${str(hero.name, "Termling")}${hero.contractor ? " (contractor)" : ""}`, level: `Lv ${hero.L}`,
+    key: `r:${hero.id}`, heroId: hero.id, name: `${str(hero.name, "Termling")}${hero.contractor && !h ? " (contractor)" : ""}`, level: `Lv ${hero.L}`,
+    contractor: !!hero.contractor,
     title: career.title, status, stripe: STATUS_COLOR[status] || COL.idle,
     where: live ? mapLabel(world, live.mapId, live) || "the Stack" : "off duty",
     seen: seenText(world, hero, live, clock),

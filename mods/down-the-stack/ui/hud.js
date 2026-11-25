@@ -8,7 +8,10 @@
  * @typedef {Object} HudAdditions
  * gold, snippets and release are display strings ("48.2k", "133", "v2.3"; numbers are shown with
  * String()). sprint: null | { label, have, need } (as PartyVM.footer.sprint). working, blocked,
- * shipped: integers (shipped = done, not yet seen). digestDot: boolean; digestTip: null | string
+ * shipped: integers (shipped = done, not yet seen): heroes by herdr status, blocked heroes only (owner
+ * decision 3). needYou: integer, the party's "N need you" (blocked heroes plus blocked sub-agents,
+ * game/view needYou): the blocked count's tooltip names it when sub-agents wait too.
+ * digestDot: boolean; digestTip: null | string
  * (why the dot is lit, as the party's Herd button says it: chests opened Unreviewed not yet seen
  * in the Digest, or an off-duty chest about to; the Herd button's tooltip). calm: boolean (calm mode;
  * the strip ignores it, but key commands read it from here: the cheapest view, see chromeCommand).
@@ -52,12 +55,25 @@ export function hudFit(vm, W) {
 }
 
 // A count's dot is a status mark, in the party stripe's colour for the theme (party.js stripeColor).
-function count(id, n, label, status, color, t, words) {
+function count(id, n, label, status, color, t, words, tip) {
   const zero = !n;
-  return h_flex().id(id).flex_none().gap(5).items_center().tooltip(`${n} ${label}`)
+  return h_flex().id(id).flex_none().gap(5).items_center().tooltip(tip ?? `${n} ${label}`)
     .child(div().size(7).flex_none().rounded_full().bg(zero ? t.dim : stripeColor(color, status, t)).when(zero, (el) => el.opacity(0.5)))
     .child(div().font_family(MONO).text_size(11).text_color(zero ? t.dim : t.fg).child(String(n ?? 0)))
     .when(words, (el) => el.child(div().text_size(11).text_color(t.dim).child(label)));
+}
+
+/**
+ * The blocked count is heroes (as working and shipped are); when sub-agents wait too, its tooltip
+ * gives the party's "N need you", which counts them (owner decision 3).
+ */
+function blockedTip(vm) {
+  const n = Number(vm.blocked) || 0;
+  const all = Number(vm.needYou);
+  const heroes = `${n} ${n === 1 ? "hero" : "heroes"} blocked`;
+  if (!Number.isFinite(all) || all <= n) return heroes;
+  const subs = all - n;
+  return `${heroes}\n${all} ${all === 1 ? "needs" : "need"} you, counting ${subs} waiting ${subs === 1 ? "sub-agent" : "sub-agents"}`;
 }
 
 function stat(icon, color, value, t, tip) {
@@ -104,7 +120,7 @@ export function renderHud(vm, env) {
       : null,
     div().flex_1(),
     count("hud-working", vm.working, "working", "working", C.working, t, words),
-    count("hud-blocked", vm.blocked, "blocked", "blocked", C.blocked, t, words),
+    count("hud-blocked", vm.blocked, "blocked", "blocked", C.blocked, t, words, blockedTip(vm)),
     count("hud-shipped", vm.shipped, "shipped", "done", C.done, t, words),
     vm.save ? saveCueEl("hud-save", vm.save, t, { h: 20, size: 11, label: fit.saveLabel }) : null,
     // A background hover, so the icon and its label change together: herdr fixes an svg's colour

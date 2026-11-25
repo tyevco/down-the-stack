@@ -40,7 +40,12 @@ herdr's app home is the same on every OS, macOS and Windows included:
 2. else `$XDG_CONFIG_HOME/herdr-app`;
 3. else `~/.config/herdr-app`.
 
-Below, `<home>` means that folder.
+Below, `<home>` means that folder. In PowerShell (Windows), this sets `$h` to it for the commands
+below:
+
+```powershell
+$h = if ($env:HERDR_APP_HOME) { $env:HERDR_APP_HOME } elseif ($env:XDG_CONFIG_HOME) { "$env:XDG_CONFIG_HOME\herdr-app" } else { "$HOME\.config\herdr-app" }
+```
 
 1. **Show another layout first** (for example `ctrl-shift-l`, `cmd-shift-l` on macOS, or Settings).
    - herdr watches `layouts/` and `mods/`, and reloads every copy of a mod that is on screen
@@ -52,6 +57,10 @@ Below, `<home>` means that folder.
    ```sh
    cp layouts/Down-the-Stack.json  <home>/layouts/Down-the-Stack.json
    cp -r mods/down-the-stack       <home>/mods/
+   ```
+   ```powershell
+   Copy-Item layouts\Down-the-Stack.json "$h\layouts\Down-the-Stack.json"
+   Copy-Item -Recurse mods\down-the-stack -Destination "$h\mods"
    ```
    - `cp -r` (and PowerShell's `Copy-Item -Recurse`) into a folder that already exists copies the
      source *inside* it: you would get `<home>/mods/down-the-stack/down-the-stack/`, which herdr
@@ -90,6 +99,10 @@ Below, `<home>` means that folder.
    | `ctrl-shift-a` | Herd panel (`down-the-stack.herd`) |
    | `ctrl-shift-d` | calm mode (`down-the-stack.calm`) |
 
+   **On macOS keep them as Ctrl-Shift** (the Control key), as `keys.json` has them. herdr's own
+   macOS shortcuts use Cmd (`defaults/keys.macos.json`), and Cmd-Shift-D there is
+   `pane.split:down`: "fitting" these keys to Cmd would hide that shortcut while this layout shows.
+
    An untouched `keys.json` is replaced by newer default shortcuts when herdr updates. Once you edit
    it, it is yours, and new default shortcuts must be added by hand. Without these keys the
    palette still has "Down the Stack: Herd panel" (it opens on the Digest tab in any layout), and
@@ -125,8 +138,9 @@ game itself only says "Down the Stack".
     `save.json` could not be read, kept aside once the old save is back (also a session's world
     when the save that turns up was written by a newer version, which opens read-only).
 
-  Copies named `save.broken-<ms>` or `save.unsaved-<ms>` left by earlier builds stay until you
-  delete them.
+  Builds before this layout's round-4 update (commit `d1ffb4f`) named these copies
+  `save.broken-<ms>` and `save.unsaved-<ms>`. The game never removes those: delete them by hand if
+  you like.
 - **The save is plain text.** It holds your agents' task titles (the terminal titles they set)
   and your pane, tab and space names, in JSON. It never leaves that folder.
 - It posts no notifications unless you turn them on in the Herd panel's Settings tab (herd-first
@@ -161,15 +175,36 @@ game itself only says "Down the Stack".
   cp -r mods/down-the-stack <home>/mods/
   cp layouts/Down-the-Stack.json <home>/layouts/Down-the-Stack.json
   ```
+  ```powershell
+  Remove-Item -Recurse -Force "$h\mods\down-the-stack"
+  Copy-Item -Recurse mods\down-the-stack -Destination "$h\mods"
+  Copy-Item layouts\Down-the-Stack.json "$h\layouts\Down-the-Stack.json"
+  ```
   To keep the old build, move it out of `<home>/mods/` instead of deleting it (herdr treats every
   folder there as a mod, and a `mv` onto a folder that exists nests too). Run
   `herdr-app check <home>/mods/down-the-stack` again, then switch back. The save carries over (it
   lives in `<home>/data/down-the-stack/`).
-- **Uninstall:** delete `<home>/layouts/Down-the-Stack.json`, `<home>/mods/down-the-stack/` and
-  `<home>/layouts/.state/Down-the-Stack.json` (herdr's memory of this layout's clicks, such as a
-  hidden stage: left behind, it would bring the stage back hidden after a reinstall). Also delete
-  `<home>/data/down-the-stack/` to drop the save. Remove the `layout:Down-the-Stack` section from
-  `keys.json` if you merged it.
+- **Uninstall:** show another layout, then delete `<home>/layouts/Down-the-Stack.json`,
+  `<home>/mods/down-the-stack/` and `<home>/layouts/.state/Down-the-Stack.json` (herdr's memory of
+  this layout's clicks, such as a hidden stage: left behind, it would bring the stage back hidden
+  after a reinstall). Also delete `<home>/data/down-the-stack/` to drop the save.
+  ```sh
+  rm -rf <home>/mods/down-the-stack <home>/layouts/Down-the-Stack.json <home>/layouts/.state/Down-the-Stack.json
+  rm -rf <home>/data/down-the-stack   # the save too
+  ```
+  ```powershell
+  Remove-Item -Recurse -Force "$h\mods\down-the-stack", "$h\layouts\Down-the-Stack.json", "$h\layouts\.state\Down-the-Stack.json" -ErrorAction SilentlyContinue
+  Remove-Item -Recurse -Force "$h\data\down-the-stack"   # the save too
+  ```
+  **Keys**, if you merged them:
+  - If you had never edited `<home>/keys.json` before (the merge was its only change), delete it.
+    herdr writes its current default keys back as soon as it finds the file missing (when it
+    starts, and when it sees the file change), and goes on updating them with herdr as before. It
+    updates only a `keys.json` byte for byte the same as one it shipped, so a file you trimmed by
+    hand stays "yours" even when it looks like the defaults.
+  - Otherwise remove the `layout:Down-the-Stack` section by hand. Left in, it does no harm: it
+    applies only while a layout of that name shows, and herdr binds a removed mod's commands to
+    nothing.
 
 ## Develop
 

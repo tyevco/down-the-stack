@@ -21,13 +21,13 @@ const STRIPE = { working: C.working, blocked: C.blocked, done: C.done, idle: C.i
 const TABS = [["upgrades", "Upgrades"], ["stash", "Stash"], ["tracker", "Tracker"], ["bosses", "Bosses"], ["roster", "Roster"], ["digest", "Digest"], ["settings", "Settings"]];
 
 function header(o = {}) {
-  const sub = o.sub ?? "9 heroes · 2 working · 1 waiting for you";
+  const sub = o.sub ?? "9 heroes · 2 working · 1 needs you";
   return {
     name: o.name ?? "The Herd", release: o.release ?? "v2.3",
     releaseTip: o.releaseTip ?? "Release Train: 562 Seals credited · v2.4 at 584 · +11.5% XP and gold",
     gold: o.gold ?? "212k", snippets: o.snippets ?? "312",
-    // waiting: the blocked part of sub, drawn in the blocked colour (null when nobody waits)
-    sub, waiting: o.waiting !== undefined ? o.waiting : (/\d+ waiting for you/.exec(sub) ?? [null])[0],
+    // waiting: the part of sub that waits for the person ("N need you"), drawn in the blocked colour (null when nobody waits)
+    sub, waiting: o.waiting !== undefined ? o.waiting : (/\d+ needs? you/.exec(sub) ?? [null])[0],
     sprint: o.sprint === undefined ? { label: "The Octopus Merge", have: 45, need: 45, text: "Sprint 45 / 45" } : o.sprint,
   };
 }
@@ -258,7 +258,7 @@ const TINT = ["#6C8CF5", "#F07D5C", "#45C2A8", "#C47BE8", "#E8B84A", "#5FB0E8", 
 function rr(id, o) {
   const status = o.status ?? "working";
   return {
-    key: `r:${id}`, heroId: id, name: o.name, level: `Lv ${o.level}`, title: o.title, status, stripe: STRIPE[status],
+    key: `r:${id}`, heroId: id, name: o.name, contractor: !!o.contractor, level: `Lv ${o.level}`, title: o.title, status, stripe: STRIPE[status],
     where: o.where, seen: o.seen,
     portrait: { colors: { hoodie: TINT[(((id - 1) % TINT.length) + TINT.length) % TINT.length], titleBar: "#3B2A24", screen: "#17161F", faceInk: STRIPE[status] }, face: FACE[status], programIcon: o.icon ?? ICON.claude },
     retire: o.retire ? action(`retire:${id}`, "Retire", "retire", { heroId: id }, { tone: "danger", confirm: `Retire ${o.name.split(" ")[0]}?`, tooltip: "Joins the Hall of Fame (+0.5% herd XP); gear goes to vendor/" }) : null,
@@ -285,7 +285,7 @@ function roster(empty = false) {
       // spaces with one hero each: no header, the row names its space (round 4)
       { key: "one-each", name: "One hero per space", inline: true, rows: [
         rr(9, { name: "Sol the Memoized", level: 22, title: "Junior Refactorer", where: "2-3 Promise Falls", seen: "working 8m", space: "docs-site" }),
-        rr(-1, { name: "Wren Monorepo-Raised (contractor)", level: 6, title: "Intern", where: "1-2 Whitespace Fields", seen: "working 22m", space: "ref-client",
+        rr(-1, { name: "Wren Monorepo-Raised", contractor: true, level: 6, title: "Intern", where: "1-2 Whitespace Fields", seen: "working 22m", space: "ref-client",
           hire: { text: "Hired tomorrow 04:00", color: C.xp, tooltip: `Hired at the next 04:00 game day (today: 0 of 6 hires left). ${HIRE_KEEPS}` } }),
       ] },
       { key: "g:herdr-app", name: "herdr-app", inline: false, rows: [
@@ -421,7 +421,7 @@ function midVm(tab, f = {}) {
   return vm;
 }
 
-const lateHeader = { name: "Night Shift", release: "v5.8", releaseTip: "Release Train: 1,951 Seals · v5.9 at 1,967 · +29% XP and gold", gold: "48.6M", snippets: "21.4k", sub: "22 heroes · 11 working · 3 waiting for you",
+const lateHeader = { name: "Night Shift", release: "v5.8", releaseTip: "Release Train: 1,951 Seals · v5.9 at 1,967 · +29% XP and gold", gold: "48.6M", snippets: "21.4k", sub: "22 heroes · 11 working · 3 need you",
   sprint: { label: "The Heisenbug", have: 214, need: 300, text: "Sprint 214 / 300" } };
 
 export const scenarios = {

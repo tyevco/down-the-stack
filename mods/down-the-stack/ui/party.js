@@ -72,8 +72,9 @@
  *
  * env (renderParty): { width, height, zoom, theme: T(), host, act, ui? } where ui is the role's
  * mutable UI state { toggled:Set<groupKey>, hovered:string|null, size:{w,h}|null,
- * needYou?:{key, focus} (the "N need you" walk: the entry it showed last and the row focused
- * after it) }; renderers mutate it from handlers and call cx.notify(). Optional: a fresh state is
+ * needYou?:{key, seen} (the "N need you" walk: the entry it showed last and the row focuses the
+ * walk passed through) }; renderers mutate it from handlers and call cx.notify(). Optional: a
+ * fresh state is
  * used when absent.
  */
 
@@ -494,21 +495,23 @@ const focusedKey = (vm) => {
 };
 
 /**
- * The entry the header chip shows next. Repeated clicks walk the list: a row it showed gets the
- * focus (pane.focus), but a peek (a sub-agent, or an agent without a pane) leaves the focus where
- * it was, so the chip remembers
- * what it showed last (ui.needYou) and goes on from there while the focus is still the one that
- * click left; else (the person focused something else) from the focused row.
+ * The entry the header chip shows next, and the walk it continues. Repeated clicks walk the list:
+ * a row it showed gets the focus (pane.focus), a peek (a sub-agent, or an agent without a pane)
+ * leaves the focus where it was, and herdr's focus reaches the view only with a later snapshot. So
+ * the chip remembers what it showed last (ui.needYou.key) and every row focus the walk itself
+ * passed through (ui.needYou.seen: the focus before each click and the one it leaves), and goes on
+ * from the last entry while the focused row is one of those, or no row (a sub-agent's own pane);
+ * when the person focused another row, it starts after that row.
  */
 function nextWaiting(list, vm, ui) {
   const focus = focusedKey(vm);
   const last = ui?.needYou;
-  if (last && last.focus === focus) {
+  if (last && (focus == null || (Array.isArray(last.seen) && last.seen.includes(focus)))) {
     const at = list.findIndex((x) => x.key === last.key);
-    if (at >= 0) return list[(at + 1) % list.length];
+    if (at >= 0) return { next: list[(at + 1) % list.length], seen: last.seen };
   }
   const at = list.findIndex((x) => !x.fork && x.row.focused);
-  return list[(at + 1) % list.length];
+  return { next: list[(at + 1) % list.length], seen: [] };
 }
 
 /** Show one waiting entry: a row as a row click does (markSeen + its pane), a sub-agent by showTerminal. */
@@ -528,7 +531,7 @@ function needYouChip(list, t, env, width, vm) {
   const n = list.length;
   const light = isLight(t);
   const ui = env.ui ?? null;
-  const next = nextWaiting(list, vm, ui);
+  const { next, seen } = nextWaiting(list, vm, ui);
   const names = list.slice(0, 4).map((x) => x.name).join(", ") + (n > 4 ? ` and ${n - 4} more` : "");
   return h_flex().id("party-needyou").flex_none().h(18).px(6).rounded(5).items_center().cursor_pointer()
     .bg(alpha(C.blocked, light ? 0.2 : 0.16)).text_size(10.5).font_semibold().text_color(ink(C.blocked, t)).whitespace_nowrap()
@@ -538,8 +541,13 @@ function needYouChip(list, t, env, width, vm) {
       cx.stop_propagation();
       // the focus this click leaves: the row's own (pane.focus), or unchanged by a peek (a
       // sub-agent, or an agent without a pane: showTerminal peeks it when panes() has none)
-      if (ui) ui.needYou = { key: next.key, focus: next.fork || !next.row.pane ? focusedKey(vm) : next.row.key };
+      const before = focusedKey(vm);
+      const after = next.fork || !next.row.pane ? before : next.row.key;
+      if (ui) ui.needYou = { key: next.key, seen: [...new Set(seen.concat([before, after]).filter((k) => k != null))].slice(-64) };
       showWaiting(next, env)(e, cx);
+      // the chip's next target (and tooltip) now: a second click before herdr's next broadcast
+      // goes on to the next one (a peek changes no herdr state, so no broadcast would come)
+      cx.notify();
     })
     .child(width >= 220 ? `${n} ${n === 1 ? "needs" : "need"} you` : `! ${n}`);
 }

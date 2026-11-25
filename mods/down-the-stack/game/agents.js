@@ -20,15 +20,15 @@ import {
   chestTierOf, shiftSealMult, shiftKillMult, shiftBand, chestGold, chestXP, mobXP, gap as gapMult,
   crowding as crowdingMult, partyXp, iRef, itemTier, polishMax, autoOn, cutText,
 } from "./formulas.js";
-import { newHero, stats, grantXP, recordTask, autoRanks, careerOf } from "./heroes.js";
-import { rollChest, baseIdFor, stashAdd, repairItem, newItem } from "./items.js";
+import { newHero, stats, grantXP, recordTask, autoRanks, careerOf, lookOf } from "./heroes.js";
+import { rollChest, baseIdFor, stashAdd, repairItem, newItem, hatToneOf, skipUidsToTone } from "./items.js";
 import { seedOf } from "./rng.js";
 import {
   addGold, addSeals, herdXpBonus, freshEyesCapMin, onboardingBonus, awardBadge, logDrop, journal as herdJournal,
   unseenLosses,
 } from "./herd.js";
 import { chooseMap, mapLevels, offerDrop, bossApi } from "./autopilot.js";
-import { heroCtx, addBuff, unblockedTicks } from "./combat.js";
+import { heroCtx, addBuff, unblockedTicks, renameHero as renameInCombat } from "./combat.js";
 
 const S = T.seals;
 const INBOX_PER_TICK = 1; // chest items offered per world.tick (queueDrop)
@@ -211,6 +211,7 @@ function ensureRt(rt) {
   if (!rt.live) rt.live = new Map();
   if (!rt.contractors) rt.contractors = new Map();
   if (!rt.orphans) rt.orphans = new Map();
+  if (!rt.offPane) rt.offPane = new Map(); // heroId -> the pane its terminal ended in (this session)
   if (rt.contractorSeq == null) rt.contractorSeq = 0;
   if (rt.tick == null) rt.tick = 0;
 }
@@ -387,6 +388,8 @@ function median(list) {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
+const HAT_SLOT = SLOTS.indexOf("hat");
+
 // One fixed Alpha affix per slot for the Contractor reference kit (D§3.4 "all Alpha").
 const KIT_AFFIX = { weapon: "memo", hat: "typed", hoodie: "robust", mug: "typed", boots: "idem", sticker: "memo" };
 
@@ -455,14 +458,50 @@ function emitJournal(world, ev, kind, heroId, text, value, name) {
   }
 }
 
+/** The off-duty grace (T.roster.offDutyGraceMin) in ms. */
+const graceMs = () => Math.max(0, (T.roster.offDutyGraceMin || 0) * 60000);
+
+/**
+ * When an unbound hero's off-duty grace started, in world time (round 4b): its seenAt (the moment
+ * its terminal ended, D§2.2; a bound hero's is refreshed every reconcile). The time the app was
+ * closed is not world time: a hero not seen since the loaded save (rt.loadedLastMs, world.loadWorld)
+ * counts from its seenAt moved on by that gap, so a hero still on duty when the app closed (herdr's
+ * core keeps its terminal, which may be listed a few snapshots after the start) has its whole grace
+ * after this world's first reconcile (rt.startMs).
+ */
+function offDutySince(world, h) {
+  const rt = world.rt;
+  const seen = h.seenAt || 0;
+  const last = rt.loadedLastMs;
+  // a hero seen in this world has seenAt >= startMs (reconcile step 4, goOffDuty)
+  if (Number.isFinite(last) && rt.startMs > last && seen < rt.startMs) return seen + (rt.startMs - last);
+  return seen;
+}
+
+/**
+ * True while an unbound hero is within its off-duty grace (round 4b): it went off duty less than
+ * T.roster.offDutyGraceMin ago (world time, offDutySince), so it is never let go to make room. A
+ * restarted agent (its pane closes, a new terminal opens there) takes it back meanwhile.
+ */
+export function inOffDutyGrace(world, h) {
+  const ms = graceMs();
+  return ms > 0 && !!h && (world.rt.nowMs || 0) - offDutySince(world, h) < ms;
+}
+
+/** When an unbound hero's off-duty grace ends (ms), or 0 when it has none left. */
+export function offDutyGraceEnds(world, h) {
+  return inOffDutyGrace(world, h) ? offDutySince(world, h) + graceMs() : 0;
+}
+
 /**
  * The hero a full roster lets go for a new hire (D§3.4): the least-recently-seen unbound hero below
- * Lv 10, or null. spare: hero ids not to let go this time (promoteContractors' own reconcile).
+ * Lv 10 whose off-duty grace has run out (inOffDutyGrace), or null. spare: hero ids never let go
+ * this time (heroes the terminals of this very snapshot are taking back: reconcile step 1a).
  */
 function rosterVictim(world, spare) {
   let victim = null;
   for (const h of world.state.heroes) {
-    if (isBound(world, h.id) || h.L >= 10 || (spare && spare.has(h.id))) continue;
+    if (isBound(world, h.id) || h.L >= 10 || (spare && spare.has(h.id)) || inOffDutyGrace(world, h)) continue;
     if (!victim || (h.seenAt || 0) < (victim.seenAt || 0) || ((h.seenAt || 0) === (victim.seenAt || 0) && h.id < victim.id)) victim = h;
   }
   return victim;
@@ -470,8 +509,9 @@ function rosterVictim(world, spare) {
 
 /**
  * Room for one more roster hero under D§3.4's rules for a new hire: a free slot, else the
- * least-recently-seen unbound hero below Lv 10 leaves (evictHero). False when every hero left is
- * Lv 10+ or playing. (The day's hire count is the caller's: hiredToday.)
+ * least-recently-seen unbound hero below Lv 10 past its off-duty grace leaves (evictHero). False
+ * when every hero left is Lv 10+, playing, in its grace or spared. (The day's hire count is the
+ * caller's: hiredToday.)
  */
 function makeRoom(world, ev, spare) {
   const state = world.state;
@@ -501,10 +541,9 @@ function contractorLine(world) {
  * reconcile before new terminals bind (so a Contractor never loses its turn to a newcomer), which
  * covers both moments hiring reopens: the 04:00 game day turn (hiredToday() starts at 0 again) and
  * a roster slot freeing (a retire: world.js also calls it at once; a hero let go, or a hero below
- * Lv 10 going off duty while the roster is full). A read-only world never hires.
- * spare (optional Set of hero ids): heroes never let go this time. reconcile passes the heroes whose
- * terminals ended in that very snapshot, so a replacement terminal in it can still take its hero
- * back (D§3.2 step 2 comes before a hire); the next reconcile may let them go.
+ * Lv 10 going off duty while the roster is full, once its off-duty grace has run out). A read-only
+ * world never hires. spare (optional Set of hero ids): heroes never let go this time; reconcile
+ * passes the heroes its new terminals are taking back (step 1a).
  * @returns {number} Contractors promoted
  */
 export function promoteContractors(world, ev, spare) {
@@ -539,12 +578,21 @@ function promote(world, address, c, ev) {
   const oldId = c.id;
   const live = rt.live.get(oldId);
   if (!(herd.nextHeroId >= 1)) herd.nextHeroId = 1;
+  // its look stays its own for life (round 4b): the hoodie tint it had as a Contractor (from its
+  // Contractor id) is kept as hero.look, and its hat (whose tint follows the uid) gets a saved uid
+  // of the same tint
+  const look = lookOf(c);
   const id = herd.nextHeroId++;
   c.id = id;
+  c.look = look;
   delete c.contractor;
   delete c.since;
   c.ord = lowestFreeOrd(state, c.seat);
-  c.eq = c.eq.map((it) => (it ? newItem(state, it) : null));
+  c.eq = c.eq.map((it, s) => {
+    if (!it) return null;
+    if (s === HAT_SLOT) skipUidsToTone(state, hatToneOf(it.uid));
+    return newItem(state, it);
+  });
   c.addr = address;
   if (live) {
     if (live.space) c.sid = live.space;
@@ -563,13 +611,21 @@ function promote(world, address, c, ev) {
     live.why = null;
     rt.live.set(id, live);
   }
+  // everything this session keys by the Contractor id follows it (round 4b): rooms, effects and
+  // per-tick sets (combat), fights, the paused fight and review Wounds / Lessons Learned (boss),
+  // its journal lines, chest drops waiting in the inbox; the per-Contractor XP and autopilot
+  // signatures start afresh
   if (rt.cxp) rt.cxp.delete(oldId);
   if (rt.apSig) rt.apSig.delete(oldId);
-  for (const f of rt.fights || []) { remapIds(f.heroIds, oldId, id); remapIds(f.helpers, oldId, id); }
-  if (herd.fight) { remapIds(herd.fight.ids, oldId, id); remapIds(herd.fight.hl, oldId, id); }
-  for (const f of rt.fx || []) if (f.heroId === oldId) f.heroId = id;
-  // its journal lines so far follow it (Contractor ids are this session's only)
+  renameInCombat(world, oldId, id);
+  const api = bossApi(world);
+  if (typeof api.renameHero === "function") api.renameHero(world, oldId, id);
+  else {
+    for (const f of rt.fights || []) { remapIds(f.heroIds, oldId, id); remapIds(f.helpers, oldId, id); }
+    if (herd.fight) { remapIds(herd.fight.ids, oldId, id); remapIds(herd.fight.hl, oldId, id); }
+  }
   for (const e of herd.log || []) if (Array.isArray(e) && e[2] === oldId) e[2] = id;
+  for (const e of Array.isArray(herd.inbox) ? herd.inbox : []) if (Array.isArray(e) && e[0] === oldId) e[0] = id;
   // the digest counts levels from the last read: a promoted hero starts at the level it joined with
   if (herd.digestSnap && herd.digestSnap.lv && typeof herd.digestSnap.lv === "object") herd.digestSnap.lv[id] = c.L;
   rt.roomsDirty = true;
@@ -577,7 +633,8 @@ function promote(world, address, c, ev) {
   const text = `Hired: ${c.name} (was a contractor)`;
   emitJournal(world, ev, "hired", id, text, c.L);
   if (ev) {
-    ev.note?.(text);
+    // tagged (round 4b): the stage merges the hires of one tick into one note (view/stage.js)
+    ev.note?.(text, null, { kind: "hire", heroId: id, name: c.name, promoted: true });
     ev.major?.();
   }
   return c;
@@ -585,12 +642,14 @@ function promote(world, address, c, ev) {
 
 /**
  * When a Contractor will be hired (owner decision, round 4), for the views: its place in the
- * hiring line (0 = next), the day's hires (left of perDay), the roster's room for new hires now
- * (free slots plus unbound heroes below Lv 10) and the moment: "soon" (at the next reconcile),
+ * hiring line (0 = next), the day's hires (left of perDay), the roster's room for new hires (free
+ * slots plus unbound heroes below Lv 10; `graced` of them are still within their off-duty grace,
+ * round 4b, and make room only when it runs out) and the moment: "soon" (at the next reconcile),
+ * "grace" (when a hero's off-duty grace runs out at atMs, unless its agent comes back for it),
  * "day" (the 04:00 game day turn at atMs; days = which turn, 1 = the next), "slot" (when a roster
  * slot frees), "never" (a read-only save). text: one sentence for a tooltip or the sheet.
  * @returns {null|{when:string, position:number, ahead:number, hiresLeft:number, perDay:number,
- *   room:number, atMs:number|null, days:number, text:string}} null for a roster hero
+ *   room:number, graced:number, atMs:number|null, days:number, text:string}} null for a roster hero
  */
 export function hireOutlook(world, heroOrId) {
   const { state, rt } = world;
@@ -599,46 +658,61 @@ export function hireOutlook(world, heroOrId) {
   const R = T.roster;
   // the line and the room are the same for every Contractor of a render (the party, the stage and
   // the sheet ask for each of up to ~30): computed once per tick and roster shape
-  const key = `${rt.tick}|${rt.contractors ? rt.contractors.size : 0}|${rt.contractorSeq}|${state.heroes.length}|${rt.live ? rt.live.size : 0}|${hiredToday(state)}`;
+  const key = `${rt.tick}|${rt.nowMs}|${rt.contractors ? rt.contractors.size : 0}|${rt.contractorSeq}|${state.heroes.length}|${rt.live ? rt.live.size : 0}|${hiredToday(state)}`;
   let c = rt._hireLine;
   if (!c || c.key !== key) {
     let r = Math.max(0, R.max - state.heroes.length);
-    for (const h of state.heroes) if (!isBound(world, h.id) && h.L < 10) r++;
-    c = rt._hireLine = { key, line: contractorLine(world).map((e) => e[1]), room: r };
+    const ends = []; // when each graced hero's grace runs out, soonest first
+    for (const h of state.heroes) {
+      if (isBound(world, h.id) || h.L >= 10) continue;
+      const end = offDutyGraceEnds(world, h);
+      if (end) ends.push(end);
+      else r++;
+    }
+    ends.sort((x, y) => x - y);
+    c = rt._hireLine = { key, line: contractorLine(world).map((e) => e[1]), room: r, ends };
   }
   let position = c.line.indexOf(hero);
   if (position < 0) position = c.line.length;
   const hiresLeft = Math.max(0, R.newPerDay - hiredToday(state));
-  const room = c.room;
+  const roomNow = c.room;
+  const room = roomNow + c.ends.length;
   const left = `today: ${hiresLeft} of ${R.newPerDay} hires left`;
-  const out = { when: "slot", position, ahead: position, hiresLeft, perDay: R.newPerDay, room, atMs: null, days: 0, text: "" };
+  const ahead = position ? ` · ${position} ahead in line` : "";
+  const out = { when: "slot", position, ahead: position, hiresLeft, perDay: R.newPerDay, room, graced: c.ends.length, atMs: null, days: 0, text: "" };
   if (rt.readOnly) {
     out.when = "never";
     out.text = "Not hired: this save is read-only";
-  } else if (position < Math.min(hiresLeft, room)) {
+  } else if (position < Math.min(hiresLeft, roomNow)) {
     out.when = "soon";
     out.text = `Joins the roster in a moment (${left})`;
+  } else if (position < Math.min(hiresLeft, room)) {
+    out.when = "grace";
+    out.atMs = c.ends[position - roomNow];
+    const min = Math.max(1, Math.ceil((out.atMs - (rt.nowMs || 0)) / 60000));
+    out.text = `Hired in about ${min} min, once a hero below Lv 10 has been off duty for ${R.offDutyGraceMin} min (unless its agent comes back)${ahead} (${left})`;
   } else if (position < room) {
     out.when = "day";
     out.days = Math.floor((position - hiresLeft) / R.newPerDay) + 1;
     const tz = Number.isFinite(rt.tzOffsetMin) ? rt.tzOffsetMin : 0;
     out.atMs = ((state.herd.day || 0) + out.days) * 86400000 + T.shift.resetHourLocal * 3600000 + tz * 60000;
-    out.text = `${out.days > 1 ? `Hired in ${out.days} game days (04:00)` : "Hired at the next 04:00 game day"}${position ? ` · ${position} ahead in line` : ""} (${left})`;
+    out.text = `${out.days > 1 ? `Hired in ${out.days} game days (04:00)` : "Hired at the next 04:00 game day"}${ahead} (${left})`;
   } else {
-    out.text = `Hired when a roster slot frees (a retire, or a hero below Lv 10 off duty)${position ? ` · ${position} ahead in line` : ""} (${left})`;
+    out.text = `Hired when a roster slot frees (a retire, or a hero below Lv 10 off duty for ${R.offDutyGraceMin} min)${ahead} (${left})`;
   }
   return out;
 }
 
-/** Picks a free hero for a new terminal (D§3.2 step 2), or null. */
-function pickFreeHero(world, a, seat) {
-  const state = world.state;
+/** Picks a free hero for a new terminal (D§3.2 step 2), or null. taken: hero ids already claimed. */
+function pickFreeHero(world, a, seat, taken) {
+  const { state, rt } = world;
+  ensureRt(rt);
   const prog = seatProgram(seat);
   let best = null;
   let bestKey = null;
   const machine = machineOf(a);
   for (const h of state.heroes) {
-    if (isBound(world, h.id)) continue;
+    if (isBound(world, h.id) || (taken && taken.has(h.id))) continue;
     // a hero last seen on another machine never crosses over, even under an older save's seat
     // without the machine (it is re-keyed when its own machine's agent comes back: below)
     if (h.sid && sidMachine(h.sid) !== machine && a.space) continue;
@@ -647,6 +721,9 @@ function pickFreeHero(world, a, seat) {
     const rekey = !sameSeat && h.sid && a.space && h.sid === a.space && seatProgram(h.seat) === prog;
     if (!sameSeat && !rekey) continue;
     const key = [
+      // round 4b: the hero whose terminal ended in this very pane (an agent restarted there: its
+      // own hero, before the seat's "main" hero), then D§3.2's order
+      a.pane && rt.offPane.get(h.id) === a.pane ? 1 : 0,
       a.pane_name != null && h.lastPane === a.pane_name ? 1 : 0,
       a.tab_name != null && h.lastTab === String(a.tab_name) ? 1 : 0,
       h.L, h.seenAt || 0, -h.id,
@@ -665,37 +742,59 @@ function cmpKey(a, b) {
 }
 
 /**
- * Binds a new terminal to a hero (D§3.2): fast rebind by saved address, then a free hero of the
- * seat, else a new hero (roster < 30 and < 6 created today; a full roster first frees the
- * least-recently-seen unbound hero below Lv 10), else a Contractor.
- * @returns {number} the hero id
+ * A new terminal's own saved hero (D§3.2 step 1, fast rebind): the unbound hero whose saved address
+ * is this terminal's, or null. taken: hero ids already claimed by other terminals of the snapshot.
  */
-function bindAgent(world, a, snap, ev) {
-  const { state, rt } = world;
-  const now = snap.nowMs;
-  const seat = agentSeat(a);
-  let hero = null;
-  let fast = false;
-  for (const h of state.heroes) {
+function ownHeroFor(world, a, seat, taken) {
+  for (const h of world.state.heroes) {
     // the hero's own terminal: its seat, or its space (renamed meanwhile) with the same program. A
     // terminal outlives the agent in it, so another program started in it is a new terminal of its
     // own seat (D§3.1), as in pickFreeHero: it never takes over this hero, its seat or its chests
-    if (h.addr === a.address && !isBound(world, h.id) &&
+    if (h.addr === a.address && !isBound(world, h.id) && !(taken && taken.has(h.id)) &&
         (h.seat === seat || (h.sid && h.sid === a.space && seatProgram(h.seat) === seatProgram(seat)))) {
-      hero = h;
-      fast = true;
-      break;
+      return h;
     }
   }
-  if (!hero) hero = pickFreeHero(world, a, seat);
+  return null;
+}
+
+/**
+ * The saved hero a new terminal takes (D§3.2 steps 1-2): its own hero by saved address (fast
+ * rebind), else a free hero of its seat; {hero, fast} or null. taken: hero ids already claimed by
+ * other terminals of the same snapshot.
+ */
+function savedHeroFor(world, a, seat, taken) {
+  const own = ownHeroFor(world, a, seat, taken);
+  if (own) return { hero: own, fast: true };
+  const h = pickFreeHero(world, a, seat, taken);
+  return h ? { hero: h, fast: false } : null;
+}
+
+/**
+ * Binds a new terminal to a hero (D§3.2): fast rebind by saved address, then a free hero of the
+ * seat, else a new hero (roster < 30 and < 6 created today; a full roster first frees the
+ * least-recently-seen unbound hero below Lv 10 past its off-duty grace), else a Contractor.
+ * claims (reconcile step 1a): address -> {hero, fast} the terminals of this snapshot take back;
+ * spare: those heroes' ids, which no other terminal takes and no hire lets go.
+ * @returns {number} the hero id
+ */
+function bindAgent(world, a, snap, ev, claims, spare) {
+  const { state, rt } = world;
+  const now = snap.nowMs;
+  const seat = agentSeat(a);
+  const claim = claims && claims.get(a.address);
+  const own = claim && state.heroes.includes(claim.hero) && !isBound(world, claim.hero.id) ? claim : null;
+  const found = own || savedHeroFor(world, a, seat, spare);
+  let hero = found ? found.hero : null;
+  const fast = !!(found && found.fast);
   // a read-only world (a save from a newer version, never written back) binds for display only:
   // no hires (a new agent plays as an unsaved Contractor), no chests, no XP (world.tick runs no steps)
-  if (!hero && !rt.readOnly && hiredToday(state) < T.roster.newPerDay && makeRoom(world, ev)) {
+  if (!hero && !rt.readOnly && hiredToday(state) < T.roster.newPerDay && makeRoom(world, ev, spare)) {
     hero = newHero(state, { seat, sid: a.space || null, ord: lowestFreeOrd(state, seat), nowMs: now });
     state.heroes.push(hero);
     noteHire(state);
     emitJournal(world, ev, "hire", hero.id, hero.name, 1);
-    if (ev) ev.note?.(`New hire: ${hero.name}`);
+    if (ev) ev.note?.(`New hire: ${hero.name}`, null, { kind: "hire", heroId: hero.id, name: hero.name });
   }
   let contractor = false;
   if (!hero) {
@@ -718,6 +817,7 @@ function bindAgent(world, a, snap, ev) {
   }
   rt.bind.set(a.address, hero.id);
   rt.live.set(hero.id, live);
+  if (rt.offPane) rt.offPane.delete(hero.id);
   rt.roomsDirty = true;
   updateLiveFields(world, live, a, snap);
   live.mapId = chooseMap(world, hero, live);
@@ -780,6 +880,7 @@ function goOffDuty(world, address, heroId, ev) {
   }
   if (live && live.maxHp > 0 && live.hp != null) hero.hpFrac = Math.max(0.05, Math.min(1, live.hp / live.maxHp));
   hero.seenAt = rt.nowMs;
+  if (live && live.pane && !hero.contractor && rt.offPane) rt.offPane.set(heroId, live.pane);
   if (hero.contractor) {
     if (!rt.readOnly) openChests(world, hero, { reason: "unreviewed", all: true, noXp: true }, ev);
     rt.contractors.delete(address);
@@ -1022,6 +1123,7 @@ export function reconcile(world, snap, ev) {
   const { state, rt } = world;
   ensureRt(rt);
   const now = snap.nowMs ?? rt.nowMs;
+  if (rt.startMs == null && Number.isFinite(now)) rt.startMs = now; // offDutySince: this world's first reconcile
   const tops = [];
   const subs = [];
   const seenAddr = new Set();
@@ -1054,14 +1156,37 @@ export function reconcile(world, snap, ev) {
   }
   for (const addr of Array.from(rt.orphans.keys())) if (!subAddr.has(addr)) rt.orphans.delete(addr);
 
+  // 1a. a new terminal with a saved hero to take (its own, by address, or a free hero of its seat:
+  //     a restarted agent's new terminal in the same pane) claims it now, before anything below may
+  //     let a hero go to make room (round 4b). Every terminal's own hero is claimed first, so a
+  //     terminal of the same seat listed before it (an app start lists them all at once: one that
+  //     played a Contractor has no saved hero) never takes it; free heroes follow snapshot order,
+  //     as binding does in 2.
+  let claims = null;
+  let spare = null;
+  const claim = (a, found) => {
+    if (!claims) { claims = new Map(); spare = new Set(); }
+    claims.set(a.address, found);
+    spare.add(found.hero.id);
+  };
+  for (const a of tops) {
+    if (rt.bind.has(a.address)) continue;
+    const own = ownHeroFor(world, a, agentSeat(a), spare);
+    if (own) claim(a, { hero: own, fast: true });
+  }
+  for (const a of tops) {
+    if (rt.bind.has(a.address) || (claims && claims.has(a.address))) continue;
+    const h = pickFreeHero(world, a, agentSeat(a), spare);
+    if (h) claim(a, { hero: h, fast: false });
+  }
+
   // 1b. Contractors still playing join the roster while hiring is open (the 04:00 game day turn,
-  //     a slot that freed), before any newcomer below can take the day's hires. A hero whose
-  //     terminal ended in this snapshot is not let go for it yet: a replacement terminal in the
-  //     same snapshot takes it back first (step 1's promise); the next reconcile may let it go
-  if (rt.contractors.size) promoteContractors(world, ev, gone.length ? new Set(gone.map((g) => g[1])) : null);
+  //     a slot that freed), before any newcomer below can take the day's hires. A hero claimed in
+  //     1a is never let go for it, nor one within its off-duty grace (inOffDutyGrace)
+  if (rt.contractors.size) promoteContractors(world, ev, spare);
 
   // 2. top-level agents: bind, refresh, seq-gated status
-  processTops(world, tops, snap, ev);
+  processTops(world, tops, snap, ev, 0, claims, spare);
 
   // 3. sub-agents -> Forklings; homeless orphans play as top-level pseudo-agents
   const keepTop = subs.filter((s) => rt.orphans.has(s.address) && rt.bind.has(s.address));
@@ -1082,13 +1207,13 @@ export function reconcile(world, snap, ev) {
   return state;
 }
 
-function processTops(world, tops, snap, ev, order0 = 0) {
+function processTops(world, tops, snap, ev, order0 = 0, claims = null, spare = null) {
   const { state, rt } = world;
   for (let k = 0; k < tops.length; k++) {
     const a = tops[k];
     let id = rt.bind.get(a.address);
     const first = id == null;
-    if (first) id = bindAgent(world, a, snap, ev);
+    if (first) id = bindAgent(world, a, snap, ev, claims, spare);
     const hero = heroById(world, id);
     const live = rt.live.get(id);
     if (!hero || !live) continue;
@@ -1220,7 +1345,7 @@ export function closeTask(world, hero, live, reason, ev) {
     if (world.rt && world.rt.apGear) world.rt.apGear.add(hero.id);
     if (ev) {
       const c = CLASSES[hero.cls];
-      ev.note?.(`${hero.name}: provisional ${c.name}`);
+      ev.note?.(`${hero.name}: provisional ${c.name}`, null, { heroId: hero.id });
       emitJournal(world, ev, "class", hero.id, c.name, hero.cls);
     }
   }
@@ -1360,7 +1485,7 @@ export function openChests(world, hero, opts = {}, ev) {
     const unseen = unseenLosses(state);
     emitJournal(world, ev, "unrev", hero.id, title, out.opened);
     state.herd.unseenUnrev = unseen + out.opened;
-    if (ev) ev.note?.(`${hero.name}: ${out.opened === 1 ? "a chest" : `${out.opened} chests`} opened Unreviewed (half value)`);
+    if (ev) ev.note?.(`${hero.name}: ${out.opened === 1 ? "a chest" : `${out.opened} chests`} opened Unreviewed (half value)`, null, { heroId: hero.id });
   }
   if (ev) {
     if (out.gold > 0) ev.fx?.("coin", { heroId: hero.id, value: Math.round(out.gold) });

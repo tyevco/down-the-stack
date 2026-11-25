@@ -13,7 +13,7 @@
 
 import {
   TUNING as T, CLASSES, RARITIES, AFFIXES, LTS_PROPS, KEEPSAKES, ITEM_BASES, BASE_LIST, SLOTS, DROP_WEIGHTS,
-  WEAPON_TYPES, STASH, BUILDING_IDX, BUILDINGS, RARITY_IDX, CLASS_IDX, REVIEWS, ELITE,
+  WEAPON_TYPES, STASH, BUILDING_IDX, BUILDINGS, RARITY_IDX, CLASS_IDX, REVIEWS, ELITE, PALETTE,
 } from "./data.js";
 import {
   itemTier, reqLevel, weaponDmg, armorPiece, itemPower, polishCost as polishCostOf, polishMax, deprecateYield,
@@ -69,6 +69,27 @@ export function allocUid(stateOrHerd) {
   if (!herd) return 0;
   if (!(herd.nextUid >= 1)) herd.nextUid = 1;
   return herd.nextUid++;
+}
+
+/**
+ * A hat's tint, an index into PALETTE.hatTint: it follows the item's uid (uid mod n, as the stage
+ * has always drawn it), and a Contractor's negative uid has one too (round 4b).
+ */
+export function hatToneOf(uid) {
+  const n = PALETTE.hatTint.length;
+  const u = Math.round(Number.isFinite(uid) ? uid : 0);
+  return ((u % n) + n) % n;
+}
+
+/**
+ * Moves state.herd.nextUid on (by at most n - 1) so that the next uid allocated has the hat tint
+ * `tone` (hatToneOf): a promoted Contractor's hat keeps its colour as a saved item (agents.promote).
+ */
+export function skipUidsToTone(state, tone) {
+  const herd = state && state.herd ? state.herd : state;
+  if (!herd) return;
+  if (!(herd.nextUid >= 1)) herd.nextUid = 1;
+  for (let k = 0; k < PALETTE.hatTint.length && hatToneOf(herd.nextUid) !== tone; k++) herd.nextUid++;
 }
 
 /** Builds an item with a fresh uid. Fields default to a Prototype with no affixes. */

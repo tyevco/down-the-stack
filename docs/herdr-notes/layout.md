@@ -562,6 +562,17 @@ bound to no key.)
 - On upgrade Herdr refreshes only a byte-for-byte untouched shipped keys.json (`keys.rs:174-189`),
   so after a merge new default shortcuts stop arriving. That is how Herdr treats any edited
   keys.json (AGENTS.md:535-537).
+- A missing keys.json is written from the current defaults when Herdr next reads its keys: at
+  start, and whenever it sees the file change (`load_text`, `keys.rs:176-182`; `window.rs`
+  `reload_config` reloads on a missing mtime, `files_changed` on any keys.json event). So
+  deleting a keys.json whose only change was this layout's merge gives back the defaults and their
+  future upgrades; a file trimmed by hand stays "edited" (even a whitespace difference does,
+  `keys.rs:288-292`). Left in after an uninstall, the section is harmless: `down-the-stack.*` is
+  bound to nothing once the mod folder is gone (`gone_mod`), and the section applies only while a
+  layout of that name shows.
+- **macOS: keep Ctrl-Shift.** Herdr's macOS defaults use Cmd (`defaults/keys.macos.json`), and
+  `cmd-shift-d` there is `pane.split:down`: an agent that "fits" these keys to Cmd would make
+  `cmd-shift-d` calm mode while the layout shows and hide Herdr's split.
 
 ---
 

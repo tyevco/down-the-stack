@@ -601,7 +601,7 @@ test("herd header: the counts in muted, the waiting part in the blocked colour; 
     const t = SheetMod.dialogTheme(SheetMod.dialogTokens());
     const textNode = (s) => m.findAll((n) => n.type === "text" && n.text === s)[0]?.parent ?? null;
     const counts = textNode("9 heroes · 2 working ·");
-    const waiting = textNode("1 waiting for you");
+    const waiting = textNode("1 needs you");
     assert.ok(counts && waiting, theme);
     assert.equal(waiting.last("text_color")[0], ink(C.blocked, t), theme);
     assert.equal(counts.parent.last("text_color")[0], t.muted, theme);
@@ -821,10 +821,10 @@ test("win98 (black background, light popover): the dialogs take light-theme ink;
   const t = SheetMod.dialogTheme(SheetMod.dialogTokens());
   assert.equal(t.light, true, "light by its popover, as herdr classes win98 by its palette");
   assert.equal(t.popover, "#c0c0c0");
-  const waiting = m.findAll((n) => n.type === "text" && n.text === "1 waiting for you")[0]?.parent;
+  const waiting = m.findAll((n) => n.type === "text" && n.text === "1 needs you")[0]?.parent;
   const fg = waiting.last("text_color")[0];
   assert.equal(fg, ink(C.blocked, t));
-  assert.ok(contrast(fg, t.popover) >= 4.5, `"1 waiting for you" ${fg} on ${t.popover}: ${contrast(fg, t.popover).toFixed(2)}:1`);
+  assert.ok(contrast(fg, t.popover) >= 4.5, `"1 needs you" ${fg} on ${t.popover}: ${contrast(fg, t.popover).toFixed(2)}:1`);
   // the rename field is not black on black (it sat on the theme background)
   const rename = await mount("herd", "settings", { theme, ui: { renaming: true } });
   const field = rename.m.findAll((n) => n.type === "input" || (n.has("border_color") && n.has("text_color") && n.last("border_color")[0] === t.accent))[0];
@@ -1005,8 +1005,13 @@ test("round 4 (P4, P1): a Contractor's hire moment shrinks rather than push a ro
     assert.equal(hire.has("flex_none"), false, `${width}: the hire text never refuses to shrink`);
     assert.deepEqual(hire.last("min_w"), [0]);
     assert.ok(hire.has("truncate"));
-    const title = hire.parent.children[hire.parent.children.indexOf(hire) + 1];
-    assert.ok(title.has("flex_1") && title.has("truncate"), "title · where takes what is left");
+    // title · where and seen share what is left (round 4b: one basis-0 cell, so they give way before
+    // the hire moment does: title first, then seen)
+    const rest = hire.parent.children[hire.parent.children.indexOf(hire) + 1];
+    assert.ok(rest.has("flex_1") && rest.has("min_w"), "title · where and seen take what is left");
+    const [title, seen] = rest.children;
+    assert.ok(title.has("flex_1") && title.has("truncate"), "title · where gives way first");
+    assert.ok(!seen.has("flex_none") && seen.has("truncate") && seen.has("text_right"), "then seen, cut");
     // the space column: 118 px, 92 below 720 px (the name column 170 / 140)
     assert.deepEqual(m.node("hd-sp-r:9").last("w"), [width < 720 ? 92 : 118]);
     assertClean(m, `roster slim at ${width}`);

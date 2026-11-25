@@ -1087,6 +1087,33 @@ test("dialog registry: one sheet and one Herd panel at a time; dialog copies reg
   assert.deepEqual(dlg.errors, []);
 });
 
+test("dialog registry: a Contractor's sheet promoted to the roster is the same dialog, also before the sheet has drawn its new id (round 4b U5)", async () => {
+  M.resetState();
+  const mod = await mount({ role: "stage" }, { graph: "dlg-promo", fixture: FX.demoFixture("mid") });
+  const host = await hostOf(mod);
+  await M.tickAll(1000);
+  const [address, heroId] = [...host.world.rt.bind.entries()].find(([, id]) => id > 0);
+  const hero = host.world.state.heroes.find((h) => h.id === heroId);
+  // the sheet was opened for the Contractor (id -9) playing that terminal; it last reported its
+  // terminal and name, and the Contractor is now this roster hero
+  const id = host.openSheet(-9);
+  if (typeof host.followSheet === "function") host.followSheet(id, { heroId: -9, address, name: hero.name });
+  else Object.assign(host.overlays.sheet, { address, name: hero.name }); // (a build without followSheet)
+  const n = [M.calls().openOverlay.length, M.calls().closeOverlay.length];
+  assert.equal(host.openSheet(hero.id), id, "the promoted hero's sheet is the open one");
+  assert.deepEqual([M.calls().openOverlay.length, M.calls().closeOverlay.length], n, "not closed and reopened");
+  assert.equal(host.overlays.sheet.heroId, hero.id);
+  // a hero of another name on that terminal is another hero: its sheet replaces the dialog
+  host.overlays.sheet.heroId = -9;
+  host.overlays.sheet.name = "Somebody Else";
+  assert.notEqual(host.openSheet(hero.id), id);
+  // a report from another overlay changes nothing
+  const cur = host.overlays.sheet.id;
+  host.followSheet("o-other", { heroId: 77 });
+  assert.equal(host.overlays.sheet.id, cur);
+  assert.equal(host.overlays.sheet.heroId, hero.id);
+});
+
 test("heroForTerminal: bound agents, contractors and Forklings (their parent's hero)", async () => {
   M.resetState();
   const mod = await mount({ role: "hud" }, { fixture: FX.demoFixture("mid") });

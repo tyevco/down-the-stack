@@ -33,7 +33,7 @@
 
 import { TUNING as T, PALETTE, MAP_BY_ID, BOSSES, REVIEWS, RARITIES, SKILL_BY_ID, BACKLOG } from "../data.js";
 import { fmtNum, fmtDuration, need, K, gap as gapMult, cutText, autoOn } from "../formulas.js";
-import { careerOf, stats } from "../heroes.js";
+import { careerOf, stats, lookOf } from "../heroes.js";
 import { liveHeroes, chestInfo, unblockedActive, unblockedLeft, tellingTitle } from "../agents.js";
 // agents.hireOutlook (round 4, owner decision "promote only") is read through the namespace, so a
 // build without it still loads (a missing named import is a link error) and the line is left out
@@ -119,6 +119,45 @@ export function statusWord(s) {
   return own(STATUSES, s) ? s : "idle";
 }
 
+/** A live hero whose agent waits for the person (herdr's "blocked" status, on a terminal). */
+export function heroWaits(live) {
+  return !!live && live.address != null && str(live.address) !== "" && statusWord(live.status) === "blocked";
+}
+
+/** A hero's sub-agent (a Forkling, D§2.7) that waits for the person. */
+export function forkWaits(x) {
+  return !!x && x.status === "blocked" && x.address != null && str(x.address) !== "";
+}
+
+let NEED = null;
+
+/**
+ * How many things wait for the person (owner decision 3, round 4): every live hero whose agent is
+ * blocked (Contractors too) plus every blocked sub-agent of a live hero, as herdr's agents list
+ * ranks a parent by its most urgent sub-agent. The one count every "need you" says: the party's
+ * "N need you" (ui/party.js waitingList walks the rows by these same two tests), the Herd panel's
+ * header and the HUD's blocked tooltip. {n, heroes, subs}; cached per world version.
+ */
+export function needYou(world) {
+  const rt = world && world.rt;
+  if (!rt) return { n: 0, heroes: 0, subs: 0 };
+  if (NEED && NEED.rt === rt && NEED.version === rt.version) return NEED.out;
+  let heroes = 0;
+  let subs = 0;
+  for (const [, live] of liveHeroes(world)) {
+    if (heroWaits(live)) heroes++;
+    for (const x of live.forklings || []) if (forkWaits(x)) subs++;
+  }
+  const out = { n: heroes + subs, heroes, subs };
+  NEED = { rt, version: rt.version, out };
+  return out;
+}
+
+/** "3 need you" / "1 needs you" (herdr's status bar words; the party's chip says the same). */
+export function needYouText(n) {
+  return `${n} ${n === 1 ? "needs" : "need"} you`;
+}
+
 /** ProgramIcon {path, tint, color} from herdr's Program record, or null. */
 export function programIconOf(program) {
   if (!program || typeof program.icon !== "string" || !program.icon) return null;
@@ -135,10 +174,10 @@ export function titleBarOf(programKey) {
 
 /** HeroVM.colors for a hero in a state ("questing" ... "crashed", or "off" for off duty). */
 export function termlingColors(hero, programKey, state) {
-  const tints = PALETTE.termlingTint;
-  const id = Math.abs(Math.round(num(hero && hero.id, 1)));
+  // the hoodie is the hero's look for life (heroes.lookOf): by id, or the tint a promoted
+  // Contractor kept (round 4b)
   return {
-    hoodie: tints[(((id - 1) % tints.length) + tints.length) % tints.length],
+    hoodie: PALETTE.termlingTint[lookOf(hero)],
     titleBar: titleBarOf(programKey),
     screen: SCREEN,
     faceInk: INK[state] || COL.idle,
@@ -665,7 +704,7 @@ function mapPinOf(world, hero, live) {
 function waitingForksOf(hero, live) {
   const out = [];
   for (const x of live.forklings || []) {
-    if (x.status !== "blocked" || x.address == null) continue;
+    if (!forkWaits(x)) continue;
     const title = tellingTitle(x.title, x);
     out.push({
       key: `wf:${x.address}`, address: str(x.address), name: `${str(hero.name, "Termling")}'s sub-agent`,
@@ -970,7 +1009,7 @@ export function hudView(world, args = {}) {
   const f = footerOf(world, idx, expiring);
   const vm = {
     gold: f.gold, snippets: f.snippets, release: f.release, sprint: f.sprint,
-    working: idx.counts.working, blocked: idx.counts.blocked, shipped: idx.counts.done, digestDot: f.digestDot,
+    working: idx.counts.working, blocked: idx.counts.blocked, shipped: idx.counts.done, needYou: needYou(world).n, digestDot: f.digestDot,
     digestTip: f.digestTip, calm: !!(herd.cfg && herd.cfg.calm), save,
   };
   HUD = { rt, version: rt.version, saveKey, minute, vm };

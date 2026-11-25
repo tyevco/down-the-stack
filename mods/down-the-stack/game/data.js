@@ -42,7 +42,9 @@ export const TUNING = {
   unblocked: { minBlockedSec: 10, minTaskSec: 60, ticks: 120, dmg: 0.15, xp: 0.15, cooldownTicks: 300 },
   party: { perMember: 0.06, cap: 0.18, banner: 0.05 }, herdXpCap: 0.6,
   onboarding: { xp: 0.5, levelsBehind: 10 }, crowdingAt: 12,
-  roster: { max: 30, newPerDay: 6, contractorLevelsBelowMedian: 5 },
+  // offDutyGraceMin (round 4b): a hero off duty for less than this (world time, from its seenAt) is
+  // never let go to make room for a hire or a Contractor's promotion: a restarted agent gets it back
+  roster: { max: 30, newPerDay: 6, contractorLevelsBelowMedian: 5, offDutyGraceMin: 15 },
   forkling: { pctOfMain: 0.12, counted: 3 }, flap: { changes: 6, windowSec: 60, suppressSec: 300 },
   boss: {
     partyHpPerExtra: 0.75, swingEvery: 2, timer: 180, enrageAt: 0.8, enrageDmg: 0.5, warRoomTicks: 6,
@@ -1113,7 +1115,9 @@ export const PALETTE = {
   working: "#4CC38A", blocked: "#F2A93B", done: "#FFD447", idle: "#8A8F98", bubbleFill: "#FFFFFF",
   bubbleInk: "#1B1B1F", levelUp: "#7FE9F5", xp: "#7FE9F5", freshEyes: "#A9B8FF", hp: "#FF5A5F",
   danger: "#FF5A5F", coin: "#C89B3C", heal: "#6BE38A", cream: "#FFF4D6",
-  termlingTint: ["#6C8CF5", "#F07D5C", "#45C2A8", "#C47BE8", "#E8B84A", "#5FB0E8", "#E86F9C", "#8FBF5A"]
+  termlingTint: ["#6C8CF5", "#F07D5C", "#45C2A8", "#C47BE8", "#E8B84A", "#5FB0E8", "#E86F9C", "#8FBF5A"],
+  // hat tints (the stage's and the sheet's rig): a hat's tint follows its item uid (items.hatToneOf)
+  hatTint: ["#E86F9C", "#5FB0E8", "#8FBF5A", "#E8B84A", "#C47BE8", "#F07D5C"]
 };
 
 export const CHEST_TIERS = [

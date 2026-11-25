@@ -633,6 +633,33 @@ export function leaveSavedFight(world, heroId, ev) {
   return true;
 }
 
+const swapId = (list, from, to) => {
+  if (!Array.isArray(list)) return;
+  for (let i = 0; i < list.length; i++) if (list[i] === from) list[i] = to;
+};
+
+/**
+ * A hero changes id (a Contractor promoted to the roster, agents.promote): its running fights
+ * (participants, helpers), the paused fight in herd.fight, and its review Wounds and Lessons Learned
+ * (keyed "rv<review>.<heroId>", woundKey) follow it.
+ */
+export function renameHero(world, from, to) {
+  const herd = world.state.herd;
+  for (const f of world.rt.fights || []) { swapId(f.heroIds, from, to); swapId(f.helpers, from, to); }
+  if (herd.fight) { swapId(herd.fight.ids, from, to); swapId(herd.fight.hl, from, to); }
+  for (const kind of ["wounds", "lessons"]) {
+    const m = herd[kind];
+    if (!m || typeof m !== "object") continue;
+    for (const key of Object.keys(m)) {
+      const dot = key.indexOf(".");
+      if (key[0] !== "r" || dot < 0 || Number(key.slice(dot + 1)) !== from) continue;
+      const nk = `${key.slice(0, dot)}.${to}`;
+      if (!(nk in m)) m[nk] = m[key];
+      delete m[key];
+    }
+  }
+}
+
 // Coffee is refilled before every fight (D§5.6), at the usual price per cup (as far as the herd's
 // gold goes: a broke herd still gets its coffee).
 function refillCoffee(world, hero) {

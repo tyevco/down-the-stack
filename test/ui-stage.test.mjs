@@ -604,12 +604,15 @@ test("header notes stay inside the header band (D§11.15): truncated into a head
         const l = methodsOf(n, "left").at(-1)[0];
         const w = methodsOf(n, "w").at(-1)[0];
         assert.ok(w >= 60 || w >= String(note.text).length * 6, `${where}: ${w} px`);
-        // never over a room title: right of the header's contents, inside one room, or in the
-        // Localhost scenery beside the rooms (no title there)
-        const room = vm.rooms.find((r) => l >= r.x - 0.5 && l + w <= r.x + r.w + 0.5);
-        const scenery = !vm.rooms.some((r) => l < r.x + r.w - 0.5 && l + w > r.x + 0.5) && (!vm.overflow || l + w <= vm.overflow.x + 0.5);
-        assert.ok(room || scenery, `${where}: inside one room's header or the scenery`);
-        if (room && vm.boss && height < 160) assert.ok(!room.key.startsWith("room:arena:"), `${where}: not over the slim boss HUD`);
+        // never over a room title: every room it reaches, it reaches right of the header's
+        // contents (a herd-wide note sits at the strip's right end, by the camp: round 4b)
+        for (const r of vm.rooms) {
+          if (!(l < r.x + r.w - 0.5 && l + w > r.x + 0.5)) continue;
+          const used = Math.min(stageMod.headerFit(r, r.w, false).used, stageMod.headerFit(r, r.w, true).used);
+          assert.ok(l >= r.x + used - 0.5, `${where}: over ${r.key}'s title (${l} < ${r.x} + ${used})`);
+          if (vm.boss && height < 160) assert.ok(!r.key.startsWith("room:arena:"), `${where}: not over the slim boss HUD`);
+        }
+        assert.ok(l >= 0 && l + w <= width + 0.5, `${where}: inside the strip`);
       }
     }
   }
@@ -627,7 +630,7 @@ test("a lone hero's header note uses the scenery beside its slot instead of trun
   const h = { ...base.heroes[0], x: r.x + 160 };
   Object.assign(base, { rooms: [r], heroes: [h], chests: [], mobs: (base.mobs ?? []).slice(0, 1).map((m) => ({ ...m, x: h.x + 56 })), fx: [], signs: [] });
   assert.ok(r.x > 200 && base.width - (r.x + r.w) > 200, "scenery on both sides");
-  const note = { key: "note:hire", text: "New hire: Tamsin the Composable", color: "#FFF4D6" };
+  const note = { key: "note:hire", text: "New hire: Tamsin the Composable", color: "#FFF4D6", heroId: h.heroId };
   const { mod } = await mountStage({ ...base, headerNote: note }, { width: 1171 });
   const n = mod.node(note.key);
   assert.ok(n, "shown");
@@ -636,6 +639,103 @@ test("a lone hero's header note uses the scenery beside its slot instead of trun
   assert.ok(w >= note.text.length * 6 + 24 - 0.5, `whole: ${w} px`);
   assert.ok(l + w <= r.x + 0.5 || l >= r.x + r.w - 0.5, "beside the room, not over its title");
   assert.ok(Math.abs(l + w - (r.x - 4)) < 0.5 || Math.abs(l - (r.x + r.w + 4)) < 0.5, "next to the slot");
+});
+
+test("header notes: a herd-wide one at the strip's right end by the camp, one about a hero over that hero's room; cut only between words, the whole text in the tooltip (round 4b U3)", async () => {
+  const methodArg = (n, m) => methodsOf(n, m).at(-1)?.[0];
+  const textOf = (n) => n.children.filter((c) => c.type === "text").map((c) => c.text).join("");
+  const headerFit = stageMod.headerFit ?? (() => ({ used: 0 })); // (a build that did not export it)
+  const full = "Hired 6 contractors: Zed, Coda and 4 more";
+  const tip = "Hired: Zed of Many Branches (was a contractor)\nHired: Coda Null-Safe (was a contractor)";
+  let camps = 0, placedInRoom = 0;
+  for (const name of ["crowd", "late", "midgame"]) {
+    for (const width of [960, 1600]) {
+      const base = makeScenario(name, { width, height: 200 });
+      // herd-wide: right-aligned at the strip's right end (over the camp when there is one)
+      const herd = { key: "note:herd", text: full, color: "#FFF4D6", tooltip: tip, heroId: null };
+      const a = (await mountStage({ ...base, headerNote: herd }, { width })).mod.node(herd.key);
+      assert.ok(a, `${name} ${width}: shown`);
+      const l = methodArg(a, "left"), w = methodArg(a, "w");
+      // (when it does not fit whole there: whole elsewhere if it can, else wherever shows most of
+      // it, cut; see the next test)
+      const last = base.rooms.reduce((m, r) => (r.x + r.w > m.x + m.w ? r : m));
+      const endFree = width - 4 - (last.x + Math.max(headerFit(last, last.w, false).used, headerFit(last, last.w, true).used) + 4);
+      const atRight = Math.abs(l + w - (width - 4)) < 0.6;
+      const shown = textOf(a);
+      assert.ok(atRight || endFree < full.length * 6 + 24, `${name} ${width}: at the right end (${l} + ${w}; ${endFree} px free there)`);
+      if (base.overflow && atRight) { camps++; assert.ok(l + w > base.overflow.x, `${name} ${width}: by the camp`); }
+      assert.equal(methodArg(a, "tooltip"), tip, "the whole text on hover");
+      assert.ok(shown === full || (shown.endsWith("…") && full.startsWith(shown.slice(0, -1)) && /[\s,:]/.test(full[shown.length - 1] ?? " ")), `cut between words: "${shown}"`);
+      // about one hero: over that hero's own room
+      const hero = base.heroes[Math.floor(base.heroes.length / 2)];
+      const room = base.rooms.find((r) => hero.x >= r.x && hero.x < r.x + r.w);
+      const mine = { key: "note:mine", text: "Hired: Zed of Many Branches (was a contractor)", color: "#FFF4D6", tooltip: null, heroId: hero.heroId };
+      const b = (await mountStage({ ...base, headerNote: mine }, { width })).mod.node(mine.key);
+      if (!b) continue; // its room's header has no 60 px to spare
+      const bl = methodArg(b, "left"), bw = methodArg(b, "w");
+      const t = textOf(b);
+      const inRoom = bl >= room.x - 0.5 && bl + bw <= room.x + room.w + 0.5;
+      // (a room header with no 60 px to spare, under the folded-room style or not: the herd's corner)
+      const roomFree = room.w - Math.min(headerFit(room, room.w, false).used, headerFit(room, room.w, true).used) - 8;
+      const corner = Math.abs(bl + bw - (width - 4)) < 0.6;
+      assert.ok(inRoom || (roomFree < 60 && corner), `${name} ${width}: over ${room.key} (${bl}..${bl + bw} in ${room.x}..${room.x + room.w}, ${roomFree} px free)`);
+      if (inRoom) placedInRoom++;
+      if (t !== mine.text) {
+        assert.ok(t.endsWith("…") && /[\s,:]/.test(mine.text[t.length - 1] ?? " "), `cut between words: "${t}"`);
+        assert.equal(methodArg(b, "tooltip"), mine.text);
+      }
+    }
+  }
+  assert.ok(camps > 0, "a strip with a camp was checked");
+  assert.ok(placedInRoom > 0, "a note about a hero was placed over its room");
+  // noteText: whole words only, or nothing
+  assert.equal(stageMod.noteText("Hired: Zed of Many Branches (was a contractor)", 6 * 22), "Hired: Zed of Many…");
+  assert.equal(stageMod.noteText("Hired 6 contractors: Zed", 6 * 21), "Hired 6 contractors…");
+  assert.equal(stageMod.noteText("Supercalifragilistic", 30), null);
+  assert.equal(stageMod.noteText("short", 600), "short");
+});
+
+test("header notes (round 4b review): a herd-wide note shows whole elsewhere rather than cut at a full right end, and a short stage keeps it off the camp's '+N'", async () => {
+  const full = "Hired 6 contractors: Zed, Coda and 4 more";
+  const herd = { key: "note:herd", text: full, color: "#FFF4D6", tooltip: "every hire", heroId: null };
+  const textOf = (n) => n.children.filter((c) => c.type === "text").map((c) => c.text).join("");
+  const at = (n, m) => methodsOf(n, m).at(-1)?.[0];
+  // midgame at 1200 px: the last room's header leaves 72 px at the right end ("Hired 6…"), the
+  // first room's header has room for all of it
+  const mid = makeScenario("midgame", { width: 1200, height: 200 });
+  const a = (await mountStage({ ...mid, headerNote: herd }, { width: 1200 })).mod.node(herd.key);
+  assert.equal(textOf(a), full, "whole");
+  // crowd at 1200 x 120: the camp's "+9" reaches the header band, so the note ends before the camp
+  for (const height of [104, 120]) {
+    const crowd = makeScenario("crowd", { width: 1200, height });
+    assert.ok(crowd.overflow, "a camp");
+    const b = (await mountStage({ ...crowd, headerNote: herd }, { width: 1200, height })).mod.node(herd.key);
+    assert.ok(b, `${height}: shown`);
+    assert.ok(at(b, "left") + at(b, "w") <= crowd.overflow.x + 0.5, `${height}: off the camp (${at(b, "left")} + ${at(b, "w")} > ${crowd.overflow.x})`);
+  }
+  // a stage tall enough that the "+N" sits below the band: the note may cover the camp's header band
+  const tall = makeScenario("crowd", { width: 1200, height: 200 });
+  const c = (await mountStage({ ...tall, headerNote: herd }, { width: 1200 })).mod.node(herd.key);
+  assert.ok(Math.abs(at(c, "left") + at(c, "w") - 1196) < 0.6 && at(c, "left") + at(c, "w") > tall.overflow.x, "by the camp");
+});
+
+test("header notes (round 4b integrator): the hires of one tick show their short form whole ('Hired 6 contractors') where the names fit nowhere whole, never a list cut mid-way", async () => {
+  const full = "Hired 6 contractors: Zed, Coda and 4 more";
+  const herd = { key: "note:herd", text: full, short: "Hired 6 contractors", color: "#FFF4D6", tooltip: "every hire", heroId: null };
+  const textOf = (n) => n.children.filter((c) => c.type === "text").map((c) => c.text).join("");
+  const seen = [];
+  for (const width of [760, 860, 960, 1200]) {
+    const crowd = makeScenario("crowd", { width, height: 200 });
+    const { mod } = await mountStage({ ...crowd, headerNote: herd }, { width });
+    const n = mod.node(herd.key);
+    assert.ok(n, `${width}: shown`);
+    const t = textOf(n);
+    seen.push(t);
+    assert.ok(t === full || t === herd.short, `${width}: whole, long or short ("${t}")`);
+    assert.equal(n.methods.find((m) => m[0] === "tooltip")?.[1][0], "every hire", `${width}: every hire on hover`);
+    assert.deepEqual(problems(mod), []);
+  }
+  assert.ok(seen.includes(herd.short), `a crowded strip shows the short form: ${seen.join(" | ")}`);
 });
 
 test("stillness: only campfire glows and blocked bubbles move", async () => {

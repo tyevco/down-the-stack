@@ -81,6 +81,23 @@ describe("names and creation", () => {
   });
 });
 
+describe("a hero's look (round 4b)", () => {
+  test("lookOf: the hoodie tint by id as every build drew it, a Contractor's too; hero.look when set", () => {
+    const n = D.PALETTE.termlingTint.length;
+    assert.equal(n, 8);
+    // the formula every saved hero has been drawn with: (|id| - 1) mod 8 (view/chrome.js since round 1)
+    for (let id = -40; id <= 80; id++) assert.equal(H.lookOf({ id }), (((Math.abs(id) - 1) % n) + n) % n, `id ${id}`);
+    assert.equal(H.lookOf(null), 0);
+    assert.equal(H.lookOf({}), 0);
+    assert.equal(H.lookOf({ id: 7, look: 2 }), 2, "a promoted Contractor keeps the tint it had");
+    assert.equal(H.lookOf({ id: 7, look: 10 }), 2);
+    assert.equal(H.lookOf({ id: 7, look: -1 }), 6, "no look: by id");
+    assert.equal(H.lookOf({ id: 7, look: 1.5 }), 6);
+    const state = newState({ seed: 5 });
+    assert.ok(!("look" in H.newHero(state, { seat: "s/x", ord: 0 })), "a hired hero has no stored look");
+  });
+});
+
 describe("stats (D§5.3)", () => {
   test("Lv 1 Intern with the stick", () => {
     const { h } = mk();

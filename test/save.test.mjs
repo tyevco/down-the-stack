@@ -9,6 +9,7 @@ import * as H from "../mods/down-the-stack/game/heroes.js";
 import * as I from "../mods/down-the-stack/game/items.js";
 import * as W from "../mods/down-the-stack/game/world.js";
 import { encodeState, decodeState, crc32, newState, saveSize, migrations, SAVE_VERSION } from "../mods/down-the-stack/game/save.js";
+import * as V from "../mods/down-the-stack/game/view.js";
 
 // Re-sign a parsed save object after editing it (the CRC covers the text with crc = "").
 function resign(obj) {
@@ -179,6 +180,50 @@ describe("round trip", () => {
     assert.equal(state.herd.quota.backlog, 12);
     assert.equal(state.herd.quota["2-3"], 12);
     assert.equal(encodeState(state), t1);
+  });
+});
+
+describe("a hero's look (round 4b)", () => {
+  test("a promoted Contractor's hoodie tint is saved with its extras (an older build keeps it); other heroes write nothing", () => {
+    const state = populated(3);
+    const plain = encodeState(state);
+    state.heroes[1].look = 3;
+    const text = encodeState(state);
+    const obj = JSON.parse(text);
+    assert.deepEqual(obj.heroes[1].x, { look: 3 }, "under the hero's extras, which every build since a4ea9ab carries through");
+    assert.ok(!("x" in obj.heroes[0]) && !("x" in obj.heroes[2]));
+    assert.equal(text.length - plain.length, 15, "15 bytes for a promoted hero (,\"x\":{\"look\":3}), none for the others");
+    const back = decodeState(text).state;
+    assert.equal(back.heroes[1].look, 3);
+    assert.ok(!("look" in back.heroes[0]) && !("look" in back.heroes[2]), "no key for a hero without one");
+    assert.deepEqual(back, state);
+    assert.equal(encodeState(back), text);
+  });
+
+  test("every fixture's heroes look as they always have: the hoodie by id, the hat by its uid", () => {
+    // the colours every build up to round 4 drew (view/chrome.js termlingColors, view/stage.js HAT_COLORS)
+    const TINT = ["#6C8CF5", "#F07D5C", "#45C2A8", "#C47BE8", "#E8B84A", "#5FB0E8", "#E86F9C", "#8FBF5A"];
+    const HAT = ["#E86F9C", "#5FB0E8", "#8FBF5A", "#E8B84A", "#C47BE8", "#F07D5C"];
+    const DIR = new URL("./fixtures/saves/", import.meta.url);
+    let heroes = 0;
+    let hats = 0;
+    for (const f of fs.readdirSync(DIR).filter((x) => x.endsWith(".json"))) {
+      const text = fs.readFileSync(new URL(f, DIR), "utf8");
+      const { world } = W.loadWorld(text, { nowMs: JSON.parse(text).lastMs });
+      const now = world.state.herd.lastMs + 1000;
+      const party = new Map(V.partyView(world, { width: 268, nowMs: now }).groups.flatMap((g) => g.rows).map((r) => [r.heroId, r]));
+      for (const h of world.state.heroes) {
+        assert.ok(!("look" in h), `${f}: ${h.name} has no stored look`);
+        const rig = V.sheetView(world, { heroId: h.id, nowMs: now }).header.rig;
+        assert.equal(rig.colors.hoodie, TINT[(h.id - 1) % 8], `${f}: ${h.name}'s hoodie`);
+        assert.equal(party.get(h.id).colors.hoodie, TINT[(h.id - 1) % 8], `${f}: ${h.name}'s party row`);
+        const hat = h.eq[1];
+        assert.equal(rig.hat ? rig.hat.color : null, hat ? HAT[hat.uid % 6] : null, `${f}: ${h.name}'s hat`);
+        heroes++;
+        if (hat) hats++;
+      }
+    }
+    assert.ok(heroes >= 60 && hats >= 20, `${heroes} heroes, ${hats} hats`);
   });
 });
 
@@ -415,13 +460,14 @@ describe("every save this branch has written loads (SAVE_VERSION stays 1)", () =
   // test/fixtures/saves: texts written by the engine of each commit that changed the save format
   // (990aa93 the first save.js; 4f9a1a0 = 4082db1's save.js; 2d2583c before the string table held
   // pending-chest titles and journal strings; a4ea9ab the D§11.15 settings, the build the owner ran
-  // in herdr; c041909 round 3: the collapse countdown, "unrev" journal lines), demo worlds of the
-  // time, one with shared titles.
+  // in herdr; c041909 round 3: the collapse countdown, "unrev" journal lines; d1ffb4f round 4: the
+  // journal's name column, Contractors promoted at the 04:00 turn), demo worlds of the time, one
+  // with shared titles.
   const DIR = new URL("./fixtures/saves/", import.meta.url);
   const files = fs.readdirSync(DIR).filter((f) => f.endsWith(".json")).sort();
 
   test("the fixtures cover every format", () => {
-    assert.deepEqual(files.map((f) => f.split("-")[0]).filter((c, i, a) => a.indexOf(c) === i), ["2d2583c", "4082db1", "4f9a1a0", "990aa93", "a4ea9ab", "c041909"]);
+    assert.deepEqual(files.map((f) => f.split("-")[0]).filter((c, i, a) => a.indexOf(c) === i), ["2d2583c", "4082db1", "4f9a1a0", "990aa93", "a4ea9ab", "c041909", "d1ffb4f"]);
   });
 
   for (const f of files) {

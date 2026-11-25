@@ -271,7 +271,10 @@ Hero  = { id, seat, sid, ord, name, cls, prov, L, xp, sp:[7], spFree, autoLearn,
           rev:[0|1, 0|1], eq:[Item|null ×6], pinMap:null|"2-2", fe, shift:{day, min},
           cups, hpFrac, sig:{tm:[...≤20 task minutes], blocks, workMin, subTasks, n},
           pend:[{min, fmin, title, at, sealFactor}], cd:{unblockedUntil, unblockedCdUntil, boss:{}},
-          addr, lastPane, lastTab, seenAt, st:{kills, tasks, seals, wh, dodges, healed}, rng }
+          addr, lastPane, lastTab, seenAt, st:{kills, tasks, seals, wh, dodges, healed}, rng,
+          look? }   // round 4b: a promoted Contractor's hoodie tint (index into
+                    // PALETTE.termlingTint), saved in the hero's extras ("x": {"look": n}) so an
+                    // older build keeps it; heroes.lookOf reads it, else (|id| - 1) mod 8
 
 Herd  = { name, gold, snip, bld:[6], zone, quota:{[mapId]:kills}, meter, bank, seals, rel,
           boss:[9], bossKills:[9], fight:null|SuspendedFight, wounds:{}, lessons:{},
@@ -305,9 +308,18 @@ world.rt = {                // rebuilt from snapshots; never saved
   tzOffsetMin,              // from the snapshots (tick) or a command's tzOffsetMin argument
   msHeld,                   // milestones raised before the time zone was known (counted at the next tick)
   firstKeepsake,            // {i, name}: a herd-first kill's Keepsake, named in that kill's boss toast
-  _hireLine                 // round 4: agents.hireOutlook's cache {key, line, room}, once per tick
+  _hireLine,                // round 4: agents.hireOutlook's cache {key, line, room, ends}, once per tick
+  startMs,                  // round 4b: this world's first reconcile (agents offDutySince)
+  loadedLastMs,             // round 4b: the loaded save's herd.lastMs (world.loadWorld): the time
+                            // the app was closed does not count in a hero's off-duty grace
+  offPane                   // round 4b: Map<heroId, pane> the pane a hero's terminal ended in, this
+                            // session only (pickFreeHero ranks that hero first for a terminal there)
 }                           // a Contractor (rt.contractors) also carries since: when it arrived, its
                             // place in the hiring line (promoteContractors: longest-running first)
+                            // Note = {key, text, color, bornTick, showTick, kind?, heroId?, name?,
+                            //   promoted?, extra?}: round 4b tags from ev.note(text, color, tag)
+                            //   (world.js pushNote); extra: a tick's second and later hire notes,
+                            //   which do not count against the six-note queue
 
 Live = {                    // per bound, live hero
   address, status, seq, statusSince, state: "questing"|"waiting"|"shipped"|"resting"|"supervising"|"crashed",
@@ -390,6 +402,10 @@ export function stashAdd(state, item) -> {kept:boolean, deprecated:Item|null}
 export function deprecate(state, uid) -> {ok, snippets, gold}
 export function polish(state, uid) -> {ok, cost}
 export function squash(state, uids) -> {ok, item}      export function reroll(state, uid, affixIdx) -> {ok}
+export function hatToneOf(uid) -> 0..5                    // round 4b: a hat's tint (PALETTE.hatTint), uid mod 6, in
+                                                          // range for a Contractor's negative uid too
+export function skipUidsToTone(state, tone) -> void       // round 4b: moves herd.nextUid on (at most 5) so the next
+                                                          // uid has that tint: a promoted Contractor's hat keeps it
 
 // heroes.js
 export function newHero(state, {seat, sid, ord, nowMs}) -> Hero
@@ -397,6 +413,8 @@ export function heroName(seat, ord) -> string
 export function stats(hero, ctx) -> Stats   // cached by (L, eq uids/pol, sp, cls, buff-free) ; ctx = {herd, roomBonuses}
 export function grantXP(state, hero, amount, ev) -> {levels:int}      // level-ups emit fx via ev
 export function careerOf(hero) -> {title, tier}
+export function lookOf(hero) -> 0..7                      // round 4b: the hoodie tint (PALETTE.termlingTint): hero.look,
+                                                          // else (|id| - 1) mod 8 as every build has drawn it
 export function classSignature(hero) -> {recommended, median, bph, sub, n}
 export function autoLearn(hero) ; export function learn(hero, slot) ; export function respec(hero, nowMs, {herd})
 export function setClass(state, hero, cls) ; export function recordTask(hero, task, {learn})
@@ -430,15 +448,35 @@ export function promoteContractors(world, ev, spare?) -> number   // round 4, D�
                                                           // before new terminals bind, and on retire; longest-running
                                                           // live Contractor first while hires are left and makeRoom
                                                           // finds room (a free slot, else rosterVictim: the least-
-                                                          // recently-seen unbound hero below Lv 10 is let go); spare:
-                                                          // heroes whose terminals ended in this snapshot (a replaced
-                                                          // pane keeps its hero); never on a read-only world
-export function hireOutlook(world, heroOrId) -> null|{when:"soon"|"day"|"slot"|"never", position, ahead,
-       hiresLeft, perDay, room, atMs, days, text}         // when a Contractor is hired (views: chrome.hireLine,
-                                                          // panels hireOf); cached per tick in rt._hireLine
+                                                          // recently-seen unbound hero below Lv 10 past its off-duty
+                                                          // grace is let go); spare: heroes the new terminals of this
+                                                          // snapshot claimed (reconcile step 1a); never on a read-only
+                                                          // world. promote() keeps the Contractor's look (hero.look,
+                                                          // its hat's tint through skipUidsToTone) and renames every
+                                                          // id-keyed thing: combat.renameHero, boss.renameHero (or the
+                                                          // fight remap for a stubbed boss API), journal, inbox finder
+export function inOffDutyGrace(world, hero) -> boolean    // round 4b: an unbound hero off duty for less than
+                                                          // T.roster.offDutyGraceMin (15) of world time: from seenAt,
+                                                          // moved on by the app-closed gap for a hero not seen since
+                                                          // the load (rt.loadedLastMs → rt.startMs); never let go
+export function offDutyGraceEnds(world, hero) -> number   // round 4b: when that grace ends (ms), 0 when none is left
+export function hireOutlook(world, heroOrId) -> null|{when:"soon"|"grace"|"day"|"slot"|"never", position, ahead,
+       hiresLeft, perDay, room, graced, atMs, days, text} // when a Contractor is hired (views: chrome.hireLine,
+                                                          // panels hireOf); cached per tick in rt._hireLine. Round 4b:
+                                                          // room counts graced heroes too (graced of them); "grace":
+                                                          // hired when a graced hero's grace ends at atMs (unless its
+                                                          // agent comes back); "soon" counts room free now only
+// reconcile's order (round 4b): 0. unbind ended terminals (goOffDuty: seenAt, rt.offPane); 1a. every
+// new terminal claims its saved hero: first each one's own hero by saved address (ownHeroFor), then
+// a free hero of its seat in snapshot order (pickFreeHero, ranking first the hero whose terminal
+// ended in that pane this session); 1b. promoteContractors(spare = the claimed heroes); 2. bind and
+// refresh top-level agents (a claim is taken; else D§3.2); 3. sub-agents; 4. seen, focus
 
 // combat.js
 export function buildRooms(world) -> Room[]
+export function renameHero(world, oldId, newId) -> void  // round 4b: a promotion's new id in rooms (heroIds, a room
+                                                          // id named after its first hero), fx, actors' _act.roomId,
+                                                          // _cg.fighting and apGear; rt.roomOf rebuilds
 export function stepRoom(world, room, ev) -> void        // one lane tick for every questing/supervising hero in it
 export function restTick(world, hero, live) -> void      // regen, coffee refill, fresh eyes
 
@@ -449,6 +487,9 @@ export function stepFight(world, fight, ev) -> "running"|"won"|"lost"|"suspended
 export function estimate(world, kind, idx, heroIds) -> number
 export function leaveSavedFight(world, heroId, ev) -> boolean   // retire / eviction: out of the paused fight
                                                           // (herd.fight); one nobody is left in ends as a Postmortem
+export function renameHero(world, oldId, newId) -> void  // round 4b: running fights (heroIds, helpers), the paused
+                                                          // fight (ids, hl), review Wounds and Lessons (rv<i>.<id>);
+                                                          // reached through autopilot.bossApi
 
 // herd.js
 export function addGold(state, n) ; export function addSeals(world, n, ev) ; export function buy(state, bIdx)
@@ -471,7 +512,9 @@ export function autopilot(world, ev) -> void              // every 60 ticks and 
 export function createWorld({nowMs, seed}) -> World
 export function loadWorld(text, {nowMs}) -> {world, warning:null|string}   // repairLoaded mends an older build's
                                                           // half-emoji seats, chest titles and journal texts, and drops
-                                                          // Contractor ids from the paused fight
+                                                          // Contractor ids from the paused fight, review Wounds and
+                                                          // Lessons (rv<i>.<negative>) and inbox finders (round 4b);
+                                                          // records rt.loadedLastMs
 export function serialize(world) -> string                // JSON with crc; a held offline gap (rt.offlineHold) is
                                                           // written as not yet seen (lastMs − the held gap), so a
                                                           // restart or hot reload during the hold finds it again (§2.3)
@@ -482,8 +525,11 @@ export function takeMilestones(world, nowMs) -> [{n, kind, at, title, body}]   /
 // World = { state, rt }
 ```
 
-`ev` is a small emitter `{ fx(kind, data), note(text, color), banner(text, sub), major(),
+`ev` is a small emitter `{ fx(kind, data), note(text, color, tag?), banner(text, sub), major(),
 journal(kind, heroId, text, value, name?), milestone(kind, data) }` that `world.tick` creates per tick
+(note's `tag`, round 4b: `{kind: "hire", heroId, name, promoted?}` for a hire, `{heroId}` for a note
+about one hero, the provisional class, a fall-back and chests opened Unreviewed; the stage reads
+them, and a tick's second and later hire notes do not count against the six-note queue)
 (journal's `name`, round 4: the hero's name, which `emitJournal` and `boss.jot` fill in; leave and
 retire lines pass it because the hero has left the roster); it enforces the fx budgets (D§11.7)
 and marks `rt.version++`. `ev.milestone` (kind `boss` | `lts` | `principal`) passes only on a *live*
@@ -775,6 +821,12 @@ Herd panel also opens from `mod.json`'s `"overlay"` (`{role:"herd", tab:"digest"
 command `mod.open` (a notification's click), as overlay `mod-down-the-stack`. herdr puts the
 overlay id in every overlay's props (`window.rs` `open_overlay`), so dialogs close on Esc / click
 outside and the mod closes them with `closeOverlay(props().overlay)` however they were opened.
+The host's dialog registry (`overlays.sheet`) keeps the open sheet's `heroId`, `address` and `name`.
+herdr never changes an overlay's props, so a sheet copy reports what it shows on each render
+(`host.followSheet(overlay, {heroId, address, name})`, round 4b: a promoted Contractor's sheet
+follows it to its roster id), and `openSheet` keeps the dialog when `sheetShows(cur, heroId)`: the
+same id, or a Contractor's sheet whose terminal is now bound to that roster hero of the same name
+(a click that lands before the sheet redrew).
 
 ---
 
@@ -788,7 +840,7 @@ export function stageView(world, { width, height, nowMs }) -> StageVM
 StageVM = {
   tick, width, height, calm, nums, stillness:boolean,          // stillness: nothing questing anywhere
   empty: null | { kind: "no_agents"|"loading", title, text },
-  headerNote: null | { key, text, color },                     // ≤3 s notes (D§11.15)
+  headerNote: null | { key, text, short?, color, tooltip, heroId },  // notes (D§11.15); round 4b below
   herdBanner: null | { key, text },                            // herd-first boss kill (D§11.8)
   rooms: [{ key, x, w, zone, mapId, title, shortTitle, palette:{sky,far,ground,accent},
             skyBands:[hex×4], quota:null|{have,need}, sprint:null|{have,need}, door:boolean,
@@ -826,7 +878,7 @@ export function nameplateView(world, { terminal, pane }) -> null | PlateVM
 PlateVM= { heroId, name, level, careerTitle, clsName, programIcon, hpFrac, xpFrac, feFrac,
            chip:{text, color}, tooltip, contractor:boolean }
 export function hudView(world, { nowMs }) -> HudVM
-HudVM  = { gold, snippets, release, sprint, working:int, blocked:int, shipped:int, digestDot }
+HudVM  = { gold, snippets, release, sprint, working:int, blocked:int, shipped:int, needYou:int, digestDot }
 export function sheetView(world, { heroId, tab, filter }) -> SheetVM   // D§11.13 (tabs gear/skills/stats/career/journal)
 export function herdView(world, { tab, filter }) -> HerdVM                    // D§11.14 (upgrades/stash/tracker/bosses/roster/digest/settings)
 ```
@@ -962,6 +1014,36 @@ SheetVM / HerdVM typedefs in `ui/sheet.js` / `ui/herdpanel.js` are the full list
   `host.stageInfo()`, §4, over its own `layout()` walk), a click calls `host.stageStrip(show, id)`
   and flashes its answer (the switch flips only when ok; without that method it runs
   `layout.show` / `layout.hide {id}`), disabled with "This layout has no stage" without one.
+- round 4b ("need you", D§11.11): `chrome.needYou(world) -> {n, heroes, subs}` (cached per world
+  version: live heroes whose agent is blocked, Contractors too, plus their blocked sub-agents, by
+  `chrome.heroWaits(live)` and `chrome.forkWaits(sub)`; `needYouText(n)` is "3 need you" / "1 needs
+  you"). The party's `waitingForksOf` and `ui/party.js waitingList` use the same two tests; the
+  Herd header's `waiting` reads "N need you"; `HudVM.needYou` is that count (the HUD's `blocked`
+  stays heroes only and its tooltip adds "N need you, counting M waiting sub-agents" when sub-agents
+  wait). The chip's walk (`ui.needYou = {key, seen}`) keeps every row focus it passed through and
+  goes on from its last entry while the focus is one of those (or no row), and the click calls
+  `cx.notify()`;
+- round 4b (nameplate, D§11.12): the env's `width` is null until herdr reports the header's size
+  (`on_size_change` comes after a layout); `plan(vm, W, hovered, title, folder, prevBars,
+  {measured})` shows no bars while `measured` is false, and `ui.bars` records only measured plans.
+  The chip outranks the bars (they go when it would not fit beside them with the name at 48 px),
+  and the hero, title and bars sit in one `flex_1 min_w(0) overflow_hidden` group so it clips before
+  the chip; the chip (`np-chip-<pane>`) cuts its own text only when narrower than itself;
+- round 4b (header notes, D§11.15): `HeaderNote.tooltip` (the whole text; a merged note's every
+  line), `HeaderNote.short` (a merged hire note's head, "Hired 6 contractors": shown whole where the
+  names fit nowhere whole, never a list cut mid-way) and `HeaderNote.heroId` (the roster hero it is
+  about: the note's engine tag, else the one hero of a hire's name; null: herd-wide). The hires of one tick are one note (`view/stage.js
+  headerNote`, remembered per tick of birth in the stage memo, counted from the journal), shown
+  while any of its hires' queue slots runs. `ui/stage.js headerNote` places it (over the hero's
+  room, at the strip's right end, the left scenery or the roomiest header) and cuts between words
+  (`noteText`); `headerFit` is exported for tests;
+- round 4b (Roster, D§11.14): `RosterRowVM.contractor` (boolean); a Contractor's `name` carries
+  "(contractor)" only when it has no `hire` line (the slim row's tooltip keeps it). Slim rows leave
+  out the 52 px Retire column when no row in the list can retire, and put title · where and seen in
+  one basis-0 cell so the hire moment stays whole; `panels hireOf` has a `"grace"` case ("hired in
+  about N min" / "Hired in ~N min" from `atMs`);
+- round 4b (looks): `termlingColors` takes the hoodie from `heroes.lookOf`, and the stage's and the
+  sheet's hat colour is `PALETTE.hatTint[hatToneOf(uid)]`.
 
 `sheetView`/`herdView` shapes are owned jointly by the engine-world author and the sheet/herd
 UI author; their exact fields are defined in `game/view.js` JSDoc, which is the source of truth.
@@ -1082,6 +1164,11 @@ Built from divs (no image needed): 40×48 at scale 1.
   (`stats.lastRenderWallMs` keeps the wall time). `close()` keeps its wall-clock timeout.
 - `cx` mock: `notify` (throws during render), `spawn`, `timer.every/after` (manual clock),
   `focus_handle`, `stop_propagation`, `theme()`.
+- `size(w, h)` (round 4b): herdr reports a size only after laying a frame out (gpui-shell
+  `materialize.rs` SizeObserver, in prepaint, keyed by the element and the application
+  generation), so a root size given before any render drew a root with `on_size_change` is kept
+  and delivered right after the next render that does: that frame is drawn without a size, and
+  the handler's `cx.notify()` asks for the next.
 
 ### 7.2 `tools/check.mjs`
 0. Lint: every `.js` file of the mod is scanned for what QuickJS or herdr refuse (§2.14, timers,
@@ -1109,7 +1196,8 @@ opacity; loops → CSS alternate animations; frames → JS text cycling) and scr
 Playwright (`chromium.launch()`, `deviceScaleFactor: 2` for user-facing shots). Produces a full
 mock window (sidebar party + stage + nameplates around fake terminals) for `preview.png`, and
 per-role shots for review. It is a stand-in for herdr's renderer: good for layout and art
-review, not pixel-exact.
+review, not pixel-exact. `flex_grow(n)` and `flex_shrink(n)` keep their number (herdr's
+`style.rs` reads one; the no-argument forms are not herdr methods).
 
 ### 7.4 Tests (`test/*.test.mjs`, `node --test`)
 - formulas: D§5.8 reference table values (±1), K(L)/need table D§6.3, gap(), DR caps.
@@ -1147,10 +1235,17 @@ review, not pixel-exact.
   the real layout, every role on one graph, for the owner's decisions: a Contractor told when it is
   hired and promoted at the 04:00 turn; the Stage strip switch (found by content, disabled without
   a stage); a blocked pane-less sub-agent in "N need you", the group `!` and the rail badge, with
-  `terminal.peek`; compact nameplate bars at 420 px with the title's tooltip.
+  `terminal.peek`; compact nameplate bars at 420 px with the title's tooltip. Round 4b adds: a
+  promoted Contractor keeps its hoodie and hat in the party, pane header and stage, also after a
+  restart (R1); restarting an agent on a full roster keeps its hero while Contractors wait, and a
+  hero off duty makes room only after 15 minutes (R2); a fresh pane header at 400 / 420 px draws
+  no bars before its size arrives and its chip is whole in Chromium (U1); the six hires of the
+  04:00 turn are one header note at the right end for 18 s (U3); a Contractor's open sheet
+  follows its promotion (U5); the "N need you" walk never repeats (U4).
 - herdr gates: with `HERDR_SRC` missing, the tests that read herdr's source skip with one line each
   (`gates.mjs`); `STRICT_GATES=1 npm test` makes them fail. `test/fixtures/saves` also holds saves
-  written by `a4ea9ab` (the build the owner ran) and `c041909`.
+  written by `a4ea9ab` (the build the owner ran), `c041909` and `d1ffb4f` (round 4b: journal names
+  and two promoted heroes; `save.test` checks every fixture's heroes keep their colours).
 - wall-clock bounds hold on a busy machine: the engine tests (`test/helpers/perf.mjs within()`)
   and the stage tests apply their strict bounds only with `PERF=1` (else 10×, and the measured time
   is always printed); the chrome and panels tests judge a render the mock flags by its best of 5,

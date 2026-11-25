@@ -78,6 +78,9 @@ export function loadWorld(text, { nowMs = 0 } = {}) {
   const { state, warning, readOnly } = decodeState(text);
   const world = { state, rt: newRt(nowMs, state.herd.tick) };
   world.rt.readOnly = !!readOnly;
+  // the world time the save was written at: the time until the first reconcile (the app closed) is
+  // not counted in a hero's off-duty grace (agents.inOffDutyGrace, round 4b)
+  world.rt.loadedLastMs = Number.isFinite(state.herd.lastMs) ? state.herd.lastMs : null;
   repairLoaded(state);
   return { world, warning: warning || null };
 }
@@ -87,9 +90,10 @@ export function loadWorld(text, { nowMs = 0 } = {}) {
 //   wherever the text is shown (agents.js now cuts with cutText). The seat drops the half
 //   character as normSeat now does, so its hero still matches the space; a title also loses the
 //   space before it (questName's trimEnd).
-// - Contractor ids in the paused boss fight and the journal: Contractors are never saved and are
-//   numbered afresh (-1, -2, ...) after a load, so a saved negative id would seat an unrelated
-//   Contractor (a journal line keeps its stored name, and hero id 0).
+// - Contractor ids in the paused boss fight, the journal, review Wounds / Lessons Learned and the
+//   chest inbox: Contractors are never saved and are numbered afresh (-1, -2, ...) after a load, so
+//   a saved negative id would seat an unrelated Contractor (a journal line keeps its stored name,
+//   and hero id 0).
 function repairLoaded(state) {
   const mend = (v) => {
     if (typeof v !== "string") return v;
@@ -114,6 +118,14 @@ function repairLoaded(state) {
     if (Array.isArray(f.hl)) f.hl = f.hl.filter((id) => id > 0);
     if (n !== f.ids.length) f.n = n;
   }
+  // the same for a Contractor's review Wounds / Lessons Learned ("rv<review>.<negative id>": a new
+  // Contractor would inherit them) and for a chest drop it found that waits in the inbox (no finder)
+  for (const kind of ["wounds", "lessons"]) {
+    const m = state.herd[kind];
+    if (!m || typeof m !== "object") continue;
+    for (const key of Object.keys(m)) if (key[0] === "r" && Number(key.slice(key.indexOf(".") + 1)) < 0) delete m[key];
+  }
+  for (const e of Array.isArray(state.herd.inbox) ? state.herd.inbox : []) if (Array.isArray(e) && e[0] < 0) e[0] = 0;
 }
 
 /**
@@ -163,14 +175,30 @@ function guard(world, where, fn) {
   }
 }
 
-function pushNote(rt, text, color) {
+/**
+ * Queues a header note (D§11.15: one at a time, NOTE_TICKS each, at most NOTE_QUEUE waiting).
+ * tag (optional, round 4b): what the note is about, for the stage (view/stage.js headerNote):
+ * {kind: "hire", heroId, name, promoted} for a hire (agents.js), {heroId} for a note about one hero
+ * (its room). The hires of one tick (six at the 04:00 game day turn) are one note on the stage, so
+ * every hire after a tick's first is queued without counting against NOTE_QUEUE (`extra`): a note
+ * raised meanwhile still shows, after them.
+ */
+function pushNote(rt, text, color, tag) {
   const t = String(text);
   const q = rt.notes;
   const last = q[q.length - 1];
   if (last && last.text === t) return;
-  if (q.length >= NOTE_QUEUE) return;
+  const kind = tag && typeof tag.kind === "string" ? tag.kind : null;
+  const extra = kind === "hire" && q.some((n) => n.kind === "hire" && n.bornTick === rt.tick);
+  if (!extra && q.filter((n) => !n.extra).length >= NOTE_QUEUE) return;
   const showTick = last ? Math.max(rt.tick, last.showTick + NOTE_TICKS) : rt.tick;
-  q.push({ key: `note:${rt.tick}:${q.length}:${t.length}`, text: t, color: color || null, bornTick: rt.tick, showTick });
+  const n = { key: `note:${rt.tick}:${q.length}:${t.length}`, text: t, color: color || null, bornTick: rt.tick, showTick };
+  if (kind) n.kind = kind;
+  if (tag && Number.isFinite(tag.heroId)) n.heroId = tag.heroId;
+  if (tag && typeof tag.name === "string") n.name = tag.name;
+  if (tag && tag.promoted) n.promoted = true;
+  if (extra) n.extra = true;
+  q.push(n);
 }
 
 function prio(f) {
@@ -251,7 +279,7 @@ function budget(world, list) {
 
 /**
  * The emitter world.tick and world.command pass to every engine module:
- * {fx(kind, data), note(text, color), banner(text, sub), major(), journal(kind, heroId, text, value, name?),
+ * {fx(kind, data), note(text, color, tag?), banner(text, sub), major(), journal(kind, heroId, text, value, name?),
  * milestone(kind, {title, body})}. fx are buffered per tick and flushed through budget() into rt.fx
  * with keys "fx:<tick>:<n>". `live` (opts.live) lets milestones through: world.tick sets it for the
  * steps and reconcile of a call that is neither the VM's first, the one that settles an offline gap
@@ -268,8 +296,8 @@ export function makeEmitter(world, { live = false } = {}) {
     fx(kind, data) {
       if (pending.length < 400) pending.push(Object.assign({ kind: String(kind) }, data || {}));
     },
-    note(text, color) {
-      pushNote(rt, text, color);
+    note(text, color, tag) {
+      pushNote(rt, text, color, tag);
       ev.visible = true;
     },
     banner(text, sub) {

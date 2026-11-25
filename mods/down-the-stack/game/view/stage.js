@@ -90,7 +90,8 @@ const CALM_DROPS = { levelup: 1, pillar: 1, skill: 1 };
 const FIGHT_STATES = { questing: 1, crashed: 1, supervising: 1, waiting: 1 };
 const WORKING_STATES = { questing: 1, crashed: 1, supervising: 1 };
 
-const HAT_COLORS = ["#E86F9C", "#5FB0E8", "#8FBF5A", "#E8B84A", "#C47BE8", "#F07D5C"];
+// Hat tints (data.js PALETTE.hatTint): a hat's tint follows its item uid, as items.hatToneOf.
+const HAT_COLORS = PALETTE.hatTint;
 
 // Prop art sizes (viewBox) per zone: [prop-1, prop-2, prop-3] (art/bg/<zone>-prop-<k>.svg).
 const PROP_SIZES = {
@@ -287,7 +288,7 @@ function build(world, memo, wm, W, H) {
   }
   if (!ents.length) {
     const vm = emptyVM(world, W, H, noAgents(state));
-    vm.headerNote = headerNote(rt);
+    vm.headerNote = headerNote(world, memo);
     vm.herdBanner = herdBanner(rt);
     return vm;
   }
@@ -408,7 +409,7 @@ function build(world, memo, wm, W, H) {
 
   return {
     tick, width: W, height: H, calm, nums, stillness, empty: null,
-    headerNote: headerNote(rt), herdBanner: herdBanner(rt),
+    headerNote: headerNote(world, memo), herdBanner: herdBanner(rt),
     rooms, heroes, mobs, chests, boss, fx, signs,
     overflow: L.chip ? overflowVM(L) : null,
   };
@@ -797,7 +798,7 @@ function heroVM(ctx, e, o) {
     colors: termlingColors(hero, live, st),
     programIcon: programIconOf(live.program),
     weapon: { clsId, color: ITEM_BASES.weaponTierTones[wt - 1], edge: wt === 5 },
-    hat: ht ? { tier: ht, color: HAT_COLORS[(hat.uid || 0) % HAT_COLORS.length] } : null,
+    hat: ht ? { tier: ht, color: HAT_COLORS[(((hat.uid || 0) % HAT_COLORS.length) + HAT_COLORS.length) % HAT_COLORS.length] } : null,
     accessory: clsId,
     bubble: st === "waiting" && live.bubbleShown
       ? { label: `Waiting for you · ${fmtDuration(blockedFor)} · click to jump there` } : null,
@@ -1360,12 +1361,125 @@ function arenaRoom(ctx, fight, L) {
 // Header band messages
 // ---------------------------------------------------------------------------------------------
 
-function headerNote(rt) {
-  const tick = rt.tick;
-  for (const n of rt.notes || []) {
-    if (n.showTick <= tick && tick < n.showTick + 3) return { key: n.key, text: String(n.text), color: hexOr(n.color, COL.cream) };
+/** Header notes show for 3 s each (world.js NOTE_TICKS, D§11.15). */
+const NOTE_TICKS = 3;
+const HIRED_RE = /^Hired: (.+) \(was a contractor\)$/;
+const NEW_HIRE_RE = /^New hire: (.+)$/;
+
+/**
+ * A hire note: {name, promoted} for the engine's "Hired: <name> (was a contractor)" (a Contractor
+ * promoted, agents.promoteContractors) and "New hire: <name>" (agents.reconcile), or a note the
+ * engine tags {kind: "hire", name, promoted?}; else null.
+ */
+function hireOf(n) {
+  if (!n) return null;
+  if (n.kind === "hire" && n.name) return { name: String(n.name), promoted: !!n.promoted };
+  const t = String(n.text);
+  const m = HIRED_RE.exec(t);
+  if (m) return { name: m[1], promoted: true };
+  const k = NEW_HIRE_RE.exec(t);
+  return k ? { name: k[1], promoted: false } : null;
+}
+
+/** The roster hero a note is about: its heroId tag, else (a hire note) the one hero of that name. */
+function noteHeroId(world, n, hire) {
+  if (Number.isFinite(n.heroId)) return n.heroId;
+  if (!hire) return null;
+  let id = null;
+  for (const h of world.state.heroes) {
+    if (h.name !== hire.name) continue;
+    if (id != null) return null; // two heroes share it: say it herd-wide
+    id = h.id;
   }
-  return null;
+  return id;
+}
+
+/**
+ * Every hire of the moment a hire note was born, from the journal ("hired": "Hired: <name> (was a
+ * contractor)"; "hire": the new hero's name): the newest line naming that hero gives the moment.
+ * [{name, promoted, line}] in the order hired; [] when the journal has no such line.
+ */
+function hiresLogged(world, hire) {
+  const log = world.state.herd.log || [];
+  const of = (e) => {
+    if (!Array.isArray(e) || (e[1] !== "hired" && e[1] !== "hire")) return null;
+    if (e[1] === "hired") {
+      const m = HIRED_RE.exec(String(e[3]));
+      const name = m ? m[1] : typeof e[5] === "string" ? e[5] : "";
+      return { name, promoted: true, line: String(e[3]) };
+    }
+    const name = String(e[3] || e[5] || "");
+    return { name, promoted: false, line: `New hire: ${name}` };
+  };
+  let at = null;
+  for (let i = log.length - 1; i >= 0; i--) {
+    const h = of(log[i]);
+    if (h && h.name === hire.name && h.promoted === hire.promoted) { at = log[i][0]; break; }
+  }
+  if (at == null) return [];
+  const out = [];
+  for (const e of log) {
+    if (!Array.isArray(e) || e[0] !== at) continue;
+    const h = of(e);
+    if (h) out.push(h);
+  }
+  return out;
+}
+
+/** "Zed, Coda and Ivo" / "Zed, Coda and 4 more" (first names; the tooltip has the whole names). */
+function namesLine(names) {
+  const first = names.map((x) => firstName(x));
+  if (first.length <= 1) return first.join("");
+  if (first.length <= 3) return `${first.slice(0, -1).join(", ")} and ${first[first.length - 1]}`;
+  return `${first.slice(0, 2).join(", ")} and ${first.length - 2} more`;
+}
+
+/**
+ * The header note due now (D§11.15: one at a time, 3 s each, in the header band), or null:
+ * {key, text, short?, color, tooltip, heroId}. heroId: the roster hero the note is about (the stage puts it
+ * over that hero's room); null: a herd-wide note (the stage's right end, by the camp).
+ * The hires of one tick (six at the 04:00 game day turn) are one note, "Hired 6 contractors: Zed,
+ * Coda and 4 more", its tooltip every hire's own line; it holds the time the engine's queue gave
+ * its hires (3 s each), so it can be read and hovered. It is remembered per tick of birth
+ * (memo.hires), since the queue drops each hire's note as its own 3 s pass.
+ */
+function headerNote(world, memo) {
+  const rt = world.rt;
+  const tick = rt.tick;
+  const notes = rt.notes || [];
+  const due = notes.find((n) => n.showTick <= tick && tick < n.showTick + NOTE_TICKS);
+  if (!due) return null;
+  const color = hexOr(due.color, COL.cream);
+  const hire = hireOf(due);
+  if (hire) {
+    const hires = memo ? memo.hires || (memo.hires = new Map()) : new Map();
+    let merged = hires.get(due.bornTick);
+    if (merged === undefined) {
+      const group = notes.filter((n) => n.bornTick === due.bornTick && hireOf(n));
+      // the journal has every hire of that moment, also one the engine's note queue (6 notes) had
+      // no room for
+      const logged = hiresLogged(world, hire);
+      const list = logged.length >= group.length ? logged : group.map((n) => Object.assign(hireOf(n), { line: String(n.text) }));
+      merged = null;
+      if (list.length > 1) {
+        const n = list.length;
+        const promoted = list.filter((x) => x.promoted).length;
+        const head = promoted === n ? `Hired ${n} contractors` : promoted === 0 ? `${n} new hires` : `${n} hires`;
+        // short: what the stage shows when the names do not fit whole anywhere (a crowded strip),
+        // rather than a list cut mid-way ("6 new hires: Dot, Kaia and 4…")
+        merged = {
+          key: `${group[0].key}:hires`, text: `${head}: ${namesLine(list.map((x) => x.name))}`, short: head, color,
+          tooltip: list.map((x) => x.line).join("\n"), heroId: null,
+        };
+      }
+      hires.set(due.bornTick, merged);
+      // one day's worth of ticks of birth is plenty (a note lives a few seconds)
+      if (hires.size > 16) hires.delete(hires.keys().next().value);
+    }
+    if (merged) return merged;
+  }
+  const text = String(due.text);
+  return { key: due.key, text, color, tooltip: text, heroId: noteHeroId(world, due, hire) };
 }
 
 /** Herd-first boss kills only (rt.banner also carries fight entrances, shown in the arena). */

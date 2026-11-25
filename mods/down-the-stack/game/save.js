@@ -838,6 +838,8 @@ const HERO_FIELDS = [
   ["rng", "r", C.num(seedOf(1))],
   ["bornDay", "bd", C.num(0)],
   ["pref", "pf", C.json(() => null)],
+  // (not here: `look`, a promoted Contractor's hoodie tint, heroes.lookOf, round 4b. It is written
+  // with the hero's extras, "x": {"look": n}, so an older build that loads the save keeps it)
 ];
 
 // A hero's working seconds as boss.js counts them (Math.round(st.wh x 3600)).

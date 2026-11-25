@@ -1292,6 +1292,9 @@ export default class Sheet {
       if (typeof addr === "string" && addr) this.address = addr;
       const name = vm.header?.name;
       if (typeof name === "string" && name) this.name = name;
+      // the host's dialog registry follows too (herdr keeps the overlay's first props): opening
+      // the promoted hero's sheet then keeps this dialog instead of closing and reopening it
+      if (this.props.overlay != null) host?.followSheet?.(this.props.overlay, { heroId: this.heroId, address: this.address, name: this.name });
     }
     return renderSheet(vm, {
       width: this.ui.size?.w ?? 760, height: this.ui.size?.h ?? 500, zoom: zoom(), theme: dialogTokens(), host,

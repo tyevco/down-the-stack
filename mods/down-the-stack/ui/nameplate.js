@@ -29,7 +29,8 @@
  * PlateVM.chip.color is a game colour (grey / red / amber / gold per D§11.12); PlateVM.chip.short
  * (optional) is the chip's text on a very narrow header (e.g. "!" for "! waiting").
  *
- * env (renderNameplate): { width, height, zoom, theme: T(), host, act, pane: PaneInfo|null,
+ * env (renderNameplate): { width (logical px; null before herdr first reports the header's size:
+ *   no bars then), height, zoom, theme: T(), host, act, pane: PaneInfo|null,
  *   bottom: boolean (header under the terminal), home: string|null (to shorten the folder),
  *   ui?: { hovered:boolean, size:{w,h}|null, bars?:false|"full"|"compact" } } — ui is mutated by
  *   handlers (bars: the last plan's, for its hysteresis), then cx.notify().
@@ -183,8 +184,10 @@ function faceScreen(vm, t) {
  * when there is room left after the whole title. Text widths are estimated per character (Geist /
  * JetBrains Mono at these sizes). Below TIERS.name see tinyPlan(). Hovered, the chip makes way for
  * the pane buttons when they would not fit otherwise, and then the name (down to 40 px).
+ * The chip outranks the bars: with the name at its last floor they go when the chip would not fit
+ * beside them. `measured: false` (no width reported yet) shows no bars.
  */
-export function plan(vm, W, hovered, title = "", folderText = "", prevBars = false) {
+export function plan(vm, W, hovered, title = "", folderText = "", prevBars = false, { measured = true } = {}) {
   const est = (s, px) => String(s ?? "").length * px;
   if (W < TIERS.name) return tinyPlan(vm, W, hovered, title);
   const buttonsW = hovered ? 4 * 20 + 4 * 8 : 0;
@@ -196,20 +199,26 @@ export function plan(vm, W, hovered, title = "", folderText = "", prevBars = fal
   const base = 20 + 14 + 28 + 32 + 24 + 8 + 9 + 8 - 5;
   const want = Math.max(MIN_TITLE, Math.min(est(title, 6.2), TITLE_WANT));
   // the bars: the pane's width and the title's only (not the name, the chip or the hover)
+  // (an unmeasured width, a header's first frame in herdr, shows none: the hysteresis keeps only bars
+  // a measured header showed)
   const wasFull = prevBars === true || prevBars === "full";
-  const full = W >= TIERS.fullBars && W - (base + NAME_MAX + CHIP_RESERVE + barsCost(BAR_PX.full)) >= want - (wasFull ? BARS_HYSTERESIS : 0);
-  const compact = !full && W - (base + NAME_FLOOR + CHIP_SHORT_RESERVE + barsCost(BAR_PX.compact)) >= TITLE_FLOOR - (prevBars ? BARS_HYSTERESIS : 0);
+  let full = measured && W >= TIERS.fullBars && W - (base + NAME_MAX + CHIP_RESERVE + barsCost(BAR_PX.full)) >= want - (wasFull ? BARS_HYSTERESIS : 0);
+  let compact = measured && !full && W - (base + NAME_FLOOR + CHIP_SHORT_RESERVE + barsCost(BAR_PX.compact)) >= TITLE_FLOOR - (prevBars ? BARS_HYSTERESIS : 0);
+  // the chip outranks the bars: they go when the chip (its short form beside compact bars) would
+  // not fit beside them with the hero's name at its last floor (48 px). No chip this game shows is
+  // that wide at these widths; it guards the rule. Hovered, the chip gives way instead (see below).
+  const chipCost = (shortForm) => (vm.chip ? est(shortForm ? vm.chip.short ?? vm.chip.text : vm.chip.text, 5.4) + 12 + 8 : 0);
+  if (!hovered && (full || compact) && W - (base + Math.min(nameW, 48) + chipCost(compact) + barsCost(full ? BAR_PX.full : BAR_PX.compact)) < 0) full = compact = false;
   const barsW = full ? barsCost(BAR_PX.full) : compact ? barsCost(BAR_PX.compact) : 0;
   // the chip: its full text; beside compact bars its short form when the full one would cost the
   // title its MIN_TITLE (with the name at its floor). Hovered, herdr's pane buttons must stay
   // reachable (they come last, so overflow clips them first): the chip gives them its room when
   // the hero (name at its floor), the bars, the chip and the buttons would not fit.
-  const chipText = (shortForm) => (shortForm ? vm.chip.short ?? vm.chip.text : vm.chip.text);
   let short = false;
-  let chipW = vm.chip ? est(chipText(false), 5.4) + 12 + 8 : 0;
+  let chipW = chipCost(false);
   if (compact && chipW && W - (base + Math.min(nameW, NAME_FLOOR) + chipW + barsW) < MIN_TITLE) {
     short = true;
-    chipW = est(chipText(true), 5.4) + 12 + 8;
+    chipW = chipCost(true);
   }
   if (hovered && chipW && W - (base + Math.min(nameW, NAME_FLOOR) + chipW + buttonsW + barsW) < 0) chipW = 0;
   const cost = {
@@ -261,13 +270,19 @@ function tinyPlan(vm, W, hovered, title) {
 
 function heroHeader(vm, env, t, ui) {
   const p = env.pane;
-  const W = ui.size?.w ?? env.width ?? 600;
+  // herdr reports a header's width only after laying it out (gpui-shell materialize.rs SizeObserver:
+  // prepaint defers on_size_change whenever the copy's size changed, and checking() reports none),
+  // so a copy's first frame has no width: it is planned at 600 px without bars, and the chip keeps
+  // its place whatever the real width (see below). env.width counts as measured (a preview, a test).
+  const known = ui.size?.w ?? env.width ?? null;
+  const measured = known != null;
+  const W = measured ? known : 600;
   const hovered = !!ui.hovered;
   const title = p.name || p.title || "";
-  const fit = plan(vm, W, hovered, title, folder(p.cwd, env.home), ui.bars ?? false);
-  // the hysteresis remembers measured headers only: a first render at the 600 px default would
-  // otherwise keep the bars in a 400 px pane
-  if (ui.size) ui.bars = fit.bars ? (fit.compact ? "compact" : "full") : false;
+  const fit = plan(vm, W, hovered, title, folder(p.cwd, env.home), measured ? ui.bars ?? false : false, { measured });
+  // the hysteresis remembers measured headers only: bars a header shows first came from a measured
+  // 420 px or more (TIERS.bars), and only those are kept down to 396 px
+  if (measured) ui.bars = fit.bars ? (fit.compact ? "compact" : "full") : false;
   const pic = vm.programIcon ? programGlyph(vm.programIcon, 14, t.dim) : herdrIcon(p.program, 14, t.dim);
 
   const hero = h_flex().id(`np-hero-${p.pane}`).flex_none().h(26).px(4).ml(-4).gap(6).items_center().rounded(6).cursor_pointer()
@@ -312,13 +327,22 @@ function heroHeader(vm, env, t, ui) {
         .child(thinBar(bw.xp, 4, vm.xpFrac, tone("#7FE9F5", t), track(t), { frac: vm.feFrac, color: tone("#A9B8FF", t) })))
     : null;
 
+  // The chip never shrinks while anything to its left can give way (that group's basis is 0);
+  // only a header narrower than the chip alone (a first frame under ~150 px) cuts its text.
+  const chipText = String((fit.short ? vm.chip.short ?? vm.chip.text : vm.chip.text) ?? "");
   const chip = fit.chip
-    ? div().flex_none().px(6).h(18).flex().items_center().rounded(5).bg(alpha(vm.chip.color, 0.16))
+    ? div().id(`np-chip-${p.pane}`).flex_initial().min_w(0).px(6).h(18).flex().items_center().rounded(5).bg(alpha(vm.chip.color, 0.16))
       .text_size(10.5).font_semibold().text_color(ink(vm.chip.color, t)).whitespace_nowrap()
-      .child(String((fit.short ? vm.chip.short ?? vm.chip.text : vm.chip.text) ?? ""))
+      .child(div().min_w(0).truncate().child(chipText))
     : null;
 
-  return frame(env, t, ui).children(kids([hero, centre, bars, chip, ...(hovered ? buttons(t, p) : [])]));
+  // The chip outranks everything to its left: hero, title and bars sit in one group that shrinks
+  // and clips (bars first, they come last in it) when the plan's estimates are short of the real
+  // widths, or before the first measured frame. The group reaches 4 px into the padding so the
+  // hero's hover background (ml(-4)) is not clipped.
+  const left = h_flex().flex_1().min_w(0).ml(-4).pl(4).gap(8).items_center().overflow_hidden()
+    .children(kids([hero, centre, bars]));
+  return frame(env, t, ui).children(kids([left, chip, ...(hovered ? buttons(t, p) : [])]));
 }
 
 /**
@@ -348,7 +372,7 @@ export default class Nameplate {
     const vm = p && p.terminal ? this.host?.view?.("nameplate", { terminal, pane: p.pane }) ?? null : null;
     const host = this.host;
     return renderNameplate(vm, {
-      width: this.ui.size?.w ?? 600, height: 34, zoom: zoom(), theme: T(), host,
+      width: this.ui.size?.w ?? null, height: 34, zoom: zoom(), theme: T(), host,
       act: (name, args) => host?.command?.(name, args),
       pane: p, bottom: paneFrame(layout())?.header?.position === "bottom", home: home(), ui: this.ui,
     });

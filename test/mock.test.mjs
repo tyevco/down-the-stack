@@ -603,6 +603,37 @@ test("the sample mod passes the real-check path (checking, props null)", async (
   M.setChecking(false);
 });
 
+test("size(): a root size given before any render is delivered after the next render whose root asks for it, as herdr reports a size only after a layout (round 4b)", async () => {
+  M.resetState();
+  const seen = [];
+  class T extends View {
+    init(p, cx) { this.w = null; this.ready = false; }
+    render(cx) {
+      seen.push(this.w);
+      // a copy still loading draws a root without a size handler
+      if (!this.ready) return div().id("loading");
+      return div().id("root").on_size_change((s, cx) => { this.w = s.width; cx.notify(); });
+    }
+  }
+  const mod = await M.mountView(T, { props: { role: "test" } });
+  assert.equal(mod.size(420, 34), 0, "nothing drawn yet: kept");
+  mod.render();
+  assert.deepEqual(seen, [null]);
+  assert.equal(mod.view.w, null, "a root without on_size_change does not take it");
+  mod.view.ready = true;
+  mod.render();
+  assert.deepEqual(seen, [null, null], "the first frame with the handler is drawn without a size");
+  assert.equal(mod.view.w, 420, "then herdr reports it");
+  assert.equal(mod.dirty, true, "the handler's notify asks for a redraw");
+  mod.render();
+  assert.deepEqual(seen, [null, null, 420]);
+  mod.render();
+  assert.equal(seen.length, 4, "delivered once");
+  assert.equal(mod.size(400, 34), 1, "a root that has the handler takes a size at once, as before");
+  assert.equal(mod.view.w, 400);
+  assert.deepEqual(mod.errors, []);
+});
+
 test("the sample mod renders, ticks, takes clicks and commands", async () => {
   M.resetState();
   const mod = await M.mountMod(DEMO, { props: { role: "stage" }, fixture: M.sampleFixture(3), nowMs: Date.UTC(2026, 10, 24) });
@@ -824,6 +855,13 @@ test("preview maps a recorded tree to HTML", async () => {
   assert.match(html, /data-frames="\[&quot;&gt;_&quot;,&quot;&gt; &quot;\]"/);
   assert.match(html, /preview: unmapped methods: none/);
   assert.deepEqual(unmappedMethods({ type: "div", methods: [["bogus_style", []], ["p", [4]]], children: [] }), ["bogus_style"]);
+});
+
+test("preview: flex_grow(n) and flex_shrink(n) keep their number, as herdr's style.rs reads it (round 4b)", () => {
+  const html = treeToHtml({ type: "div", methods: [["flex_grow", [3]], ["flex_shrink", [0]]], children: [], state: {}, slots: {} }, { width: 100, height: 20 });
+  assert.match(html, /style="[^"]*flex-grow:3[^"]*"/);
+  assert.match(html, /style="[^"]*flex-shrink:0[^"]*"/);
+  assert.doesNotMatch(html, /style="[^"]*(flex-grow:1|flex-shrink:1)[^"]*"/);
 });
 
 test("preview: svg() keeps the colour it was built with; SVG images are rasterised at 2× intrinsic size", () => {

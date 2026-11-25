@@ -613,6 +613,46 @@ test("party: a sub-agent waiting for you (a blocked Forkling) counts in 'N need 
   assert.deepEqual(V.partyView(world, { width: 268, nowMs: NOW }).groups.flatMap((g) => g.rows).find((r) => r.heroId === id).waitingForks, []);
 });
 
+test("every count of what needs the person agrees: the party's 'N need you', the Herd panel header and the HUD's tooltip (blocked heroes plus blocked sub-agents, owner decision 3; round 4b U2)", async () => {
+  const world = D.demoWorld("mid", NOW).world;
+  const pairs = [...world.rt.live.entries()];
+  // one hero blocked, plus the t5 hero's blocked sub-agent, plus one more blocked sub-agent under a
+  // working hero (a Contractor's counts the same way)
+  const [, someLive] = pairs.find(([, l]) => l.address !== "t5" && l.status !== "blocked");
+  const subParent = pairs.find(([, l]) => l.address !== "t5" && l !== someLive)[1];
+  subParent.forklings = (subParent.forklings || []).concat([{ address: "t990", status: "blocked", title: "sub-agent: lint fixes", program: null }]);
+  someLive.status = "blocked";
+  world.rt.version++;
+  // the party's chip and the Herd panel's header say one number
+  const chipN = PartyMod.waitingList(V.partyView(world, { width: 268, nowMs: NOW })).length;
+  assert.equal(V.herdView(world, { tab: "upgrades" }).header.waiting, `${chipN} ${chipN === 1 ? "needs" : "need"} you`, "the Herd panel header says the chip's count");
+  const n = Chrome.needYou(world);
+  assert.ok(n.subs >= 2 && n.heroes >= 1, JSON.stringify(n));
+  const heroesBlocked = pairs.filter(([, l]) => l.address && l.status === "blocked").length;
+  assert.equal(n.heroes, heroesBlocked);
+  const party = V.partyView(world, { width: 268, nowMs: NOW });
+  assert.equal(PartyMod.waitingList(party).length, n.n, "the party chip's list");
+  const herd = V.herdView(world, { tab: "upgrades" }).header;
+  assert.equal(herd.waiting, `${n.n} ${n.n === 1 ? "needs" : "need"} you`, "the Herd panel header");
+  assert.ok(herd.sub.endsWith(` · ${herd.waiting}`));
+  const hud = V.hudView(world, { nowMs: NOW });
+  assert.equal(hud.blocked, heroesBlocked, "the HUD's blocked count stays heroes (as working and shipped are)");
+  assert.equal(hud.needYou, n.n);
+  // rendered: the chip and the HUD's tooltip say the same number
+  const { m } = await mount("party", world);
+  const text = (x) => [x.type === "text" ? x.text : "", ...x.children.map(text)].join("");
+  assert.equal(text(m.node("party-needyou")), herd.waiting);
+  const h = await mount("hud", world, { width: 1170, height: 26 });
+  const tip = h.m.node("hud-blocked").methods.find((x) => x[0] === "tooltip")[1][0];
+  assert.ok(tip.includes(herd.waiting), tip);
+  // nobody waits: no count anywhere
+  for (const [, l] of world.rt.live) { l.status = l.status === "blocked" ? "working" : l.status; for (const x of l.forklings || []) x.status = "working"; }
+  world.rt.version++;
+  assert.equal(Chrome.needYou(world).n, 0);
+  assert.equal(V.herdView(world, { tab: "upgrades" }).header.waiting, null);
+  assert.equal(PartyMod.waitingList(V.partyView(world, { width: 268, nowMs: NOW })).length, 0);
+});
+
 test("party / nameplate: a promotion review shows REVIEW with the review named in the tooltip", () => {
   const world = D.demoWorld("mid", NOW).world;
   world.state.heroes.find((h) => h.id === 1).rev[0] = 0;

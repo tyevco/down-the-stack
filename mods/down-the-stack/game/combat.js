@@ -234,6 +234,48 @@ export function buildRooms(world) {
   return rooms;
 }
 
+/**
+ * A hero changes id (a Contractor promoted to the roster, agents.promote): its rooms (heroIds, and a
+ * room id named after it as the room's first hero) keep their objects and cached signature, so the
+ * lanes carry on; its effects, the actors' room ids and this tick's fight participants follow it.
+ * world.js's heroId -> room index (rt.roomOf) is dropped and rebuilt from rt.rooms.
+ */
+export function renameHero(world, from, to) {
+  const rt = world.rt;
+  const tail = `:${from}`;
+  const roomIds = new Map();
+  const rename = (rooms) => {
+    for (const room of rooms || []) {
+      const ids = room.heroIds || [];
+      for (let i = 0; i < ids.length; i++) if (ids[i] === from) ids[i] = to;
+      if (typeof room.id === "string" && room.id.endsWith(tail)) {
+        const id = `${room.id.slice(0, room.id.length - tail.length)}:${to}`;
+        roomIds.set(room.id, id);
+        room.id = id;
+      }
+    }
+  };
+  rename(rt.rooms);
+  const cache = rt._roomCache;
+  if (cache) {
+    if (cache.rooms !== rt.rooms) rename(cache.rooms);
+    const head = `${from}|`;
+    cache.sig = String(cache.sig).split(";").map((e) => (e.startsWith(head) ? `${to}|${e.slice(head.length)}` : e)).join(";");
+  }
+  rt.roomOf = null;
+  for (const f of rt.fx || []) {
+    if (f.heroId === from) f.heroId = to;
+    if (roomIds.has(f.roomId)) f.roomId = roomIds.get(f.roomId);
+  }
+  for (const live of rt.live ? rt.live.values() : []) {
+    const C = live._act;
+    if (C && roomIds.has(C.roomId)) C.roomId = roomIds.get(C.roomId);
+  }
+  const g = rt._cg;
+  if (g && g.fighting && g.fighting.delete(from)) g.fighting.add(to);
+  if (rt.apGear && rt.apGear.delete(from)) rt.apGear.add(to);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Per-tick globals (crowding, herd XP, top level, fight participants, boss retry gates)
 // ---------------------------------------------------------------------------------------------
@@ -1448,7 +1490,7 @@ function crashRule(C, room) {
   live.dropMap = { mapId: down.id, untilMs: rt.nowMs + T.crash.dropMapForSec * 1000 };
   if (live.mapId) live.mapId = down.id;
   const ev = C.ev;
-  if (ev && typeof ev.note === "function") ev.note(`${C.hero.name} fell back to ${down.id}`);
+  if (ev && typeof ev.note === "function") ev.note(`${C.hero.name} fell back to ${down.id}`, null, { heroId: C.hero.id });
 }
 
 // Room scratch (actors of the room's fighting heroes), reused between calls.

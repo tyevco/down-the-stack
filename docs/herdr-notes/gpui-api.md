@@ -126,7 +126,7 @@ Sources of names, enumerated in `api-allowlist.json` (3318 names in total):
 - **59 parametric styles**: `SH/style.rs:79-212` (`PARAM_STYLES`), applied by `apply_param` at `SH/style.rs:405-497`.
 - **3130 reflected no-argument GPUI `Styled` methods**: `gpui::styled_reflection::methods` (`SH/style.rs:240-247`).
   - The reflection macro keeps every trait method with the shape `fn name(self) -> Self` and exactly one parameter, after expanding the nine known style macros (`MAC/derive_inspector_reflection.rs:14-37,55-85,195-277`).
-  - The names were regenerated from `GP/styled.rs` and `MAC/styles.rs` by `scratchpad/tools/enum_styled.py`.
+  - The names were regenerated from `GP/styled.rs` and `MAC/styles.rs` by a one-off script (not in this repository) that applies the same macro expansion.
   - `debug` and `debug_below` exist only in debug builds (`GP/styled.rs:892-903`).
 - **7 reflected gpui-base `StyledExt` methods**: `h_flex`, `v_flex`, `debug_red`, `debug_blue`, `debug_yellow`, `debug_green`, `debug_pink`. The `debug_*` ones are no-ops in release (`BASE/styled.rs:78-171`).
   - **`.h_flex()` and `.v_flex()` are also chainable methods on any element.**
@@ -252,6 +252,7 @@ Two more families:
   - `on_drop(({paths}, cx))`, `drag_paths(paths, {on?})`.
   - Event payload types are at `TY:1100-1218`.
 - **Layout:** `on_size_change(({width, height}, cx) => …)` gives logical window px, so divide by `settings().zoom` before reusing them as lengths (`AG` §UI). Use it on div, h_flex or v_flex with a stable id.
+  - It fires only **after a layout** (round 4b): gpui-shell wraps the element in a `SizeObserver` whose prepaint compares (application generation, size) with the last one it saw and, when they differ, defers the callback with `window.defer` (`SH/materialize.rs:2358-2420`, `SH/engine/quickjs/mod.rs:4247`). So a copy's first frame always renders without a size, a hot reload (a new application generation) is measured again, and nothing fires while `checking()` (`SH/materialize.rs:2362`). Plan the first frame for an unknown width.
 - **Keyboard:**
   - `on_key_down((e: {key, keystroke, key_char?, modifiers, is_held?}, cx))` and `on_key_up`. They fire only on the focus path, so pair them with `track_focus(handle)`.
   - Also `on_modifiers_changed`, `key_context(str)`, `on_action(name, (e, cx))`, `tab_index(n)`, `tab_stop(bool)`, `track_focus(FocusHandle)`.

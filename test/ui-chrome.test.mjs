@@ -9,6 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 const M = await import("../tools/mock/index.mjs");
+const G = await import("../tools/mock/gates.mjs");
 const { View, div } = await import("gpui-kit");
 const { props } = await import("herdr");
 const PartyMod = await import("../mods/down-the-stack/ui/party.js");
@@ -1105,6 +1106,142 @@ test("nameplate: HP / XP bars in a split (owner decision round 4): compact from 
   // a narrow header (below 360 px) keeps the title's tooltip too
   const narrow = await mount("nameplate", N.scenarios.narrow, plateOpts("narrow", { width: 300 }));
   assert.ok(narrow.m.findAll((n) => n.type !== "text" && n.methods.some((x) => x[0] === "tooltip" && x[1][0] === N.panes.narrow.title)).length === 1);
+});
+
+/** Mount a pane header the way herdr does: the first frame renders before any size is reported. */
+async function mountPlate(name, vm = N.scenarios[name]) {
+  M.resetState();
+  M.resetStorage();
+  const host = fakeHost("nameplate", vm);
+  const pane = N.panes[name];
+  const roleProps = { role: "nameplate", pane: pane.pane, terminal: pane.terminal };
+  class Wrap extends View {
+    init(_p, cx) { this.role = new PlateMod.default(); this.role.init(props() ?? roleProps, cx, host); }
+    render(cx) { return this.role.render(cx); }
+  }
+  const m = await M.mountView(Wrap, { props: roleProps, fixture: { settings: { zoom: 1 }, theme: "graphite", panes: [pane] }, nowMs: NOW });
+  m.render();
+  return { m, host, pane };
+}
+
+test("nameplate: no bars before herdr reports the header's width; a header first measured under 420 px shows none; only bars a measured 420 px+ header showed are kept (round 4b U1)", async () => {
+  // herdr reports a size after laying the header out (gpui-shell SizeObserver, in prepaint), so a
+  // copy's first frame has none; it used to be planned at a 600 px default, bars included
+  for (const name of ["focused", "long", "blocked", "contractor", "boss", "shipped"]) {
+    const { m, pane } = await mountPlate(name);
+    const bars = () => m.node(`np-bars-${pane.pane}`);
+    assert.equal(bars(), null, `${name}: the first frame (no width yet) shows no bars`);
+    assert.ok(m.node(`np-chip-${pane.pane}`), `${name}: the chip shows`);
+    const at = (w) => { m.size(w, 34); m.render(); m.render(); return bars() != null; };
+    assert.equal(at(400), false, `${name}: first measured at 400 px`);
+    assert.equal(at(410), false, `${name}: 410 px`);
+    assert.equal(at(420), true, `${name}: 420 px`);
+    assert.equal(at(400), true, `${name}: shown at 420, kept at 400 (hysteresis)`);
+    assert.equal(at(395), false, `${name}: 395 px`);
+    assert.equal(at(400), false, `${name}: dropped at 395, not back at 400`);
+  }
+  // a fresh copy first measured at 420 px shows them
+  const { m, pane } = await mountPlate("focused");
+  m.size(420, 34);
+  m.render();
+  assert.ok(m.node(`np-bars-${pane.pane}`));
+  // plan(): unmeasured, never
+  for (const W of [420, 600, 1200]) assert.equal(PlateMod.plan(N.scenarios.focused, W, false, "t", "", "full", { measured: false }).bars, false, `${W}`);
+});
+
+test("nameplate: the chip outranks the bars: a chip that would not fit beside them takes their place (round 4b U1)", () => {
+  const wide = { ...N.scenarios.focused, chip: { text: "x".repeat(30), color: "#8A8F98" } };
+  for (const W of [396, 420, 460]) {
+    for (const prev of [false, "compact"]) {
+      const p = PlateMod.plan(wide, W, false, N.panes.focused.title, "", prev);
+      assert.equal(p.bars, false, `${W} prev ${prev}`);
+      assert.equal(p.chip, true, `${W} prev ${prev}`);
+    }
+  }
+  // the chips this game shows keep the bars from 420 px
+  for (const name of ["focused", "long", "blocked", "contractor", "boss", "shipped"]) {
+    assert.equal(PlateMod.plan(N.scenarios[name], 420, false, N.panes[name].title).bars, true, name);
+  }
+});
+
+test("layout: a pane header's chip is never clipped, at any width, measured or not; bars show whole or not at all (round 4b U1)", async (t) => {
+  let pw;
+  try { pw = (await import("node:module")).createRequire(import.meta.url)("playwright"); } catch { return G.skipGate(t, "pane headers in Chromium", "Playwright is not installed"); }
+  const { newContext, blockHtml, documentHtml } = await import("../tools/preview/render.mjs");
+  const { resolveTheme } = await import("../tools/mock/theme.mjs");
+  const widths = [];
+  for (let W = 120; W <= 1400; W += W < 480 ? 8 : 40) widths.push(W);
+  const cases = [];
+  const chips = {
+    supervising: { text: "supervising 12 Forklings", short: "supervising", color: "#8A8F98" },
+    rebooting: { text: "rebooting", short: "rebooting", color: "#FF5A5F" },
+    waiting: { text: "! waiting 59m", short: "! 59m", color: "#F2A93B" },
+  };
+  const variants = Object.entries(N.scenarios).filter(([, vm]) => vm).map(([name, vm]) => [name, name, vm])
+    .concat(Object.entries(chips).map(([k, chip]) => [`long+${k}`, "long", { ...N.scenarios.long, chip }]));
+  for (const [label, paneName, vm] of variants) {
+    // measured, narrowing from 1400 px (the hysteresis keeps bars), then widening from 120 px
+    const { m, pane } = await mountPlate(paneName, vm);
+    const seq = widths.slice().reverse().concat(widths);
+    seq.forEach((W, i) => {
+      m.size(W, 34);
+      m.render();
+      cases.push({ label: `${label} measured @${W} (${i < widths.length ? "narrowing" : "widening"})`, tree: m.tree, W, pane: pane.pane, chips: [vm.chip.text, vm.chip.short ?? vm.chip.text] });
+    });
+    // the first frame of a fresh copy, laid out at its real width
+    const fresh = await mountPlate(paneName, vm);
+    for (const W of widths) cases.push({ label: `${label} first frame @${W}`, tree: fresh.m.tree, W, pane: pane.pane, first: true, chips: [vm.chip.text, vm.chip.short ?? vm.chip.text] });
+  }
+  const ctx = newContext({ zoom: 1, theme: resolveTheme("graphite") });
+  const body = cases.map((c, i) => `<div data-case="${i}" style="width:${c.W}px;height:34px;margin-bottom:2px">${blockHtml(c.tree, ctx, { width: c.W, height: 34 })}</div>`).join("");
+  const browser = await pw.chromium.launch();
+  try {
+    const page = await browser.newPage();
+    await page.setViewportSize({ width: 1500, height: 900 });
+    await page.setContent(documentHtml({ body, ctx, title: "plates" }).replace(/html,body\{width:[^}]*\}/, ""), { waitUntil: "load" });
+    await page.evaluate(() => document.fonts?.ready);
+    const bad = await page.evaluate((cases) => {
+      const out = [];
+      const whole = (el, box) => { const r = el.getBoundingClientRect(); return r.left >= box.left - 0.5 && r.right <= box.right + 0.5; };
+      // the visible box: the header's own box, clipped by every clipping ancestor up to it
+      const visible = (el, stop) => {
+        const r = el.getBoundingClientRect();
+        let left = r.left, right = r.right;
+        for (let e = el.parentElement; e && e !== stop.parentElement; e = e.parentElement) {
+          const cs = getComputedStyle(e);
+          if (cs.overflowX === "visible") continue;
+          const p = e.getBoundingClientRect();
+          const bl = parseFloat(cs.borderLeftWidth) || 0, br = parseFloat(cs.borderRightWidth) || 0;
+          left = Math.max(left, p.left + bl); right = Math.min(right, p.right - br);
+        }
+        return { left, right, width: r.width, rl: r.left, rr: r.right };
+      };
+      cases.forEach((c, i) => {
+        const wrap = document.querySelector(`[data-case="${i}"]`);
+        const head = wrap.querySelector(`[data-id="pane-head-${c.pane}"]`);
+        // (found by its text in a build that gave the chip no id)
+        const chip = wrap.querySelector(`[data-id="np-chip-${c.pane}"]`)
+          ?? [...head.children].reverse().find((e) => c.chips.includes(e.textContent.trim()));
+        const bars = wrap.querySelector(`[data-id="np-bars-${c.pane}"]`);
+        if (!head) { out.push(`${c.label}: no header`); return; }
+        const hb = head.getBoundingClientRect();
+        if (!chip) { out.push(`${c.label}: no chip`); return; }
+        const v = visible(chip, head);
+        if (v.left > v.rl + 0.5 || v.right < v.rr - 0.5 || !whole(chip, hb)) out.push(`${c.label}: the chip is clipped (${Math.round(v.right - v.left)} of ${Math.round(v.width)} px shown)`);
+        // its text is whole too, except in a first frame narrower than the chip alone
+        const txt = chip.firstElementChild;
+        if (txt && txt.scrollWidth > txt.clientWidth + 0.5 && !(c.first && c.W < 160)) out.push(`${c.label}: the chip's text is cut ("${txt.textContent}")`);
+        if (bars) {
+          const b = visible(bars, head);
+          if (b.left > b.rl + 0.5 || b.right < b.rr - 0.5) out.push(`${c.label}: the bars are cut (${Math.round(Math.max(0, b.right - b.left))} of ${Math.round(b.width)} px shown)`);
+        }
+      });
+      return out;
+    }, cases.map((c) => ({ label: c.label, pane: c.pane, W: c.W, first: !!c.first, chips: c.chips })));
+    assert.deepEqual(bad, []);
+  } finally {
+    await browser.close();
+  }
 });
 
 test("party: the footer drops release, then the Herd label, then Snippets, so Herd never leaves the sidebar", async () => {

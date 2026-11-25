@@ -9,6 +9,7 @@
 //   refKit(state, hero, opts)              -> equips the D§5.2 reference kit on a hero
 //   stepWorld(world, ev, n)                -> runs n engine steps (rooms, fights, rest) like world.tick
 //   heroOf(world, id) / liveOf(world, id)
+//   findRefs(root, id)                     -> paths where a hero id is still referenced (round 4b)
 //
 // Hero spec (addHero / makeWorld heroes[]): {cls ("intern" | id | index, default intern),
 //   L (1), mapId ("1-1"), state ("questing" | "waiting" | "shipped" | "resting" | "supervising"),
@@ -213,4 +214,39 @@ export function stepWorld(world, ev, n = 1) {
     }
   }
   return done;
+}
+
+/**
+ * Every place a hero id is still referenced in a value graph (a world, its state and rt): the id as
+ * a number anywhere (values, array items, Map keys, Set members) and as a token in a string or an
+ * object key ("rv0.-7", "room:s1:1-1:-7"; a token: not part of a longer number). Returns the paths
+ * found, e.g. ["world.state.herd.wounds.rv0.-7 (key)"]. Pick an id no other number shares.
+ */
+export function findRefs(root, id, rootName = "world") {
+  const hits = [];
+  const seen = new Set();
+  const re = new RegExp(`(^|[^0-9])${String(id).replace("-", "\\-")}($|[^0-9])`);
+  const isRef = (v) => v === id || (typeof v === "string" && re.test(v));
+  const walk = (v, path) => {
+    if (isRef(v)) { hits.push(typeof v === "string" ? `${path} = ${JSON.stringify(v)}` : path); return; }
+    if (!v || typeof v !== "object" || seen.has(v)) return;
+    seen.add(v);
+    if (v instanceof Map) {
+      for (const [k, x] of v) {
+        if (isRef(k)) hits.push(`${path}<key ${String(k)}>`);
+        walk(x, `${path}<${String(k)}>`);
+      }
+      return;
+    }
+    if (v instanceof Set) {
+      for (const x of v) walk(x, `${path}{}`);
+      return;
+    }
+    for (const k of Object.keys(v)) {
+      if (isRef(k)) hits.push(`${path}.${k} (key)`);
+      walk(v[k], `${path}.${k}`);
+    }
+  };
+  walk(root, rootName);
+  return hits;
 }

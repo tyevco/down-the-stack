@@ -357,7 +357,7 @@ function build(spec, { width, height, tick = 0 } = {}) {
   return {
     tick: now, width, height, calm: Boolean(spec.calm), nums: spec.nums ?? "all", stillness: !anyQuesting,
     empty: null,
-    headerNote: spec.note && tick === 0 ? { key: `note:${TICK0}`, text: spec.note[0], color: spec.note[1] ?? COL.cream } : null,
+    headerNote: spec.note && tick === 0 ? { key: `note:${TICK0}`, text: spec.note[0], color: spec.note[1] ?? COL.cream, tooltip: spec.note[2] ?? spec.note[0], heroId: spec.note[3] ?? null } : null,
     herdBanner: spec.herdBanner ? { key: `herd:${TICK0}`, text: spec.herdBanner } : null,
     rooms: roomVMs, heroes, mobs, chests, boss, fx, signs,
     overflow: L.chip ? campChip(L, folded) : null,

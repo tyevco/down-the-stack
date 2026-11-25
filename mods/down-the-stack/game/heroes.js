@@ -7,7 +7,7 @@
 
 import {
   TUNING as T, CLASSES, CAREERS, SKILLS, SKILL_SLOTS, NAMES, ZONES, TROPHY, BUILDINGS, BUILDING_IDX, CLASS_IDX,
-  RARITIES,
+  RARITIES, PALETTE,
 } from "./data.js";
 import { g, DR, need, bareHandDmg, weaponDmg, powerLevel, trackerTier, autoOn } from "./formulas.js";
 import { fnv1a32, rngNext, seedOf } from "./rng.js";
@@ -58,6 +58,20 @@ export function newHero(state, { seat = "nospace/agent", sid = null, ord = 0, no
   };
   hero.eq[0] = newItem(state, { base: 0, ilvl: 1, rar: 0, flags: FLAG_STARTER });
   return hero;
+}
+
+/**
+ * A hero's look: its hoodie tint, an index into PALETTE.termlingTint. hero.look when set (a promoted
+ * Contractor keeps the tint it had, round 4b), else from the hero id as every build has drawn it:
+ * (|id| - 1) mod n, so a saved hero keeps its colour and a Contractor (negative id) has one too.
+ */
+export function lookOf(hero) {
+  const n = PALETTE.termlingTint.length;
+  const lk = hero && hero.look;
+  if (Number.isInteger(lk) && lk >= 0) return lk % n;
+  const raw = hero && hero.id;
+  const id = Math.abs(Math.round(Number.isFinite(raw) ? raw : 1));
+  return (((id - 1) % n) + n) % n;
 }
 
 /**

@@ -39,6 +39,58 @@ running a program. Each kind keeps its first incident and the newest three (`sav
 API cannot list or delete files without `exec`, and a mod that runs programs is flagged by herdr's
 install flow. D§13.1.
 
+### Round 4b (decided by default; the owner can change any of them)
+
+These follow from the round-4 decisions and were settled without the owner, each the smallest
+change that keeps a promise already made. Each says what to change to decide otherwise.
+
+1. **Off-duty grace (15 minutes).** Replaces round 4's open item "Letting a hero go for a waiting
+   Contractor". A hero off duty for less than 15 minutes of world time (time with the app closed
+   does not count) is never let go to make room, for a Contractor's promotion or for a new agent.
+   A new terminal takes back its hero (its own by address, or the one whose terminal ended in that
+   pane this session) before anything is let go: every new terminal's own hero first, then free
+   heroes of its seat in snapshot order. After the grace the D§3.4 rule applies as before, and a
+   waiting Contractor's tooltips say "Hired in about N min, once a hero below Lv 10 has been off
+   duty for 15 min (unless its agent comes back)". `T.roster.offDutyGraceMin` (0 turns it off).
+   D§3.2, D§3.4.
+2. **A hero looks the same for life.** A promoted Contractor keeps the hoodie and hat it had: its
+   hoodie tint is saved with the hero (`look`, in the hero's extras, so older builds keep it), and
+   its hat gets a saved item uid of the same tint. Contractor hats now have their own colours
+   instead of a pink fallback; every saved hero renders as before. D§11 (Termling art), D§13.2.
+3. **One "need you" count everywhere** (decision 3 follow-up). The party chip, the Herd panel's
+   header ("N need you", was "N waiting for you" counting heroes only) and the HUD's blocked
+   tooltip count blocked heroes plus blocked sub-agents (`chrome.needYou`). The HUD's "blocked"
+   number stays heroes only, a status tally beside working and shipped; its tooltip adds "N need
+   you, counting M waiting sub-agents" when sub-agents wait. D§11.11, D§11.14.
+4. **Pane header bars and the chip** (decision 5 follow-up). A pane header shows no HP / XP bars
+   until herdr has reported its width (herdr lays a header out before it reports one), and the
+   hysteresis keeps only bars first shown at a measured 420 px or more. The status chip outranks
+   the bars and is never clipped; only a first frame narrower than the chip itself (about 150 px)
+   shortens its text with "…". D§11.12.
+5. **Header notes, as built.** The hires of one tick are one note, "Hired 6 contractors: Zed,
+   Coda and 4 more", with every hire's line in its tooltip; it stays up for the time its hires
+   were queued for (3 s each, 18 s for six), longer than D§11.15's 3 s so it can be read and
+   hovered, and the hires after a tick's first do not count against the note queue (a note raised
+   meanwhile still shows, after them). Herd-wide notes sit at the strip's right end by the camp
+   when they fit whole there; otherwise whole in the left scenery or the roomiest room header;
+   otherwise wherever they show most (a merged hire note then shows "Hired 6 contractors" whole, the
+   names in its tooltip). A note about one hero (a hire, a provisional class, a
+   fall-back, chests opened Unreviewed) sits over that hero's room, whole beside it in the
+   Localhost scenery when the room is too narrow. Notes are cut only between words, with the whole
+   text in the tooltip, and a stage under about 130 px keeps them off the camp's "+N". D§11.15.
+6. **Roster rows.** A Contractor's row drops "(contractor)" when its hire line ("Hired tomorrow
+   04:00", "Hired in ~12 min") shows; the slim row's tooltip keeps it. Slim rows leave out the
+   Retire column when no hero in the list can retire, and keep the hire moment whole while the
+   title and then the seen text give way. D§11.14.
+7. **A Contractor's open sheet follows its promotion** (decision 1 follow-up) to the roster hero
+   without closing, and opening that hero's sheet keeps the dialog. D§11.13.
+8. **Older builds and newer saves.** Not an update path (the README only goes forward), so
+   SAVE_VERSION stays 1. An older build loads a newer save and keeps the hero fields it does not
+   know (a promoted hero's `look`), but writes the round-4 journal name column back as stale
+   string-table indices, so after going back to an older build and forward again, lines about
+   heroes no longer on the roster can show another hero's name or "A hero". Accepted as cosmetic;
+   a version bump would make older builds open newer saves read-only instead. D§13.2.
+
 ### Earlier rounds
 
 - Round 3: the palette's sheet and calm-mode entries were dropped (decision 4 above keeps it so).
@@ -66,15 +118,17 @@ Each item says what the game does now; nothing changes until the owner decides.
   toast only while the boss kind is off. D§11.15.
 - **Contractors in a paused fight.** Contractors are never saved, so a restart or hot reload drops
   them from a paused or running boss fight; they rejoin by questing in the fight's zone.
-- **Contractors across a restart** (round 4). After a restart or hot reload the hiring line
-  re-forms in snapshot order, so "longest-running first" is lost; a Contractor waiting across a
-  restart at 04:00 binds as a new terminal and is hired fresh at Lv 1 if hires remain, without its
-  level or kit. Saving Contractors would fix both (a save format change). D§3.4.
-- **Letting a hero go for a waiting Contractor** (round 4). On a full roster with a Contractor
-  waiting and a hire left, an off-duty hero below Lv 10 is let go one snapshot after its terminal
-  ends (the D§3.4 rule for a new hire), so restarting that agent can delete its hero while the
-  relaunched agent waits as a Contractor. Option: let go only heroes off duty for at least some
-  minutes.
+- **Contractors across a restart** (round 4; the owner has been asked). Contractors are never
+  saved. After a restart or hot reload the hiring line re-forms in snapshot order, so
+  "longest-running first" is lost, and closing herdr across 04:00 makes a waiting Contractor come
+  back as a new terminal: it is hired fresh at Lv 1 if hires remain, without its level or kit.
+  Saving Contractors would fix both (a save format change). D§3.4.
+- **A restart in a new pane** (round 4b). The off-duty grace (Round 4b, 1) protects a restarted
+  agent's hero for 15 minutes. A relaunch in the same pane (the agent exits inside herdr's shell,
+  or a new terminal in a pane that survived) takes its own hero back; closing the pane and opening
+  a new one in the same space instead takes the seat's highest-level free hero (D§3.2), which may
+  be another hero than its own when the seat has several off duty. herdr gives a new pane a new id,
+  so nothing ties it to the old one.
 - **Hovered narrow pane headers** (round 4). At about 396–440 px, hovering keeps the compact bars
   (a hover never toggles them), so the title shrinks to its icon and a "! 2m" chip gives way to the
   four pane buttons until the pointer leaves. D§11.12.

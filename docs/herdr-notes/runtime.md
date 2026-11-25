@@ -466,6 +466,13 @@ processed; `checking()` → `true`; `exec`/`hc`/`writeTextFile` **run for real**
   Still, don't stash cxs across copies.
 - First load of a mod folder docks one copy per `mod.json` `place` unless it is `"none"` (AGENTS.md:933-936). Use
   `{"place":"none"}` for a multi-role mod, as win98 does (`defaults/mods/win98/mod.json`).
+- **Restarting an agent** (round 4b). herdr starts an agent's program inside the person's shell
+  (`"$@"; exec "$0" -i`, `unix_agent_argv`, `src/window.rs:113-133`), so an agent that exits leaves its terminal (same
+  address) running the shell, and starting it again there keeps the address. A pane whose program
+  ended on its own ("exited", "killed", "finished") is removed (`src/window.rs:2598-2609`), and a new
+  pane gets a fresh random id (`Model::fresh_id`, `src/model.rs:173-177`): nothing ties a new pane
+  to the old one. Down the Stack therefore never lets a hero go the moment its terminal ends (a
+  15-minute off-duty grace) and remembers, for the session, the pane a hero's terminal ended in.
 
 ---
 

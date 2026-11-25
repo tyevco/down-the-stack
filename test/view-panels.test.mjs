@@ -25,6 +25,7 @@ const I = await import("../mods/down-the-stack/game/items.js");
 const DATA = await import("../mods/down-the-stack/game/data.js");
 const F = await import("../mods/down-the-stack/game/formulas.js");
 const Herd = await import("../mods/down-the-stack/game/herd.js");
+const Agents = await import("../mods/down-the-stack/game/agents.js");
 const SheetMod = await import("../mods/down-the-stack/ui/sheet.js");
 const HerdMod = await import("../mods/down-the-stack/ui/herdpanel.js");
 const S = await import("../tools/vm-samples/sheet.mjs");
@@ -665,6 +666,60 @@ test("layout: no tab of either dialog runs under its footer; skill effects, zone
   }
 });
 
+test("layout (round 4b U6): the owner's 6 heroes + 24 Contractors at 640 and 1000 px keep every name and hire moment whole; '(contractor)' goes where the hire line says it", async (t) => {
+  const extra = [];
+  const sn = ["ref-client", "pr-review-eng-1", "rnd-qa", "ai-platform-vp", "rnd-eng-1", "pr-review-qa", "docs", "infra", "billing", "web", "api", "mobile", "data", "ops"];
+  for (let k = 0; k < 24; k++) extra.push({ address: `c${k + 1}`, program: ["claude", "codex"][k % 2], space: k < 14 ? `spc_${20 + k}` : `spc_${10 + (k >> 1)}`, spaceName: k < 14 ? sn[k] : `repo-${10 + (k >> 1)}` });
+  const c = sameDayWorld(extra, { heroes: 6, spaces: 6 });
+  const roster = V.herdView(c, { tab: "roster", filter: FILTER }).roster;
+  assert.equal(roster.slim, true);
+  const rows = roster.groups.flatMap((g) => g.rows);
+  const hired = rows.filter((r) => r.hire);
+  assert.equal(hired.length, 24);
+  for (const r of hired) {
+    assert.ok(!/\(contractor\)/.test(r.name), `${r.name}: its hire line says it`);
+    assert.equal(r.contractor, true);
+  }
+  // the slim row's tooltip still names it a Contractor
+  const h0 = await mount("herd", c, { width: 640, props: { tab: "roster" } });
+  const tipOfRow = (id) => h0.m.node(id).methods.find((x) => x[0] === "tooltip")[1][0];
+  assert.match(tipOfRow(`hd-${hired[0].key}`), / \(contractor\) · /);
+  let pw;
+  try { pw = (await import("node:module")).createRequire(import.meta.url)("playwright"); } catch { return G.skipGate(t, "the slim roster at 640 px in Chromium", "Playwright is not installed"); }
+  const browser = await pw.chromium.launch();
+  try {
+    const page = await browser.newPage();
+    for (const width of [640, 1000]) {
+      const h = await mount("herd", c, { width, props: { tab: "roster" } });
+      assertClean(h.m, `roster ${width}`, 450);
+      const L = await layoutOf(page, h.m, { width, height: 520 });
+      const names = new Set(rows.map((r) => `hd-${r.key}: ${r.name}`));
+      assert.deepEqual(L.cut.filter((x) => x.startsWith("hd-hire-")), [], `${width}: hire moments whole`);
+      assert.deepEqual(L.cut.filter((x) => names.has(x)), [], `${width}: names whole`);
+      assert.deepEqual(L.spills, [], `${width}`);
+    }
+    // a hero of Lv 30+ brings the Retire column back: the Contractors' hire moments stay whole
+    // (their seen cell gives way instead) and the row still fits
+    const c30 = sameDayWorld(extra, { heroes: 6, spaces: 6 });
+    D._internal.grow(c30, c30.state.heroes[0], { L: 31, cls: "refactorer", rar: 2, pol: 2 });
+    c30.rt.version++;
+    const rows30 = V.herdView(c30, { tab: "roster", filter: FILTER }).roster.groups.flatMap((g) => g.rows);
+    assert.equal(rows30.filter((r) => r.retire).length, 1);
+    assert.equal(rows30.filter((r) => r.hire).length, 24);
+    for (const width of [640, 1000]) {
+      const h = await mount("herd", c30, { width, props: { tab: "roster" } });
+      assertClean(h.m, `roster Lv 31 ${width}`, 450);
+      const L = await layoutOf(page, h.m, { width, height: 520 });
+      const names = new Set(rows30.map((r) => `hd-${r.key}: ${r.name}`));
+      assert.deepEqual(L.cut.filter((x) => x.startsWith("hd-hire-")), [], `Lv 31 hero, ${width}: hire moments whole`);
+      assert.deepEqual(L.cut.filter((x) => names.has(x)), [], `Lv 31 hero, ${width}: names whole`);
+      assert.deepEqual(L.spills, [], `Lv 31 hero, ${width}`);
+    }
+  } finally {
+    await browser.close();
+  }
+});
+
 // ---------------------------------------------------------------------------------------------
 // stability
 
@@ -1216,9 +1271,9 @@ test("rules: the Herd header gives the blocked count apart (waiting) so the pane
   let some = 0, none = 0;
   for (const kind of D.DEMO_KINDS) {
     const h = V.herdView(demo(kind), { tab: "upgrades", filter: FILTER }).header;
-    if (/waiting for you/.test(h.sub)) {
+    if (/needs? you/.test(h.sub)) {
       some++;
-      assert.match(h.waiting, /^\d+ waiting for you$/, kind);
+      assert.match(h.waiting, /^(1 needs|\d+ need) you$/, kind);
       assert.ok(h.sub.endsWith(` · ${h.waiting}`), kind);
     } else {
       none++;
@@ -1657,6 +1712,25 @@ test("rules (round 4, P1): a Contractor's banner, tag and roster row say when it
   assert.match(V.herdView(world, { tab: "roster", filter: FILTER }).roster.count, / · 2 contractors, none hired here: this save is read-only$/);
   world.rt.readOnly = false;
   world.rt.version++;
+});
+
+test("rules (round 4b): a Contractor waiting on a hero's off-duty grace is told 'hired in about N min' in its banner, roster row and the Roster's count line", () => {
+  const world = sameDayWorld([{ address: "t7", program: "claude", space: "spc_9", spaceName: "ref-client" }]);
+  const c = Array.from(world.rt.contractors.values())[0];
+  // a full roster whose only hero below Lv 10 went off duty 5 minutes ago, with hires left today
+  const proto = world.state.heroes[0];
+  for (let i = 0; i < 24; i++) world.state.heroes.push(Object.assign(JSON.parse(JSON.stringify(proto)), { id: 500 + i, L: i ? 40 : 4, seat: `bench-${i}/claude`, name: `Bench ${i}`, addr: null, seenAt: world.rt.nowMs - 5 * 60000 }));
+  world.state.herd.hired = [world.state.herd.day, 2];
+  world.rt.version++;
+  const o = Agents.hireOutlook(world, c);
+  assert.equal(o.when, "grace", JSON.stringify(o));
+  assert.equal(o.atMs, world.rt.nowMs + 10 * 60000);
+  const sheet = V.sheetView(world, { heroId: c.id, tab: "gear", filter: FILTER });
+  assert.match(sheet.note.text, /^Contractor: hired in about 10 min · not saved until then; /);
+  assert.match(sheet.note.tooltip, /^Hired in about 10 min, once a hero below Lv 10 has been off duty for 15 min \(unless its agent comes back\)/);
+  const roster = V.herdView(world, { tab: "roster", filter: FILTER }).roster;
+  assert.equal(roster.groups.flatMap((g) => g.rows).find((r) => r.heroId === c.id).hire.text, "Hired in ~10 min");
+  assert.match(roster.count, / · 1 contractor, the next hired in about 10 min$/);
 });
 
 test("rules (round 4, P1): a Contractor's sheet follows it onto the roster when it is hired (its terminal), and its journal says so", () => {

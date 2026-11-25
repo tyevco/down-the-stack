@@ -36,8 +36,9 @@
  *            version opened read-only, not saving, restored from save.bak / a new herd): a band under
  *            the header for as long as it lasts; null while the save is fine
  *            release "v2.3"; releaseTip "Release Train: 412 Seals · v2.4 at 431 (+0.5% XP and gold each)";
- *            sub "12 heroes · 5 working · 1 waiting for you"; waiting: the blocked part of sub
- *            ("1 waiting for you", drawn in the blocked colour) or null; sprint.text "Sprint 18 / 45"
+ *            sub "12 heroes · 5 working · 2 need you"; waiting: the part of sub that waits for the
+ *            person ("2 need you": blocked heroes plus blocked sub-agents, the party's count; drawn
+ *            in the blocked colour) or null; sprint.text "Sprint 18 / 45"
  * @property {UpgradesVM|null} upgrades   only the shown tab's part is filled; the others are null
  * @property {HerdStashVM|null} stash
  * @property {TrackerVM|null} tracker
@@ -117,7 +118,9 @@
  * @typedef {Object} RosterRowVM
  * @property {string} key       "r:1"
  * @property {number} heroId
- * @property {string} name      @property {string} level   "Lv 34"
+ * @property {string} name      the hero's name; a Contractor without a hire line adds " (contractor)"
+ * @property {boolean} [contractor]   a Contractor (its hire line says so; slim tooltips name it)
+ * @property {string} level   "Lv 34"
  * @property {string} title     "Senior Refactorer"
  * @property {"working"|"blocked"|"done"|"idle"|"off"} status
  * @property {string} stripe    status colour (hex)
@@ -322,7 +325,7 @@ function saveBand(sv, t) {
 }
 
 /**
- * "9 heroes · 2 working · 1 waiting for you": the counts in muted, the waiting part (header.waiting,
+ * "9 heroes · 2 working · 1 needs you": the counts in muted, the waiting part (header.waiting,
  * the panel's only blocked signal) in the blocked colour. Falls back to `sub` alone.
  */
 function headerSub(h, t) {
@@ -550,7 +553,10 @@ function rosterTab(r, env, ui, t, calm) {
   // the rows under a header keep that column empty, so every name lines up
   const indent = (r.groups ?? []).some((g) => g.inline && (g.rows ?? []).length > 0);
   const width = ui.size?.w ?? env.width ?? 760;
-  const cols = Object.assign({ indent }, width < SLIM_NARROW_W ? SLIM_COLS_NARROW : SLIM_COLS);
+  // the slim rows' Retire column only when a hero here can retire (Lv 30+): a herd of new heroes
+  // and Contractors gives its 60 px to the hire moment and the title instead
+  const retire = (r.groups ?? []).some((g) => (g.rows ?? []).some((row) => row.retire));
+  const cols = Object.assign({ indent, retire }, width < SLIM_NARROW_W ? SLIM_COLS_NARROW : SLIM_COLS);
   for (const g of r.groups ?? []) {
     // a block of spaces with one hero each has no header: each of its rows names its space
     if (!g.inline) body.child(sectionTitle(`${g.name} · ${g.rows.length}`, t));
@@ -580,7 +586,8 @@ function rosterTab(r, env, ui, t, calm) {
  * A Contractor's hire moment ("Hired tomorrow 04:00"), coloured, its tooltip the whole story. It
  * shrinks (truncated) rather than push the row's fixed cells out: in a narrow dialog a slim row's
  * seen, Retire and Sheet cells would otherwise leave the row. The title · where beside it is
- * flex_1 (basis 0), so it gives way first.
+ * flex_1 (basis 0), so it gives way first (a slim row: title and seen, in one basis-0 cell; round
+ * 4b, "Hired tomorrow 04:00" is what a Contractor's row is for).
  */
 function hireText(row, t) {
   const h = row.hire;
@@ -629,8 +636,10 @@ function rosterRowSlim(row, env, ui, t, _calm, cols = SLIM_COLS) {
       .when(r.enabled, (e) => e.cursor_pointer().hover((s) => s.text_color(t.bad)))
       .on_click((_e, cx) => { cx.stop_propagation(); runAction(r, env, ui, cx); })
       .child(armed ? "Sure?" : r.label)
-    : div().w(52).flex_none();
-  const tip = [row.space, row.name, `${row.level} ${row.title}`, row.where, row.seen, row.hire ? row.hire.tooltip : null].filter(Boolean).join(" · ");
+    : cols.retire === false ? null : div().w(52).flex_none();
+  // (a Contractor's name carries no "(contractor)" when its hire moment shows; the tooltip says it)
+  const who = row.contractor && row.hire && !/\(contractor\)$/.test(String(row.name)) ? `${row.name} (contractor)` : row.name;
+  const tip = [row.space, who, `${row.level} ${row.title}`, row.where, row.seen, row.hire ? row.hire.tooltip : null].filter(Boolean).join(" · ");
   return h_flex().id(`hd-${row.key}`).flex_none().h(26).pl(4).pr(4).gap(8).items_center().rounded(6)
     .hover((s) => s.bg(t.hover))
     .tooltip(tip)
@@ -641,9 +650,13 @@ function rosterRowSlim(row, env, ui, t, _calm, cols = SLIM_COLS) {
     .child(div().w(cols.name ?? SLIM_COLS.name).flex_none().truncate().text_size(12).font_medium().text_color(off ? t.muted : t.fg).child(row.name))
     .child(div().w(42).flex_none().font_family(MONO).text_size(10.5).text_color(t.muted).child(row.level))
     .when(Boolean(row.hire), (e) => e.child(hireText(row, t)))
-    .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(`${row.title} · ${row.where}`))
-    .child(div().w(100).flex_none().truncate().text_right().text_size(11).text_color(t.muted).child(row.seen))
-    .child(retire)
+    // title · where and seen share what is left (basis 0): a Contractor's hire moment stays whole
+    // while they can give way (title first, then seen, cut and still right-aligned), as when a
+    // Lv 30 hero's Retire column shows in a 640 px dialog; only then does the hire moment shrink
+    .child(h_flex().flex_1().min_w(0).gap(8).items_center()
+      .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(`${row.title} · ${row.where}`))
+      .child(div().w(100).min_w(0).truncate().text_right().text_size(11).text_color(t.muted).child(row.seen)))
+    .when(retire != null, (e) => e.child(retire))
     .child(iconButton(`hd-sheet-${row.key}`, "ui/sheet.svg", t, `Open ${row.name}'s character sheet`, () => openSheet(row.heroId), 12));
 }
 

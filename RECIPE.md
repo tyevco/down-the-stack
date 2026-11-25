@@ -43,8 +43,10 @@ Left to right, top to bottom (`layouts/Down-the-Stack.json`):
     - the hero name and level;
     - herdr's own terminal title and folder;
     - 48 px HP and 64 px XP bars when herdr's whole title fits beside them, else 28 px and 36 px
-      bars from a pane of about 420 px (herdr's title is cut sooner; its tooltip has all of it);
-    - a status chip on the right (for example "fighting 3-3" in grey, or "! waiting" in amber).
+      bars from a pane of about 420 px (herdr's title is cut sooner; its tooltip has all of it).
+      No bars before herdr has reported the header's width (its first frame);
+    - a status chip on the right (for example "fighting 3-3" in grey, or "! waiting" in amber). The
+      chip outranks the bars and the title: it is never clipped.
 
     Narrow panes drop parts. A non-agent pane gets herdr's plain header.
   - A hidden 368 px side panel (herdr's `files` / `changes`).
@@ -55,6 +57,11 @@ Left to right, top to bottom (`layouts/Down-the-Stack.json`):
   - Termlings stand in fixed slots with a name and level tag under their feet. Mobs face left
     towards them.
   - Chests, campfires, bubbles, damage numbers and banners are drawn over that.
+  - One header note at a time in the header band: a note about one hero over that hero's room, a
+    herd-wide one at the strip's right end by the camp, cut only between words with the whole
+    text in its tooltip. The hires of one moment are one note ("Hired 6 contractors: Coda, Tobin
+    and 4 more", or "Hired 6 contractors" on a crowded strip; every hire in the tooltip) that stays
+    as long as their six notes would.
   - When a zone boss is challenged, its room becomes an arena with the boss (112×96 px art), an HP
     bar and the mechanic's text.
 - **HUD**: a hidden 26 px strip with gold, Snippets, the release, the Sprint meter, working /
@@ -78,9 +85,12 @@ something.
   seen fill the Sprint meter that summons the zone boss.
 - **idle**: the hero rests at a campfire with face `-_-`, and shows `z` after 10 minutes.
 - **New agents**: up to 6 new heroes a game day (it turns at 04:00 local), the first day too. A
-  7th new agent plays as a **Contractor**, "(contractor)", not saved; its tooltips say when it will
-  be hired, and it becomes a saved hero, keeping its level and kit, at the next 04:00 or when a
-  roster slot frees.
+  7th new agent plays as a **Contractor**, not saved; its tooltips and Roster row say when it will
+  be hired ("(contractor)" shows where no hire line does), and it becomes a saved hero, keeping its
+  level, kit and look (hoodie and hat colours), at the next 04:00 or when a roster slot frees. On
+  a full roster a hero below Lv 10 makes room only after 15 minutes off duty, so restarting an
+  agent (its pane's terminal ends, a new one starts) keeps its hero: the new terminal takes back
+  the hero whose terminal ended in that pane.
 - **Terminal gone**: the hero steps into a portal and goes off duty. Its pending chests wait.
 - **Clicks**:
   - a Termling or its `!` focuses that agent; a double click opens its character sheet;
@@ -234,7 +244,16 @@ something.
   never shows a stage hidden that way.
 - **Contractors are never saved** (only promoted heroes are). After a restart the hiring line
   re-forms in snapshot order, and a Contractor waiting across a restart at 04:00 comes back as a
-  new terminal.
+  new terminal. A promoted Contractor gets a roster id, so anything drawn from the id (the
+  hoodie colour) is stored with the hero (`look`), and its hat keeps its colour through its new
+  item uid.
+- **A copy's first frame has no size**: herdr reports `on_size_change` only after laying a frame
+  out (gpui-shell's size observer runs in prepaint), so plan the first frame for an unknown width
+  (the nameplate draws no bars until it is measured).
+- **Restarts look like a new terminal**: an agent restarted in its pane's shell keeps its terminal
+  (a fast rebind), but a closed pane's terminal is gone and a new pane gets a new id. Never let a
+  hero go the moment its terminal ends: here a hero is let go for a hire only after 15 minutes off
+  duty (world time, not the time the app was closed).
 - **`herdr-app check`** runs `init` with real file writes and exec. Every read and write is
   guarded by `checking()`; a forgotten guard can overwrite the real save.
 - **Paneless sub-agents** (most Forklings): `agent.focus` only picks what an `agent` block shows,
@@ -283,7 +302,10 @@ something.
 - An agent pane about 420 px wide shows the hero's HP and XP bars, with herdr's title cut short
   and whole in its tooltip.
 - The seventh new agent of a game day is a Contractor whose tooltip says when it is hired; after
-  04:00 it is a saved hero with the same name and level.
+  04:00 it is a saved hero with the same name, level and colours, and the six hires of that
+  moment show as one header note.
+- On a full roster, restarting a low-level hero's agent in its pane keeps that hero while
+  Contractors wait.
 - With "Collapse the stage when nothing works" on, the stage hides a minute after the last agent
   stops working and shows again when one starts.
 - With a notification turned on, its milestone posts one toast and no sound. Clicking the toast

@@ -417,6 +417,38 @@ describe("drop helpers", () => {
   });
 });
 
+describe("hat tints (round 4b)", () => {
+  test("hatToneOf: uid mod 6 as the stage has drawn saved hats; a Contractor's negative uid has one too", () => {
+    const n = D.PALETTE.hatTint.length;
+    assert.equal(n, 6);
+    for (let uid = 0; uid <= 60; uid++) assert.equal(I.hatToneOf(uid), uid % n, `uid ${uid}`);
+    for (let uid = -60; uid < 0; uid++) {
+      const t = I.hatToneOf(uid);
+      assert.ok(Number.isInteger(t) && t >= 0 && t < n, `uid ${uid}: ${t}`);
+      assert.equal((t - uid) % n, 0, "the same class mod 6");
+    }
+    assert.equal(I.hatToneOf(undefined), 0);
+  });
+
+  test("skipUidsToTone: the next uid has the tone, at most 5 uids skipped; nothing skipped when it already has it", () => {
+    for (let start = 1; start <= 12; start++) {
+      for (let tone = 0; tone < 6; tone++) {
+        const state = newState({ seed: 1 });
+        state.herd.nextUid = start;
+        I.skipUidsToTone(state, tone);
+        const uid = I.allocUid(state);
+        assert.equal(I.hatToneOf(uid), tone);
+        assert.ok(uid >= start && uid - start <= 5);
+        if (I.hatToneOf(start) === tone) assert.equal(uid, start);
+      }
+    }
+    const fresh = newState({ seed: 1 });
+    delete fresh.herd.nextUid;
+    I.skipUidsToTone(fresh, 3);
+    assert.equal(I.allocUid(fresh), 3);
+  });
+});
+
 describe("polish, squash, reroll (D§8.8)", () => {
   test("polish always succeeds, costs the formula, stops at the rarity max", () => {
     const state = world([["hotfixer", 50]]);

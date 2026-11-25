@@ -55,6 +55,7 @@
 //   host.view(kind, args)             view model (memoised per world version), null while loading
 //   host.openSheet(heroId, opts) / host.openHerd(tab) / host.toggleSheet / host.toggleHerd /
 //   host.closeDialog(kind)            one dialog of each kind at a time
+//   host.followSheet(overlay, info)   the open sheet's hero now (a promoted Contractor's new id)
 //   host.attach(info) / host.detach(token)   copy bookkeeping (dialogs register their overlay)
 //   host.maybeSave(force) / host.flush()     the save policy
 //   host.saveStatus()                 null, or {readOnly?, notSaving?, restoredFrom?, message, ...}
@@ -1061,7 +1062,10 @@ export class GameHost {
     if (heroId == null) return null;
     const o = opts || {};
     const cur = this.overlays.sheet;
-    if (cur && cur.heroId === heroId && o.tab == null && o.focus == null) return cur.id;
+    if (cur && this.sheetShows(cur, heroId) && o.tab == null && o.focus == null) {
+      cur.heroId = heroId;
+      return cur.id;
+    }
     if (cur) this.closeDialog("sheet");
     const props = { role: "sheet", heroId };
     if (o.tab != null) props.tab = o.tab;
@@ -1069,6 +1073,34 @@ export class GameHost {
     const id = openOverlay({ mod: MOD, kind: "dialog", width: DIALOG.sheet.width, height: DIALOG.sheet.height, props });
     this.overlays.sheet = { id, heroId };
     return id;
+  }
+
+  /**
+   * Does the open sheet (overlays.sheet) show this hero? By id; or a Contractor's sheet whose
+   * Contractor was promoted (round 4) and has a roster id now: the hero bound to the terminal the
+   * sheet last reported (followSheet) with the name it reported. A click on the promoted hero
+   * before the sheet has drawn its new id then keeps the dialog instead of closing and reopening it.
+   */
+  sheetShows(cur, heroId) {
+    if (cur.heroId === heroId) return true;
+    if (!(cur.heroId < 0) || !(heroId > 0) || !cur.address || !this.ready) return false;
+    const rt = this.world.rt;
+    if (!rt.bind || rt.bind.get(cur.address) !== heroId) return false;
+    const hero = this.world.state.heroes.find((h) => h.id === heroId);
+    return !!hero && (cur.name == null || hero.name === cur.name);
+  }
+
+  /**
+   * A sheet copy reports what it shows each render (ui/sheet.js): its hero id (a promoted
+   * Contractor's sheet follows it to its roster id), terminal and name. herdr cannot change an
+   * overlay's props, so the dialog registry keeps them: openSheet for that hero keeps the dialog.
+   */
+  followSheet(overlay, info) {
+    const cur = this.overlays.sheet;
+    if (!cur || overlay == null || cur.id !== overlay || !info) return;
+    if (Number.isInteger(info.heroId)) cur.heroId = info.heroId;
+    if (typeof info.address === "string" && info.address) cur.address = info.address;
+    if (typeof info.name === "string" && info.name) cur.name = info.name;
   }
 
   /** The Herd panel (on `tab` if given); an open one stays (switching tab reopens it there). */

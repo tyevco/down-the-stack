@@ -5,12 +5,18 @@
 //  1. A Contractor (the 7th new agent of a game day) is told when it will be hired, in the party
 //     row, the pane header and the stage; at the 04:00 game day turn it is promoted to a saved hero
 //     that keeps its name, level, XP, class, seat and pane, with a "Hired: … (was a contractor)" line.
+//     Its open character sheet follows it to the roster id without closing (round 4b).
 //  2. The Herd panel's Stage strip switch shows and hides the stage whoever hid it, finding the
 //     stage block by content; it is disabled when the layout has no stage.
 //  3. A blocked sub-agent without a pane counts in "N need you", the group "!" and the rail badge;
-//     clicking it runs terminal.peek.
+//     clicking it runs terminal.peek. Repeated clicks on "N need you" walk the list without
+//     showing one twice running, with herdr's focus emulated (round 4b).
 //  5. A pane header in a 420 px split shows HP / XP bars, its terminal title cut sooner with the
-//     whole title in a tooltip; none at 400 px.
+//     whole title in a tooltip; none at 400 px. A fresh header shows no bars before herdr reports
+//     its width, and its chip is never clipped (round 4b U1).
+// Round 4b also: a promoted Contractor keeps its look (R1); restarting an agent on a full roster
+// keeps its hero, and a hero off duty makes room only after its 15-minute grace (R2); the hires of
+// the 04:00 turn are one header note by the camp (U3).
 
 import "../tools/mock/register.mjs";
 import { test } from "node:test";
@@ -18,6 +24,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 
 const M = await import("../tools/mock/index.mjs");
+const G = await import("../tools/mock/gates.mjs");
 
 const MAIN = path.join(M.REPO, "mods", "down-the-stack", "main.js");
 const SAVE = `${M.APP_HOME}/data/down-the-stack/save.json`;
@@ -47,6 +54,32 @@ function liveOf(n, over = {}) {
   for (const t of fx.terminals) if (t.parent == null) t.status = "working";
   return { ...fx, ...over };
 }
+/** Every hex colour a node and its subtree are drawn with (bg, border and text colours). */
+function coloursUnder(n, out = new Set()) {
+  if (!n) return out;
+  for (const [m, a] of n.methods ?? []) if (/^(bg|border_color|text_color)$/.test(m) && typeof a[0] === "string") out.add(a[0].toUpperCase());
+  for (const k of n.children ?? []) coloursUnder(k, out);
+  return out;
+}
+/** A terminal's agent, pane and terminal leave herdr's lists (its pane closed). */
+function closeTerminal(addr) {
+  const fx = M.fixture();
+  const gone = fx.agents.find((a) => a.address === addr);
+  M.updateFixture({
+    agents: fx.agents.filter((a) => a.address !== addr), panes: fx.panes.filter((p) => p.terminal !== addr),
+    terminals: fx.terminals.filter((t) => t.address !== addr && t.parent !== addr),
+  });
+  return gone;
+}
+/** A new terminal (a new address) opens in `pane` with this agent's program and place. */
+function openTerminal(like, addr, pane) {
+  const fx = M.fixture();
+  const a = { ...like, address: addr, pane, seq: like.seq + 5000, status: "working" };
+  M.updateFixture({ agents: [...fx.agents, a], panes: [...fx.panes, M.paneFor(a)], terminals: [...fx.terminals, M.terminalFor(a)] });
+  return a;
+}
+const DAY = 86400000;
+
 /**
  * Mount roles on one graph (the first one sets the live data and the clock), let the save load and
  * the first ticks run, then give each copy its size (a copy still loading draws no sized root).
@@ -60,6 +93,7 @@ async function rig(roles, fixture, nowMs) {
     first = false;
   }
   out.host = await hostOf(out[roles[0][0]]);
+  out.graph = g;
   await M.tickAll(1000);
   await M.tickAll(1000);
   assert.equal(out.host.ready, true);
@@ -119,6 +153,156 @@ test("decision 1: the 7th new agent of a game day plays as a Contractor, told wh
   const disk = M.memfs.readText(SAVE);
   assert.ok(disk && disk.includes(name), "the promoted hero is in save.json");
   for (const m of [r.stage, r.party, r.plate]) assert.deepEqual(m.errors, []);
+});
+
+test("decision 1: a Contractor's open character sheet follows its promotion to the roster hero without closing; opening that hero's sheet keeps the dialog (round 4b U5)", async () => {
+  M.resetState();
+  const d = new Date(Date.UTC(2026, 10, 24, 12, 0));
+  d.setHours(3, 56, 0, 0);
+  const r = await rig([
+    ["stage", { role: "stage" }, 1600, 210],
+    ["party", { role: "party" }, 268, 900],
+    ["plate", { role: "nameplate", pane: "p7", terminal: "t7" }, 900, 34],
+  ], liveOf(7), d.getTime());
+  const { host } = r;
+  const c = host.world.rt.contractors.get("t7");
+  assert.ok(c && c.id < 0, "t7 plays a Contractor");
+  // its sheet, opened from its pane header (the hero part's click)
+  r.plate.render();
+  r.plate.fire("np-hero-p7");
+  const opened = M.calls().openOverlay.filter((x) => x.spec?.props?.role === "sheet");
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0].spec.props.heroId, c.id);
+  const sheet = await M.mountMod(MAIN, { props: { ...opened[0].spec.props, overlay: opened[0].id }, graph: r.graph });
+  sheet.size(760, 500);
+  sheet.render();
+  assert.ok(sheet.text().includes(c.name), "the Contractor's sheet");
+  const overlays = () => [M.calls().openOverlay.length, M.calls().closeOverlay.length];
+  const before = overlays();
+  // the game day turns at 04:00: the Contractor is hired with a roster id
+  for (let i = 0; i < 4 * 60 + 5; i++) await M.tickAll(1000);
+  const hero = host.world.state.heroes.find((h) => h.name === c.name);
+  assert.ok(hero && hero.id > 0, "promoted");
+  sheet.render();
+  assert.ok(sheet.text().includes(hero.name) && !/left the roster/.test(sheet.text()), "the open sheet shows the promoted hero");
+  assert.deepEqual(overlays(), before, "the dialog was neither closed nor opened again");
+  assert.equal(host.overlays.sheet.heroId, hero.id, "the host's dialog registry follows it");
+  // opening the promoted hero's sheet (its pane header, its party row) keeps the open dialog
+  r.plate.render();
+  r.plate.fire("np-hero-p7");
+  assert.deepEqual(overlays(), before, "the header click keeps the dialog");
+  const { openSheet } = await sheet.import("./ui/party.js");
+  openSheet(hero.id);
+  assert.deepEqual(overlays(), before, "so does any openSheet for that hero");
+  // another hero's sheet still replaces it
+  openSheet(host.world.state.heroes[0].id);
+  assert.equal(M.calls().closeOverlay.length, before[1] + 1);
+  for (const m of [r.stage, r.party, r.plate, sheet]) assert.deepEqual(m.errors, []);
+});
+
+test("decision 1 (round 4b R1): a Contractor promoted at 04:00 keeps its hoodie and hat in the party, its pane header and the stage, and after a restart", async () => {
+  M.resetState();
+  const d = new Date(Date.UTC(2026, 10, 24, 12, 0));
+  d.setHours(3, 56, 0, 0);
+  const roles = [
+    ["stage", { role: "stage" }, 1600, 210],
+    ["party", { role: "party" }, 268, 900],
+    ["plate", { role: "nameplate", pane: "p7", terminal: "t7" }, 900, 34],
+  ];
+  const r = await rig(roles, liveOf(7), d.getTime());
+  const c = r.host.world.rt.contractors.get("t7");
+  assert.ok(c && c.id < 0, "t7 plays a Contractor");
+  // what each copy draws for t7's hero: the view models' colours, and the rendered elements carry them
+  const look = (rr) => {
+    const { host } = rr;
+    const now = M.mockNow();
+    const id = host.world.rt.bind.get("t7");
+    const st = host.view("stage", { width: 1600, height: 210, nowMs: now }).heroes.find((h) => h.address === "t7");
+    const row = host.view("party", { width: 268, nowMs: now }).groups.flatMap((g) => g.rows).find((x) => x.address === "t7");
+    const plate = host.view("nameplate", { terminal: "t7", pane: "p7" });
+    for (const k of ["stage", "party", "plate"]) rr[k].render();
+    const drawn = {
+      stage: coloursUnder(rr.stage.node(st.key)), party: coloursUnder(rr.party.node(`pr-${row.key}`)), plate: coloursUnder(rr.plate.node("np-hero-p7")),
+    };
+    const hoodie = st.colors.hoodie.toUpperCase();
+    const hat = st.hat ? st.hat.color.toUpperCase() : null;
+    assert.ok(hat, "a hat");
+    assert.ok(drawn.stage.has(hoodie) && drawn.stage.has(hat), `the stage draws ${hoodie} / ${hat}: ${[...drawn.stage]}`);
+    assert.ok(drawn.party.has(hoodie), `the party row draws ${hoodie}: ${[...drawn.party]}`);
+    assert.ok(drawn.plate.has(hoodie), `the pane header draws ${hoodie}: ${[...drawn.plate]}`);
+    return { id, hoodie, hat, party: row.colors.hoodie.toUpperCase(), plate: plate.colors.hoodie.toUpperCase() };
+  };
+  const before = look(r);
+  assert.deepEqual([before.party, before.plate], [before.hoodie, before.hoodie], "one hoodie everywhere");
+  for (let i = 0; i < 4 * 60 + 5; i++) await M.tickAll(1000);
+  const after = look(r);
+  assert.ok(after.id > 0, "promoted");
+  assert.deepEqual({ ...after, id: 0 }, { ...before, id: 0 }, "the same look after its promotion");
+  // a restart (a new VM loads the save): the promoted hero keeps it
+  await M.tickAll(31000);
+  await r.host.flush();
+  for (const m of M.mounted()) await m.close();
+  const r2 = await rig(roles, undefined, undefined);
+  for (let i = 0; i < 3; i++) await M.tickAll(1000);
+  const again = look(r2);
+  assert.equal(again.id, after.id, "the same hero on t7");
+  assert.deepEqual({ ...again, id: 0 }, { ...before, id: 0 }, "and the same look after a restart");
+  for (const m of [r2.stage, r2.party, r2.plate]) assert.deepEqual(m.errors, []);
+});
+
+test("round 4b R2: restarting an agent on a full roster keeps its hero while Contractors wait; a hero off duty makes room for one only after 15 minutes", async () => {
+  M.resetState();
+  const start = Date.UTC(2026, 10, 24, 12, 0);
+  // the save: 29 heroes of Lv 12 last seen yesterday on another seat (Lv 10+: never let go)
+  const W = await import("../mods/down-the-stack/game/world.js");
+  const Hr = await import("../mods/down-the-stack/game/heroes.js");
+  const w0 = W.createWorld({ nowMs: start - DAY, seed: 5 });
+  for (let i = 0; i < 29; i++) {
+    const h = Hr.newHero(w0.state, { seat: "bench/claude", ord: i, nowMs: start - DAY });
+    h.L = 12;
+    w0.state.heroes.push(h);
+  }
+  M.memfs.write(SAVE, W.serialize(w0), { mkdirs: true });
+  const r = await rig([["party", { role: "party" }, 268, 900], ["stage", { role: "stage" }, 1600, 210]], liveOf(3), start);
+  const { host } = r;
+  for (let i = 0; i < 3; i++) await M.tickAll(1000);
+  const world = () => host.world;
+  assert.equal(world().state.heroes.length, 30, "t1 is the 30th hero");
+  const mine = world().state.heroes.find((h) => h.id === world().rt.bind.get("t1"));
+  assert.ok(mine && mine.L < 10);
+  assert.ok(world().rt.contractors.has("t2") && world().rt.contractors.has("t3"), "t2 and t3 wait as Contractors: the roster is full");
+  const hireTip = (addr) => {
+    r.party.render();
+    const name = world().rt.contractors.get(addr)?.name;
+    return tips(r.party).find((t) => name && t.includes(name) && /Hired|hired/.test(t)) ?? "";
+  };
+  assert.match(hireTip("t2"), /Hired when a roster slot frees \(a retire, or a hero below Lv 10 off duty for 15 min\)/);
+  // the person restarts t1's agent: its pane's terminal ends, a new one opens in the same pane 3 s later
+  const was = closeTerminal("t1");
+  for (let i = 0; i < 3; i++) await M.tickAll(1000);
+  assert.ok(world().state.heroes.includes(mine), "not let go while its agent restarts");
+  openTerminal(was, "t99", was.pane);
+  for (let i = 0; i < 3; i++) await M.tickAll(1000);
+  assert.equal(world().rt.bind.get("t99"), mine.id, "the new terminal plays its hero again");
+  assert.ok(world().rt.contractors.has("t2") && world().rt.contractors.has("t3"), "the Contractors still wait");
+  assert.ok(!world().state.herd.log.some((e) => e[1] === "leave" || e[1] === "hired"), "nobody let go, nobody hired");
+  r.party.render();
+  assert.ok(r.party.text().includes(mine.name.split(" ")[0]), "the party shows it");
+  // the agent stops for good: its hero makes room once it has been off duty for 15 minutes
+  closeTerminal("t99");
+  for (let i = 0; i < 3; i++) await M.tickAll(1000);
+  assert.match(hireTip("t2"), /Hired in about 15 min, once a hero below Lv 10 has been off duty for 15 min \(unless its agent comes back\)/);
+  for (let i = 0; i < 14 * 60; i++) await M.tickAll(1000);
+  assert.ok(world().rt.contractors.has("t2"), "still in its grace after 14 minutes");
+  assert.ok(world().state.heroes.includes(mine));
+  for (let i = 0; i < 70; i++) await M.tickAll(1000);
+  assert.ok(!world().state.heroes.includes(mine), "let go after 15 minutes");
+  const t2 = world().state.heroes.find((h) => h.id === world().rt.bind.get("t2"));
+  assert.ok(t2 && t2.id > 0 && !t2.contractor, "t2 joined the roster");
+  assert.ok(world().rt.contractors.has("t3"), "one slot, one hire");
+  const leave = world().state.herd.log.find((e) => e[1] === "leave");
+  assert.equal(leave?.[5], mine.name, "the journal names the hero let go");
+  for (const m of [r.party, r.stage]) assert.deepEqual(m.errors, []);
 });
 
 test("decision 2: the Herd panel's Stage strip switch shows and hides the stage whoever hid it, found by content; disabled without a stage", async () => {
@@ -214,6 +398,66 @@ test("decision 3: a blocked sub-agent without a pane counts in 'N need you', the
   for (const m of [r.party, r.rail, r.stage]) assert.deepEqual(m.errors, []);
 });
 
+test("decision 3: the 'N need you' walk never shows one twice running, before or after herdr's next broadcast (herdr's focus emulated: pane.focus moves it, terminal.peek does not; round 4b U4)", async () => {
+  M.resetState();
+  const fx = liveOf(4);
+  // t2 is blocked (a hero with its pane); t90 (t1's sub-agent) and t91 (t3's) are blocked, no pane
+  const a2 = fx.agents.find((a) => a.address === "t2");
+  a2.status = "blocked";
+  a2.seq += 1000;
+  fx.panes.find((p) => p.terminal === "t2").status = "blocked";
+  fx.terminals.find((t) => t.address === "t2").status = "blocked";
+  fx.terminals.find((t) => t.address === "t90").status = "blocked";
+  const t91 = structuredClone(fx.terminals.find((t) => t.address === "t90"));
+  Object.assign(t91, { address: "t91", parent: "t3", title: "sub-agent: lint fixes", status: "blocked" });
+  fx.terminals.push(t91);
+  const r = await rig([["party", { role: "party" }, 268, 600], ["stage", { role: "stage" }, 960, 210]], fx, Date.UTC(2026, 10, 24, 12, 0));
+  for (let i = 0; i < 3; i++) await M.tickAll(1000);
+  r.party.render();
+  assert.equal(textUnder(r.party.node("party-needyou")), "3 need you");
+  // herdr: pane.focus moves focused() (the world sees it at its next snapshot); a peek does not
+  const herdrFocus = (c) => {
+    if (!c || c.name !== "pane.focus") return;
+    const ag = M.fixture().agents.find((a) => a.pane === c.args.pane);
+    M.updateFixture({
+      focused: { ...M.fixture().focused, pane: ag.pane, terminal: ag.address, space: ag.space, tab: ag.tab },
+      agents: M.fixture().agents.map((a) => ({ ...a, focused: a.address === ag.address })),
+      panes: M.fixture().panes.map((p) => ({ ...p, focused: p.pane === ag.pane })),
+    });
+  };
+  const click = () => {
+    M.calls().run.length = 0;
+    r.party.fire("party-needyou");
+    // herdr draws a copy that asked for it (cx.notify) before the next click lands
+    if (r.party.copy.dirty) r.party.render();
+    const c = M.calls().run.find((x) => x.name === "pane.focus" || x.name === "terminal.peek");
+    herdrFocus(c);
+    return c ? `${c.name} ${c.args.pane ?? c.args.terminal}` : "nothing";
+  };
+  // three clicks before any broadcast: three different ones
+  const quick = [click(), click(), click()];
+  assert.equal(new Set(quick).size, 3, quick.join(" | "));
+  assert.deepEqual(quick.slice().sort(), ["pane.focus p2", "terminal.peek t90", "terminal.peek t91"]);
+  // the walk goes on once the world has seen the focus its own click moved: no repeat at the seam
+  const seq = quick.slice();
+  for (let k = 0; k < 6; k++) {
+    await M.tickAll(1000);
+    await M.tickAll(1000);
+    r.party.render();
+    seq.push(click());
+  }
+  for (let k = 1; k < seq.length; k++) assert.notEqual(seq[k], seq[k - 1], seq.join(" | "));
+  // a full lap shows each of the three once
+  for (let k = 0; k + 3 <= seq.length; k += 3) assert.equal(new Set(seq.slice(k, k + 3)).size, 3, seq.join(" | "));
+  // the person focuses another row by hand: the walk starts after it
+  herdrFocus({ name: "pane.focus", args: { pane: fx.agents.find((a) => a.address === "t4").pane } });
+  await M.tickAll(1000);
+  await M.tickAll(1000);
+  r.party.render();
+  assert.equal(click(), "terminal.peek t90", "after t4 the list wraps to its first entry");
+  for (const m of [r.party, r.stage]) assert.deepEqual(m.errors, []);
+});
+
 test("decision 5: a pane header in a 420 px split shows compact HP / XP bars and cuts herdr's title sooner, its whole text in a tooltip; none at 400 px", async () => {
   M.resetState();
   const fx = liveOf(2);
@@ -233,4 +477,117 @@ test("decision 5: a pane header in a 420 px split shows compact HP / XP bars and
   await M.tickAll(1000);
   r.p420.render();
   assert.deepEqual(widths(bars(r.p420)), [28, 36]);
+});
+
+/**
+ * Lays recorded pane-header trees out in Chromium (the preview's HTML) and returns what is wrong:
+ * a chip clipped by the header or its group, or its text cut. null when Playwright is missing.
+ */
+async function chipProblems(frames) {
+  let pw;
+  try { pw = (await import("node:module")).createRequire(import.meta.url)("playwright"); } catch { return null; }
+  const { newContext, blockHtml, documentHtml } = await import("../tools/preview/render.mjs");
+  const ctx = newContext({ zoom: 1, theme: M.resolveTheme("graphite") });
+  const body = frames.map((f, i) => `<div data-case="${i}" style="width:${f.W}px;height:34px;margin-bottom:2px">${blockHtml(f.tree, ctx, { width: f.W, height: 34 })}</div>`).join("");
+  const browser = await pw.chromium.launch();
+  try {
+    const page = await browser.newPage();
+    await page.setViewportSize({ width: 1500, height: 600 });
+    await page.setContent(documentHtml({ body, ctx, title: "plates" }).replace(/html,body\{width:[^}]*\}/, ""), { waitUntil: "load" });
+    await page.evaluate(() => document.fonts?.ready);
+    return await page.evaluate((frames) => {
+      const out = [];
+      frames.forEach((f, i) => {
+        const wrap = document.querySelector(`[data-case="${i}"]`);
+        const head = wrap.querySelector(`[data-id="pane-head-${f.pane}"]`);
+        const chip = wrap.querySelector(`[data-id="np-chip-${f.pane}"]`) ?? (head && [...head.children].reverse().find((e) => e.textContent.trim() === f.chip));
+        if (!head || !chip) { out.push(`${f.label}: no ${head ? "chip" : "header"}`); return; }
+        const r = chip.getBoundingClientRect();
+        let left = r.left, right = r.right;
+        for (let e = chip.parentElement; e && e !== head.parentElement; e = e.parentElement) {
+          const cs = getComputedStyle(e);
+          if (cs.overflowX === "visible") continue;
+          const p = e.getBoundingClientRect();
+          left = Math.max(left, p.left + (parseFloat(cs.borderLeftWidth) || 0));
+          right = Math.min(right, p.right - (parseFloat(cs.borderRightWidth) || 0));
+        }
+        if (left > r.left + 0.5 || right < r.right - 0.5) out.push(`${f.label}: the chip is clipped (${Math.round(Math.max(0, right - left))} of ${Math.round(r.width)} px shown)`);
+        const txt = chip.firstElementChild ?? chip;
+        if (txt.scrollWidth > txt.clientWidth + 0.5) out.push(`${f.label}: the chip's text is cut`);
+      });
+      return out;
+    }, frames.map((f) => ({ label: f.label, W: f.W, pane: f.pane, chip: f.chip })));
+  } finally {
+    await browser.close();
+  }
+}
+
+test("decision 5 (round 4b U1): a fresh pane header draws no bars before herdr reports its width; then none at 400 px and compact bars at 420 px, its chip whole in every frame", async (t) => {
+  M.resetState();
+  const fx = liveOf(2);
+  const title = "Fix the flaky payment webhook retries before the release";
+  fx.agents[0].title = title;
+  fx.panes[0].title = title;
+  const r = await rig([["stage", { role: "stage" }, 960, 210]], fx, Date.UTC(2026, 10, 24, 12, 0));
+  for (let i = 0; i < 3; i++) await M.tickAll(1000);
+  const vm = r.host.view("nameplate", { terminal: "t1", pane: "p1" });
+  assert.ok(vm.chip && vm.chip.text, "a status chip");
+  const bars = (m) => m.node("np-bars-p1");
+  const widths = (n) => n.children.flatMap((g) => g.children).filter((x) => x.type !== "text" && x.methods.some((y) => y[0] === "rounded")).map((x) => x.methods.find((y) => y[0] === "w")[1][0]);
+  const frames = [];
+  for (const W of [400, 420]) {
+    // herdr mounts the header copy, lays its first frame out, and only then reports its width
+    // (gpui-shell SizeObserver): the mock keeps a size given before that frame until it is drawn
+    const m = await M.mountMod(MAIN, { props: { role: "nameplate", pane: "p1", terminal: "t1" }, graph: r.graph });
+    m.size(W, 34);
+    m.render();
+    assert.equal(bars(m), null, `${W}: no bars in the first frame (no width yet)`);
+    assert.ok(m.node("np-chip-p1"), `${W}: the chip in the first frame`);
+    frames.push({ label: `fresh ${W} first frame`, W, tree: m.tree, pane: "p1", chip: vm.chip.text });
+    assert.equal(m.dirty, true, `${W}: herdr's size report asks for a redraw`);
+    await M.tickAll(1000);
+    m.render();
+    if (W === 400) assert.equal(bars(m), null, "400 px: the title keeps the room");
+    else assert.deepEqual(widths(bars(m)), [28, 36], "420 px: compact bars once measured");
+    assert.ok(m.node("np-chip-p1"), `${W}: the chip`);
+    assert.ok(tips(m).includes(title), `${W}: the whole title on hover`);
+    frames.push({ label: `fresh ${W} measured`, W, tree: m.tree, pane: "p1", chip: vm.chip.text });
+    assert.deepEqual(m.errors, []);
+  }
+  const bad = await chipProblems(frames);
+  if (bad == null) return G.skipGate(t, "pane headers in Chromium", "Playwright is not installed");
+  assert.deepEqual(bad, []);
+});
+
+test("round 4b U3: the six hires of the 04:00 turn are one header note at the stage's right end, whole, every hire's line in its tooltip, for 18 s", async () => {
+  M.resetState();
+  const d = new Date(Date.UTC(2026, 10, 24, 12, 0));
+  d.setHours(3, 58, 0, 0);
+  const r = await rig([["stage", { role: "stage" }, 1600, 210], ["party", { role: "party" }, 268, 900]], liveOf(12), d.getTime());
+  const { host } = r;
+  const waiting = Array.from(host.world.rt.contractors.values()).map((c) => c.name);
+  assert.equal(waiting.length, 6, "six Contractors wait for the 04:00 turn");
+  const notes = () => r.stage.findAll((n) => typeof n.id === "string" && n.id.startsWith("note:"));
+  let k = 0;
+  while (!host.world.state.herd.log.some((e) => e[1] === "hired") && k++ < 200) await M.tickAll(1000);
+  r.stage.render();
+  const [note] = notes();
+  assert.ok(note, "a header note at the turn");
+  const first = (n) => n.split(" ")[0];
+  const hired = host.world.state.herd.log.filter((e) => e[1] === "hired").map((e) => e[5]);
+  assert.deepEqual(hired.slice().sort(), waiting.slice().sort(), "all six promoted");
+  assert.equal(textUnder(note), `Hired 6 contractors: ${first(hired[0])}, ${first(hired[1])} and 4 more`, "one note, whole");
+  assert.equal(tipOf(note), hired.map((n) => `Hired: ${n} (was a contractor)`).join("\n"), "every hire's own line on hover");
+  const num = (m) => note.methods.find((x) => x[0] === m)[1][0];
+  assert.ok(num("left") + num("w") >= 1600 - 8, `at the right end (${num("left")} + ${num("w")})`);
+  // the same note while its six 3 s slots run
+  const keys = [];
+  for (let i = 0; i < 20; i++) {
+    await M.tickAll(1000);
+    r.stage.render();
+    keys.push(notes()[0]?.id ?? null);
+  }
+  assert.ok(keys.slice(0, 16).every((x) => x === note.id), keys.join(" | "));
+  assert.equal(keys[19], null, "gone once its time has run");
+  for (const m of [r.stage, r.party]) assert.deepEqual(m.errors, []);
 });

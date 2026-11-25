@@ -532,6 +532,18 @@ describe("formulas: text that goes to herdr", () => {
     }
   });
 
+  test("shortName: a hero's first name for a short header note, at most 10 characters, never half an emoji (round 4c)", () => {
+    const rocket = "\u{1F680}";
+    assert.equal(F.shortName("Tamsin the Composable"), "Tamsin");
+    assert.equal(F.shortName("  Nell   of the Quiet Logs "), "Nell");
+    assert.equal(F.shortName("Zed"), "Zed");
+    assert.equal(F.shortName("Supercalifragilistic Smith"), "Supercali…");
+    assert.equal(F.shortName(""), "");
+    assert.equal(F.shortName(null), "");
+    assert.equal(F.shortName(`abcdefgh${rocket}xyz`), "abcdefgh…", "the pair straddles the cut: dropped whole");
+    for (let n = 2; n < 14; n++) assert.ok(F.shortName(`${rocket.repeat(n)} x`, 7).isWellFormed(), `n = ${n}`);
+  });
+
   test("wellFormed replaces (or drops) lone surrogates and keeps pairs", () => {
     assert.equal(F.wellFormed("plain"), "plain");
     assert.equal(F.wellFormed("ship \u{1F680} it"), "ship \u{1F680} it");

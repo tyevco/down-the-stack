@@ -81,7 +81,7 @@
 import { div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { run, setAgentOrder, openOverlay, layout, focused, panes, shared, setShared, window as herdrWindow } from "herdr";
-import { C, T, MONO, art, zoom, alpha, kids, clamp01 } from "./kit.js";
+import { C, T, MONO, art, zoom, alpha, kids, clamp01, middleCut } from "./kit.js";
 
 // ---------------------------------------------------------------------------------------------
 // Shared chrome helpers (also used by nameplate.js and hud.js)
@@ -455,7 +455,7 @@ export function renderParty(vm, env) {
   } else {
     for (const g of vm.groups) {
       const folded = g.offDuty !== ui.toggled.has(g.key); // off duty starts folded
-      rows.push(groupHeader(g, folded, ui, t));
+      rows.push(groupHeader(g, folded, ui, t, width));
       if (!folded) for (const r of g.rows) rows.push(r.slim ? slimRow(r, g, vm, env, ui, t, width) : heroRow(r, g, vm, env, ui, t, width));
     }
   }
@@ -576,7 +576,7 @@ function header(t, vm, env, width = 268) {
       .child(svg(art("ui/calm.svg")).w(14).h(14))));
 }
 
-function groupHeader(g, folded, ui, t) {
+function groupHeader(g, folded, ui, t, width = 268) {
   const top = g.rows.reduce((m, r) => ((RANK[r.status] ?? 0) > (RANK[m] ?? 0) ? r.status : m), null);
   // blocked (a row, or a row's sub-agent): herdr's "!" badge, folded or not (the blocked row may
   // be below the fold); done / working: a dot on a folded group
@@ -594,7 +594,9 @@ function groupHeader(g, folded, ui, t) {
       else ui.toggled.add(g.key);
       cx.notify();
     })
-    .child(div().min_w(0).truncate().child(String(g.name ?? "")))
+    // a space name that may not fit is cut in the middle, both ends kept ("ceo-assi…res-2"), its
+    // whole name on hover (round 4c; the count, badges and chevron take about 80 px)
+    .child(middleCut(g.name, { id: `pg-${g.key}-name`, tooltip: true, room: width - 80, size: 11 }))
     .when(folded || g.offDuty, (el) => el.child(div().flex_none().child(String(g.rows.length))))
     .child(div().flex_1())
     .when(bang, (el) => el.child(bangBadge(t)))

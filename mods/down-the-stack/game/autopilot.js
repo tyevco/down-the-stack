@@ -446,7 +446,7 @@ export function autoBuild(world, ev) {
   const i = autoBuyPick(state);
   if (i < 0) return null;
   const r = buy(state, i);
-  if (r.ok && ev) ev.note?.(`Localhost: ${BUILDINGS[i].name} ${buildingLevel(state, i)}`);
+  if (r.ok && ev) ev.note?.(`Localhost: ${BUILDINGS[i].name} ${buildingLevel(state, i)}`, null, { short: `${BUILDINGS[i].name} ${buildingLevel(state, i)}` });
   return r.ok ? i : null;
 }
 

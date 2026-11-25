@@ -194,7 +194,7 @@
 import { div, svg, image } from "gpui-kit";
 import { h_flex, v_flex, Input, InputState, ScrollHandle } from "gpui-base";
 import { run, closeOverlay, layout } from "herdr";
-import { C, MONO, art, zoom, alpha, kids } from "./kit.js";
+import { C, MONO, art, zoom, alpha, kids, middleCut } from "./kit.js";
 import { ink, tone, portrait, openSheet, chromeCommand, legible, over } from "./party.js";
 import {
   dialogTheme, dialogTokens, newUi, filterArgs, flash, actionButton, plainButton, iconButton, switchEl, tag,
@@ -559,7 +559,7 @@ function rosterTab(r, env, ui, t, calm) {
   const cols = Object.assign({ indent, retire }, width < SLIM_NARROW_W ? SLIM_COLS_NARROW : SLIM_COLS);
   for (const g of r.groups ?? []) {
     // a block of spaces with one hero each has no header: each of its rows names its space
-    if (!g.inline) body.child(sectionTitle(`${g.name} · ${g.rows.length}`, t));
+    if (!g.inline) body.child(spaceTitle(g, t, width));
     body.children(g.rows.map((row) => rowOf(row, env, ui, t, calm, cols)));
   }
   // no hero at all (before the first agent): say how one comes, above the Hall of Fame
@@ -583,6 +583,20 @@ function rosterTab(r, env, ui, t, calm) {
 }
 
 /**
+ * A Roster space's header ("herdr-app · 3"), as sectionTitle draws one: a space name that may not
+ * fit the dialog is cut in the middle, both ends kept, its whole name on hover (round 4c).
+ */
+function spaceTitle(g, t, width = 760) {
+  const head = `${g.name} · ${g.rows.length}`;
+  if (head.length * 11 * 0.6 <= width - 120) return sectionTitle(head, t);
+  return h_flex().flex_none().h(18).gap(8).items_center()
+    .child(h_flex().min_w(0).text_size(11).font_semibold().text_color(t.dim)
+      .child(middleCut(g.name, { id: `hd-gt-${g.key}`, tooltip: true }))
+      .child(div().flex_none().whitespace_nowrap().child(`\u00A0· ${g.rows.length}`)))
+    .child(div().flex_1().h(1).bg(t.border));
+}
+
+/**
  * A Contractor's hire moment ("Hired tomorrow 04:00"), coloured, its tooltip the whole story. It
  * shrinks (truncated) rather than push the row's fixed cells out: in a narrow dialog a slim row's
  * seen, Retire and Sheet cells would otherwise leave the row. The title · where beside it is
@@ -599,7 +613,8 @@ function rosterRow(row, env, ui, t, calm) {
   const off = row.status === "off";
   // line 2: the space (a space with one hero has no header), a Contractor's hire, then title · where
   const line2 = h_flex().min_w(0).gap(6).items_center()
-    .when(Boolean(row.space), (e) => e.child(div().id(`hd-sp-${row.key}`).min_w(0).max_w(160).truncate().text_size(11).font_medium().text_color(t.muted).child(row.space)))
+    // (cut in the middle, both ends kept: two "ceo-assistant-…" spaces stay apart; round 4c)
+    .when(Boolean(row.space), (e) => e.child(middleCut(row.space, { id: `hd-sp-${row.key}`, tooltip: true, room: 160, size: 11 }).max_w(160).text_size(11).font_medium().text_color(t.muted)))
     .when(Boolean(row.hire), (e) => e.child(hireText(row, t)))
     .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(`${row.title} · ${row.where}`));
   return h_flex().id(`hd-${row.key}`).flex_none().h(42).pl(4).pr(8).gap(9).items_center().rounded(8)
@@ -644,8 +659,10 @@ function rosterRowSlim(row, env, ui, t, _calm, cols = SLIM_COLS) {
     .hover((s) => s.bg(t.hover))
     .tooltip(tip)
     .child(div().w(3).h(16).flex_none().rounded(2).bg(tone(row.stripe, t)))
-    // a space with one hero has no header line: its row names the space (round 4)
-    .when(Boolean(row.space), (e) => e.child(div().id(`hd-sp-${row.key}`).w(spaceW).flex_none().truncate().text_size(11.5).font_medium().text_color(t.muted).child(row.space)))
+    // a space with one hero has no header line: its row names the space (round 4), cut in the
+    // middle so two "ceo-assistant-…" spaces stay apart ("ceo-assi…res-2"; the row's tooltip names
+    // it whole; round 4c)
+    .when(Boolean(row.space), (e) => e.child(middleCut(row.space, { id: `hd-sp-${row.key}`, room: spaceW, size: 11.5 }).w(spaceW).flex_none().text_size(11.5).font_medium().text_color(t.muted)))
     .when(!row.space && !!cols.indent, (e) => e.child(div().w(spaceW).flex_none()))
     .child(div().w(cols.name ?? SLIM_COLS.name).flex_none().truncate().text_size(12).font_medium().text_color(off ? t.muted : t.fg).child(row.name))
     .child(div().w(42).flex_none().font_family(MONO).text_size(10.5).text_color(t.muted).child(row.level))

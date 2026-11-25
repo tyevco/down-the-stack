@@ -258,6 +258,35 @@ test("party: the chest chip claims the chest without focusing", async () => {
   assert.equal(runs("pane.focus").length, 0);
 });
 
+test("party: space names that share a start are cut in the middle in the group headers ('ceo-assi…res-2') where they may not fit, the whole name on hover (round 4c)", async () => {
+  const textOf = (n) => (n.type === "text" ? n.text : n.children.map(textOf).join(""));
+  const names = ["ceo-assistant-res-2", "ceo-assistant-writer"];
+  const groups = P.scenarios.six.groups.map((g, i) => (g.offDuty ? g : { ...g, name: names[i] ?? g.name }));
+  for (const width of [200, 268]) {
+    const { m } = await mount("party", { ...P.scenarios.six, groups }, { width });
+    const tails = [];
+    for (const g of groups.filter((x) => !x.offDuty)) {
+      const n = m.node(`pg-${g.key}-name`);
+      assert.equal(textOf(n), g.name, `${width}: the whole name`);
+      const tip = n.methods.find((x) => x[0] === "tooltip")?.[1][0] ?? null;
+      if (width === 268) {
+        // 19 or 20 characters at 11 px fit a 268 px sidebar's header: one plain box, as before
+        assert.equal(n.children[0].type, "text");
+        assert.equal(tip, null);
+        continue;
+      }
+      // a 200 px sidebar: a head that gives way and a tail that stays whole, the name on hover
+      const [head, tail] = n.children;
+      assert.ok(head.has("truncate") && head.has("min_w"), "the head gives way");
+      assert.ok(tail.has("flex_none"), "the tail stays whole");
+      tails.push(tail.children[0].text);
+      assert.equal(tip, g.name);
+    }
+    if (width === 200) assert.deepEqual(tails, ["res-2", "writer"], "the two headers end apart");
+    assert.deepEqual(m.errors, []);
+  }
+});
+
 test("party: a folded off-duty group shows its pending chests (gold chest and count); none without", async () => {
   const textOf = (n) => (n.type === "text" ? n.text : n.children.map(textOf).join(""));
   const isIn = (n, root) => { for (let e = n; e; e = e.parent) if (e === root) return true; return false; };

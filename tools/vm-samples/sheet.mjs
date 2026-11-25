@@ -626,8 +626,9 @@ function junoCareer() {
       title: "Rebind a live agent",
       hint: "Move an agent that plays as a new hero or a contractor onto Juno. Its current hero goes off duty.",
       options: [
-        action("rebind:t9", "Bind", "rebind", { heroId: JUNO, address: "t9" }, { tooltip: "Claude Code in docs-site · “Write the changelog” (Lv 4 Intern)" }),
-        action("rebind:t12", "Bind", "rebind", { heroId: JUNO, address: "t12" }, { tooltip: "Codex in herdr-app · “Fix the release script” (contractor)" }),
+        // (line, round 4c: the tooltip in three parts, the space cut in the middle by the sheet)
+        { ...action("rebind:t9", "Bind", "rebind", { heroId: JUNO, address: "t9" }, { tooltip: "Claude Code in docs-site · “Write the changelog” (Lv 4 Intern)" }), line: ["Claude Code in ", "docs-site", " · “Write the changelog” (Lv 4 Intern)"] },
+        { ...action("rebind:t12", "Bind", "rebind", { heroId: JUNO, address: "t12" }, { tooltip: "Codex in herdr-app · “Fix the release script” (contractor)" }), line: ["Codex in ", "herdr-app", " · “Fix the release script” (contractor)"] },
       ],
     },
   };

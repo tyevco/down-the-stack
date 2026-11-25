@@ -733,15 +733,19 @@ describe("coffee, crashes, rest (D§5.6, D§2.2)", () => {
     stepWorld(w, null, 1);
     assert.equal(live.crashedUntil, 0);
     assert.equal(live.hp, live.maxHp * 0.5);
+    const ev = makeEv();
+    heroOf(w, 1).name = "Tamsin the Composable";
     for (let k = 0; k < 2; k++) {
       live.hp = 1;
       live.lane[0].swingTick = live.ct + 1;
       live.engagedUid = live.lane[0].uid;
-      for (let t = 0; t < 8 && !live.dropMap; t++) stepWorld(w, null, 1);
+      for (let t = 0; t < 8 && !live.dropMap; t++) stepWorld(w, ev, 1);
     }
     assert.ok(live.dropMap, "dropped a map");
     assert.equal(live.dropMap.mapId, "1-1");
     assert.equal(live.mapId, "1-1");
+    // its note is about that hero, its short form without the epithet (round 4c)
+    assert.deepEqual(ev.noteTag("Tamsin the Composable fell back to 1-1"), { heroId: 1, short: "Tamsin fell back to 1-1" });
   });
 
   test("restTick: 5% regen, a cup per 30 ticks (paid), Fresh Eyes only after a first Seal, capped", () => {
@@ -790,6 +794,8 @@ describe("world progress (D§9.1, D§9.8, D§10.5)", () => {
     for (let t = 0; t < 600 && (w.state.herd.quota["1-2"] || 0) < 40; t++) stepWorld(w, ev, 1);
     assert.equal(w.state.herd.quota["1-2"], 40);
     assert.ok(ev.notes.some((n) => n.startsWith("1-2 cleared")));
+    // round 4c: its short form keeps the point where the next map's name has no room
+    assert.deepEqual(ev.noteTag(/^1-2 cleared/), { short: "1-2 cleared: 1-3 open" });
     stepWorld(w, ev, 60);
     assert.equal(w.state.herd.quota["1-2"], 40, "quota stops at 40");
     assert.ok(w.state.herd.bt[0] >= 40);

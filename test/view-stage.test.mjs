@@ -1525,7 +1525,7 @@ test("header note: the hires of one tick (the 04:00 game day turn) are one note,
   assert.equal(merged.text, `Hired 6 contractors: ${first(heroes[0].name)}, ${first(heroes[1].name)} and 4 more`);
   assert.equal(merged.tooltip, heroes.map((h) => `Hired: ${h.name} (was a contractor)`).join("\n"));
   assert.equal(merged.heroId, null, "herd-wide");
-  assert.equal(merged.short, "Hired 6 contractors", "its short form, for a strip with no room for the names (round 4b integrator)");
+  assert.deepEqual(merged.short, ["Hired 6 contractors"], "its short form, for a strip with no room for the names (round 4b integrator; a list of forms since round 4c)");
   // one note, the same key and text, while any of its hires' 3 s slots runs (6 × 3 s)
   const shown = seen.filter((n) => n && n.key === merged.key);
   assert.ok(shown.length >= 17 && shown.length <= 18, `${shown.length} ticks`);

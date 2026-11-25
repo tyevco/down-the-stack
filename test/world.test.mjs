@@ -551,6 +551,8 @@ describe("herd trackers in the tick", () => {
     assert.equal(w.rt.banner.text, "The herd reached frame #2");
     assert.ok(w.state.herd.badges.includes("zero_warnings"));
     assert.ok(w.rt.notes.some((n) => n.text === "New zone: Callback Caverns"));
+    // round 4c: a short form for a crowded strip
+    assert.deepEqual(w.rt.notes.find((n) => n.text === "New zone: Callback Caverns").short, ["Callback Caverns open"]);
   });
 
   test("Pair Programmer counts seconds two guild-mates quest in one room", () => {
@@ -853,9 +855,15 @@ describe("commands (ARCHITECTURE §3.5)", () => {
     assert.equal(W.command(w, "retire", { heroId: h1.id }).error, "Retirement needs Lv 30");
     h1.L = 35;
     h1.pend.push({ min: 10, fmin: 0, title: "t", at: T0, sealFactor: 1 });
+    h1.name = "Wren of the Long Uptime";
     const r = W.command(w, "retire", { heroId: h1.id }, now);
     assert.equal(r.ok, true);
     assert.ok(!w.state.heroes.includes(h1));
+    // its note is about that hero, who has left the roster: by the camp, "Wren retired" where the
+    // whole text has no room (round 4c)
+    const n = w.rt.notes.find((x) => x.text === "Wren of the Long Uptime retired to the Hall of Fame");
+    assert.equal(n.heroId, h1.id);
+    assert.deepEqual(n.short, ["Wren retired to the Hall of Fame", "Wren retired"]);
     assert.equal(w.state.herd.fame.length, 1);
     assert.ok(near(w.state.herd.seals, 1), "its pending chest was claimed in full first");
     assert.ok(!w.rt.live.has(h1.id));

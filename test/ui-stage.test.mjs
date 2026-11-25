@@ -675,10 +675,11 @@ test("header notes: a herd-wide one at the strip's right end by the camp, one ab
       const bl = methodArg(b, "left"), bw = methodArg(b, "w");
       const t = textOf(b);
       const inRoom = bl >= room.x - 0.5 && bl + bw <= room.x + room.w + 0.5;
-      // (a room header with no 60 px to spare, under the folded-room style or not: the herd's corner)
+      // (a room header with no 60 px to spare, under the folded-room style or not: the herd's corner;
+      // round 4c: also when the note fits whole there and not over its room, rather than cut)
       const roomFree = room.w - Math.min(headerFit(room, room.w, false).used, headerFit(room, room.w, true).used) - 8;
       const corner = Math.abs(bl + bw - (width - 4)) < 0.6;
-      assert.ok(inRoom || (roomFree < 60 && corner), `${name} ${width}: over ${room.key} (${bl}..${bl + bw} in ${room.x}..${room.x + room.w}, ${roomFree} px free)`);
+      assert.ok(inRoom || (corner && (roomFree < 60 || t === mine.text)), `${name} ${width}: over ${room.key} (${bl}..${bl + bw} in ${room.x}..${room.x + room.w}, ${roomFree} px free)`);
       if (inRoom) placedInRoom++;
       if (t !== mine.text) {
         assert.ok(t.endsWith("…") && /[\s,:]/.test(mine.text[t.length - 1] ?? " "), `cut between words: "${t}"`);
@@ -736,6 +737,60 @@ test("header notes (round 4b integrator): the hires of one tick show their short
     assert.deepEqual(problems(mod), []);
   }
   assert.ok(seen.includes(herd.short), `a crowded strip shows the short form: ${seen.join(" | ")}`);
+});
+
+test("header notes (round 4c): a note about one hero shows its longest short form whole where the text does not fit; one about a hero with no room sits by the camp, never over another hero's room header", async () => {
+  const textOf = (n) => n.children.filter((c) => c.type === "text").map((c) => c.text).join("");
+  const at = (n, m) => methodsOf(n, m).at(-1)?.[0];
+  const headerFit = stageMod.headerFit;
+  const full = "Tamsin the Composable: a chest opened Unreviewed (half value)";
+  const short = ["Tamsin: a chest opened Unreviewed (half value)", "Tamsin: chest opened Unreviewed", "Tamsin: chest Unreviewed"];
+  const forms = [full, ...short];
+  let corner = 0, own = 0;
+  for (const name of ["crowd", "late", "midgame"]) {
+    for (const width of [600, 1171]) {
+      const base = makeScenario(name, { width, height: 200 });
+      const where = `${name} ${width}`;
+      // off duty (no room on the stage): by the camp / at the strip's ends, never over a room's title
+      // or another room's header; the longest form that fits there, whole
+      const off = { key: "note:off", text: full, short, color: "#FFF4D6", tooltip: full, heroId: 9999 };
+      const a = (await mountStage({ ...base, headerNote: off }, { width })).mod.node(off.key);
+      assert.ok(a, `${where}: shown`);
+      const l = at(a, "left"), w = at(a, "w"), t = textOf(a);
+      // whole where the strip's ends have room for the shortest form (every crowd and late strip
+      // here); else the shortest cut between words (midgame at 600: 164 px by the camp)
+      if (name !== "midgame") assert.ok(forms.includes(t), `${where}: a whole form, never cut ("${t}")`);
+      else assert.ok(forms.includes(t) || (t.endsWith("…") && short[2].startsWith(t.slice(0, -1))), `${where}: "${t}"`);
+      assert.equal(at(a, "tooltip"), full, `${where}: the whole text on hover`);
+      const right = Math.abs(l + w - (width - 4)) < 0.6;
+      const left = Math.abs(l - 4) < 0.6;
+      assert.ok(right || left, `${where}: at the strip's right end by the camp, or its left end (${l} + ${w})`);
+      const last = base.rooms.reduce((m, r) => (r.x + r.w > m.x + m.w ? r : m));
+      for (const r of base.rooms) {
+        if (!(l < r.x + r.w - 0.5 && l + w > r.x + 0.5)) continue;
+        // only the free end of the last room's header, as the herd-wide notes by the camp do
+        assert.equal(r, last, `${where}: over ${r.key}'s header`);
+        const used = Math.min(headerFit(r, r.w, false).used, headerFit(r, r.w, true).used);
+        assert.ok(l >= r.x + used - 0.5, `${where}: over ${r.key}'s title`);
+      }
+      corner++;
+      // about a hero with a room: its room's header, the longest form that fits there whole
+      const hero = base.heroes.find((h) => h.heroId != null && Number.isFinite(h.x));
+      const room = base.rooms.find((r) => hero.x >= r.x && hero.x < r.x + r.w);
+      const mine = { ...off, key: "note:mine", heroId: hero.heroId };
+      const b = (await mountStage({ ...base, headerNote: mine }, { width })).mod.node(mine.key);
+      assert.ok(b, `${where}: shown`);
+      const bt = textOf(b), bl = at(b, "left"), bw = at(b, "w");
+      assert.ok(!bt.endsWith("…") || bt.length <= short[2].length, `${where}: whole, or the shortest form cut ("${bt}")`);
+      if (bl >= room.x - 0.5 && bl + bw <= room.x + room.w + 0.5) {
+        own++;
+        const free = room.w - Math.min(headerFit(room, room.w, false).used, headerFit(room, room.w, true).used) - 8;
+        const longest = forms.find((f) => f.length * 6 + 24 <= Math.min(free, width - 16));
+        if (longest) assert.equal(bt, longest, `${where}: the longest form that fits its room (${free} px)`);
+      }
+    }
+  }
+  assert.ok(corner === 6 && own > 0, `${corner} / ${own}`);
 });
 
 test("stillness: only campfire glows and blocked bubbles move", async () => {

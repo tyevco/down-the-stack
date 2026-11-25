@@ -11,7 +11,7 @@ import {
   TUNING as T, BUILDINGS, BUILDING_IDX, BUG_TRACKER, ZONES, MAPS, MAP_BY_ID, BADGES, BADGE_BY_ID, BOSSES,
   CLASSES, TROPHY, BACKLOG, RARITIES, KEEPSAKES,
 } from "./data.js";
-import { buildingCost, releaseOf, releaseSeals, releaseLabel, trackerTier, freshEyesCap, LOG_MAX, logMax } from "./formulas.js";
+import { buildingCost, releaseOf, releaseSeals, releaseLabel, trackerTier, freshEyesCap, LOG_MAX, logMax, shortName } from "./formulas.js";
 import { stashPut, itemName } from "./items.js";
 
 // The journal length (D§13.3 60 lines; balance: up to 120, docs/BALANCE.md §10) lives in
@@ -586,7 +586,10 @@ export function retire(world, heroId, nowMs, ev) {
   const msg = `${hero.name} retired to the Hall of Fame`;
   if (ev) {
     ev.journal?.("retire", hero.id, hero.name, hero.L, hero.name);
-    ev.note?.(msg);
+    // about one hero who has left the roster (round 4c): the stage puts it by the camp, never over
+    // another hero's room, and says "Tamsin retired" where the whole text has no room
+    const sn = shortName(hero.name);
+    ev.note?.(msg, null, { heroId: hero.id, short: [`${sn} retired to the Hall of Fame`, `${sn} retired`] });
     ev.major?.();
   } else {
     journal(state, "retire", hero.id, hero.name, hero.L, nowMs, hero.name);

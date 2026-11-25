@@ -179,9 +179,11 @@ function guard(world, where, fn) {
  * Queues a header note (D§11.15: one at a time, NOTE_TICKS each, at most NOTE_QUEUE waiting).
  * tag (optional, round 4b): what the note is about, for the stage (view/stage.js headerNote):
  * {kind: "hire", heroId, name, promoted} for a hire (agents.js), {heroId} for a note about one hero
- * (its room). The hires of one tick (six at the 04:00 game day turn) are one note on the stage, so
- * every hire after a tick's first is queued without counting against NOTE_QUEUE (`extra`): a note
- * raised meanwhile still shows, after them.
+ * (its room); `short` (round 4c, any note): shorter forms, longest first, that keep its point (the
+ * event, a hero's first name) for the stage to show whole where the text does not fit ("Tamsin:
+ * chest opened Unreviewed"; the whole text goes in the tooltip). The hires of one tick (six at the
+ * 04:00 game day turn) are one note on the stage, so every hire after a tick's first is queued
+ * without counting against NOTE_QUEUE (`extra`): a note raised meanwhile still shows, after them.
  */
 function pushNote(rt, text, color, tag) {
   const t = String(text);
@@ -197,8 +199,16 @@ function pushNote(rt, text, color, tag) {
   if (tag && Number.isFinite(tag.heroId)) n.heroId = tag.heroId;
   if (tag && typeof tag.name === "string") n.name = tag.name;
   if (tag && tag.promoted) n.promoted = true;
+  const short = tag ? shortForms(tag.short, t) : null;
+  if (short) n.short = short;
   if (extra) n.extra = true;
   q.push(n);
+}
+
+/** A note tag's short forms as a list of strings, longest first, none equal to the text; null if none. */
+function shortForms(short, text) {
+  const list = (Array.isArray(short) ? short : short == null ? [] : [short]).map((x) => String(x)).filter((x) => x && x !== text);
+  return list.length ? list : null;
 }
 
 function prio(f) {
@@ -791,7 +801,7 @@ function bossKills(world, snap, ev) {
   if (z > rt.zoneSeen) {
     H.pourBank(state);
     const zone = z < ZONES.length ? ZONES[z] : BACKLOG;
-    ev.note(`New zone: ${zone.name}`);
+    ev.note(`New zone: ${zone.name}`, null, { short: `${zone.name} open` });
     ev.journal("zone", 0, zone.name, z);
     changed = true;
   }
@@ -1114,7 +1124,7 @@ const COMMANDS = {
     if (!(Number.isInteger(i) && BUILDINGS[i])) return fail("Unknown building");
     const r = H.buy(world.state, i);
     if (!r.ok) return fail(r.error);
-    ev.note(`Localhost: ${BUILDINGS[i].name} ${r.level}`);
+    ev.note(`Localhost: ${BUILDINGS[i].name} ${r.level}`, null, { short: `${BUILDINGS[i].name} ${r.level}` });
     return { ok: true, msg: `${BUILDINGS[i].name} ${r.level} (-${fmtNum(r.cost)} gold)` };
   },
 

@@ -57,9 +57,11 @@ Left to right, top to bottom (`layouts/Down-the-Stack.json`):
   - Termlings stand in fixed slots with a name and level tag under their feet. Mobs face left
     towards them.
   - Chests, campfires, bubbles, damage numbers and banners are drawn over that.
-  - One header note at a time in the header band: a note about one hero over that hero's room, a
-    herd-wide one at the strip's right end by the camp, cut only between words with the whole
-    text in its tooltip. The hires of one moment are one note ("Hired 6 contractors: Coda, Tobin
+  - One header note at a time in the header band: a note about one hero over that hero's room (by
+    the camp when it has none, never over another hero's room), a herd-wide one at the strip's
+    right end by the camp. Where the whole text has no room, a short form keeps the point
+    ("Tamsin: chest opened Unreviewed", "Hired Nell"), with the whole text in its tooltip; a note
+    is cut only between words. The hires of one moment are one note ("Hired 6 contractors: Coda, Tobin
     and 4 more", or "Hired 6 contractors" on a crowded strip; every hire in the tooltip) that stays
     as long as their six notes would.
   - When a zone boss is challenged, its room becomes an arena with the boss (112×96 px art), an HP
@@ -306,6 +308,13 @@ something.
   moment show as one header note.
 - On a full roster, restarting a low-level hero's agent in its pane keeps that hero while
   Contractors wait.
+- In the Herd panel's Roster at 640 px, two spaces that share a start ("ceo-assistant-res-2",
+  "ceo-assistant-writer") read "ceo-assi…res-2" and "ceo-assi…writer"; hovering shows the whole name.
+- On an off-duty hero's sheet (Career tab) at 640 px, Rebind lines for agents in
+  "ceo-assistant-search-eng" and "ceo-assistant-billing-eng" end "…search-eng" and "…billing-eng";
+  the Bind button's hover shows the whole line.
+- An off-duty hero's chest that opens Unreviewed shows "Tamsin: chest Unreviewed" (or longer, where
+  it fits) by the camp, the whole line in its tooltip.
 - With "Collapse the stage when nothing works" on, the stage hides a minute after the last agent
   stops working and shows again when one starts.
 - With a notification turned on, its milestone posts one toast and no sound. Clicking the toast

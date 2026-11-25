@@ -18,7 +18,7 @@
 import { TUNING as T, CLASSES, CLASS_IDX, MAP_BY_ID, SLOTS, AFFIX_IDX, BACKLOG, KEEPSAKE_IDX } from "./data.js";
 import {
   chestTierOf, shiftSealMult, shiftKillMult, shiftBand, chestGold, chestXP, mobXP, gap as gapMult,
-  crowding as crowdingMult, partyXp, iRef, itemTier, polishMax, autoOn, cutText,
+  crowding as crowdingMult, partyXp, iRef, itemTier, polishMax, autoOn, cutText, shortName,
 } from "./formulas.js";
 import { newHero, stats, grantXP, recordTask, autoRanks, careerOf, lookOf } from "./heroes.js";
 import { rollChest, baseIdFor, stashAdd, repairItem, newItem, hatToneOf, skipUidsToTone } from "./items.js";
@@ -633,8 +633,10 @@ function promote(world, address, c, ev) {
   const text = `Hired: ${c.name} (was a contractor)`;
   emitJournal(world, ev, "hired", id, text, c.L);
   if (ev) {
-    // tagged (round 4b): the stage merges the hires of one tick into one note (view/stage.js)
-    ev.note?.(text, null, { kind: "hire", heroId: id, name: c.name, promoted: true });
+    // tagged (round 4b): the stage merges the hires of one tick into one note (view/stage.js);
+    // its short forms drop the epithet (round 4c)
+    const sn = shortName(c.name);
+    ev.note?.(text, null, { kind: "hire", heroId: id, name: c.name, promoted: true, short: [`Hired: ${sn} (was a contractor)`, `Hired ${sn}`] });
     ev.major?.();
   }
   return c;
@@ -794,7 +796,7 @@ function bindAgent(world, a, snap, ev, claims, spare) {
     state.heroes.push(hero);
     noteHire(state);
     emitJournal(world, ev, "hire", hero.id, hero.name, 1);
-    if (ev) ev.note?.(`New hire: ${hero.name}`, null, { kind: "hire", heroId: hero.id, name: hero.name });
+    if (ev) ev.note?.(`New hire: ${hero.name}`, null, { kind: "hire", heroId: hero.id, name: hero.name, short: `New hire: ${shortName(hero.name)}` });
   }
   let contractor = false;
   if (!hero) {
@@ -1345,7 +1347,8 @@ export function closeTask(world, hero, live, reason, ev) {
     if (world.rt && world.rt.apGear) world.rt.apGear.add(hero.id);
     if (ev) {
       const c = CLASSES[hero.cls];
-      ev.note?.(`${hero.name}: provisional ${c.name}`, null, { heroId: hero.id });
+      const sn = shortName(hero.name);
+      ev.note?.(`${hero.name}: provisional ${c.name}`, null, { heroId: hero.id, short: [`${sn}: provisional ${c.name}`, `${sn}: ${c.name}`] });
       emitJournal(world, ev, "class", hero.id, c.name, hero.cls);
     }
   }
@@ -1485,7 +1488,15 @@ export function openChests(world, hero, opts = {}, ev) {
     const unseen = unseenLosses(state);
     emitJournal(world, ev, "unrev", hero.id, title, out.opened);
     state.herd.unseenUnrev = unseen + out.opened;
-    if (ev) ev.note?.(`${hero.name}: ${out.opened === 1 ? "a chest" : `${out.opened} chests`} opened Unreviewed (half value)`, null, { heroId: hero.id });
+    if (ev) {
+      // the short forms keep the point (round 4c): whose chest, opened Unreviewed
+      const sn = shortName(hero.name);
+      const what = out.opened === 1 ? "a chest" : `${out.opened} chests`;
+      ev.note?.(`${hero.name}: ${what} opened Unreviewed (half value)`, null, {
+        heroId: hero.id,
+        short: [`${sn}: ${what} opened Unreviewed (half value)`, `${sn}: ${out.opened === 1 ? "chest" : what} opened Unreviewed`, `${sn}: ${out.opened === 1 ? "chest" : "chests"} Unreviewed`],
+      });
+    }
   }
   if (ev) {
     if (out.gold > 0) ev.fx?.("coin", { heroId: hero.id, value: Math.round(out.gold) });

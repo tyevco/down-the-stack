@@ -72,3 +72,50 @@ test("the stage's mdr_* tokens and the dialogs' herdr tokens go through hex() to
   assert.equal(d.input, "#ffffff24");
   assert.equal(d.solid, undefined, "unusable: dialogTheme's fallback applies");
 });
+
+test("splitTail / middleCut: a name cut in the middle keeps both ends ('ceo-assi…res-2'), never half an emoji (round 4c)", async () => {
+  const { splitTail, middleCut } = await import("../mods/down-the-stack/ui/kit.js");
+  assert.deepEqual(splitTail("ceo-assistant-res-2"), ["ceo-assistant-", "res-2"], "a last part under 3 characters takes the one before");
+  assert.deepEqual(splitTail("ceo-assistant-writer"), ["ceo-assistant-", "writer"]);
+  assert.deepEqual(splitTail("ceo-assistant-lead"), ["ceo-assistant-", "lead"]);
+  assert.deepEqual(splitTail("my project notes"), ["my project ", "notes"]);
+  assert.deepEqual(splitTail("herdr-app"), ["herdr-", "app"]);
+  assert.deepEqual(splitTail("docs"), ["docs", ""], "short: no tail");
+  assert.deepEqual(splitTail("verylongsinglewordname"), ["verylongsingleword".slice(0, 16), "rdname"], "no separator: the last 6");
+  assert.deepEqual(splitTail("platform-infrastructure"), ["platform-infrastr", "ucture"], "a last part over 8: the last 6");
+  assert.deepEqual(splitTail("ceo-assistant-production-2"), ["ceo-assistant-produc", "tion-2"], "a short last part whose neighbour is too long: the last 6");
+  const rocket = "\u{1F680}";
+  for (const name of [`space${rocket}${rocket}${rocket}${rocket}`, `abcdefgh${rocket}ij`, `${rocket.repeat(9)}`, `a-b-${rocket}${rocket}`]) {
+    const [h, t] = splitTail(name);
+    assert.equal(h + t, name);
+    assert.ok(h.isWellFormed() && t.isWellFormed(), `${JSON.stringify(name)} -> ${JSON.stringify([h, t])}`);
+  }
+  // the element: a head that truncates and a tail that never shrinks; the whole name on hover
+  const el = M.nodeOf(middleCut("ceo-assistant-res-2", { id: "x", tooltip: true }));
+  assert.equal(el.methods.find((m) => m[0] === "tooltip")?.[1][0], "ceo-assistant-res-2");
+  const [head, tail] = el.children;
+  assert.ok(head.methods.some((m) => m[0] === "truncate") && head.methods.some((m) => m[0] === "min_w"));
+  assert.equal(head.children[0].text, "ceo-assistant-");
+  assert.ok(tail.methods.some((m) => m[0] === "flex_none"));
+  assert.equal(tail.children[0].text, "res-2");
+  // a short name: one plain box, no tooltip
+  const short = M.nodeOf(middleCut("docs", { tooltip: true }));
+  assert.equal(short.children[0].text, "docs");
+  assert.ok(short.methods.some((m) => m[0] === "truncate") && !short.methods.some((m) => m[0] === "tooltip"));
+  // a name that surely fits its box (0.6 em a character) stays one plain box
+  const fits = M.nodeOf(middleCut("ceo-assistant-res-2", { tooltip: true, room: 160, size: 11 }));
+  assert.equal(fits.children[0].text, "ceo-assistant-res-2");
+  assert.ok(!fits.methods.some((m) => m[0] === "tooltip"));
+  assert.equal(M.nodeOf(middleCut("ceo-assistant-res-2", { room: 92, size: 11.5 })).children.length, 2, "92 px: split");
+  // a head ending in a space keeps it as a no-break space (a text box drops a trailing space)
+  assert.equal(M.nodeOf(middleCut("my project notes")).children[0].children[0].text, "my project ");
+  // (reviewer) a roomier line takes a longer tail, as many trailing parts as fit: "…search-eng" and
+  // "…billing-eng" stay apart where the default 8 leaves both "…eng"
+  assert.deepEqual(splitTail("ceo-assistant-search-eng"), ["ceo-assistant-search-", "eng"]);
+  assert.deepEqual(splitTail("ceo-assistant-search-eng", 12), ["ceo-assistant-", "search-eng"]);
+  assert.deepEqual(splitTail("ceo-assistant-billing-eng", 12), ["ceo-assistant-", "billing-eng"]);
+  assert.deepEqual(splitTail("ceo-assistant-res-2", 12), ["ceo-assistant-", "res-2"]);
+  assert.deepEqual(splitTail("a-b-c-d-e-f-g-h-i-j", 12), ["a-b-c-d-", "e-f-g-h-i-j"], "the first part stays in the head");
+  assert.deepEqual(splitTail("a-bcdefghijklmnop", 12), ["a-bcdefghij", "klmnop"], "no trailing parts within 12: the last 6");
+  assert.equal(M.nodeOf(middleCut("ceo-assistant-billing-eng", { tail: 12 })).children[1].children[0].text, "billing-eng");
+});

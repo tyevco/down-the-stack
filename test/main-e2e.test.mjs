@@ -16,7 +16,8 @@
 //     its width, and its chip is never clipped (round 4b U1).
 // Round 4b also: a promoted Contractor keeps its look (R1); restarting an agent on a full roster
 // keeps its hero, and a hero off duty makes room only after its 15-minute grace (R2); the hires of
-// the 04:00 turn are one header note by the camp (U3).
+// the 04:00 turn are one header note by the camp (U3). Round 4c: an off-duty hero's note shows its
+// short form whole by the camp, never over another hero's room.
 
 import "../tools/mock/register.mjs";
 import { test } from "node:test";
@@ -589,5 +590,48 @@ test("round 4b U3: the six hires of the 04:00 turn are one header note at the st
   }
   assert.ok(keys.slice(0, 16).every((x) => x === note.id), keys.join(" | "));
   assert.equal(keys[19], null, "gone once its time has run");
+  for (const m of [r.stage, r.party]) assert.deepEqual(m.errors, []);
+});
+
+test("round 4c: an off-duty hero's 'chest opened Unreviewed' note shows its short form whole by the camp, never over another hero's room, its whole text on hover", async () => {
+  M.resetState();
+  const d = new Date(Date.UTC(2026, 10, 24, 12, 0));
+  d.setHours(14, 0, 0, 0);
+  // twelve agents, each in a space of its own (as the owner's window): a room each, a crowded strip
+  const fx = liveOf(12);
+  const tab = fx.spaces[0].tabs[0];
+  fx.spaces = fx.agents.map((a, i) => ({ ...fx.spaces[0], id: `s${i + 1}`, index: i + 1, name: `team-${i + 1}`, active: i === 0, tabs: [{ ...tab, id: `tab${i + 1}`, panes: 1 }] }));
+  fx.agents = fx.agents.map((a, i) => ({ ...a, space: `s${i + 1}`, space_name: `team-${i + 1}`, tab: `tab${i + 1}` }));
+  fx.panes = fx.agents.map((a) => ({ ...M.paneFor(a), status: "working" }));
+  fx.terminals = fx.agents.map((a) => ({ ...M.terminalFor(a), status: "working" }));
+  const r = await rig([["stage", { role: "stage" }, 600, 200], ["party", { role: "party" }, 268, 900]], fx, d.getTime());
+  const { host } = r;
+  for (let i = 0; i < 60; i++) await M.tickAll(1000);
+  const h = host.world.state.heroes.find((x) => x.addr === "t3");
+  assert.ok(h, "t3 plays a hero");
+  h.name = "Tamsin the Composable";
+  closeTerminal("t3");
+  for (let i = 0; i < 3; i++) await M.tickAll(1000);
+  assert.equal(host.world.rt.live.has(h.id), false, "off duty");
+  while (host.world.rt.notes.length) await M.tickAll(1000);
+  // its chest has waited a day unclaimed: it opens Unreviewed at the next tick
+  h.pend = [{ min: 12, fmin: 0, title: "Spike", at: M.mockNow() - DAY - 1000, sealFactor: 1 }];
+  const full = "Tamsin the Composable: a chest opened Unreviewed (half value)";
+  let note = null;
+  for (let i = 0; i < 70 && !note; i++) {
+    await M.tickAll(1000);
+    r.stage.render();
+    note = r.stage.findAll((n) => typeof n.id === "string" && n.id.startsWith("note:")).find((n) => tipOf(n) === full) ?? null;
+  }
+  assert.ok(note, "the note shows, its whole text on hover");
+  // the 600 px strip has room by the camp for "Tamsin: chest Unreviewed", not for the longer forms
+  assert.equal(textUnder(note), "Tamsin: chest Unreviewed");
+  const num = (m) => note.methods.find((x) => x[0] === m)[1][0];
+  const vm = host.view("stage", { width: 600, height: 200, nowMs: M.mockNow() });
+  assert.ok(vm.overflow, "a camp");
+  assert.ok(Math.abs(num("left") + num("w") - 596) < 0.6, `at the strip's right end, by the camp (${num("left")} + ${num("w")})`);
+  // never over another hero's room header: at most the free end of the last room's, past its title
+  const last = vm.rooms.reduce((m, x) => (x.x + x.w > m.x + m.w ? x : m));
+  for (const room of vm.rooms) if (room !== last) assert.ok(num("left") >= room.x + room.w - 0.5, `clear of ${room.key}`);
   for (const m of [r.stage, r.party]) assert.deepEqual(m.errors, []);
 });

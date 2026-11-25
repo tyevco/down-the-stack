@@ -127,6 +127,56 @@ export function own(el) {
   return el.on_mouse_down("left", (_e, cx) => cx.stop_propagation());
 }
 
+/**
+ * A name split for a cut in the middle (round 4c): [head, tail], head + tail === the name. The tail
+ * is the name's trailing parts after a separator (- _ . / : or a space), as many as fit in `max`
+ * characters ("res-2" of "ceo-assistant-res-2"; with max 12, "search-eng" of
+ * "ceo-assistant-search-eng"); the first part always stays in the head. A tail under 3 characters
+ * ("2") or none within `max` gives way to the name's last 6. It never splits a surrogate pair (half
+ * an emoji: herdr refuses a lone surrogate in any text). A name of `max` characters or fewer has
+ * no tail: [name, ""].
+ */
+export function splitTail(s, max = 8) {
+  const t = String(s ?? "");
+  if (t.length <= max) return [t, ""];
+  const SEP = /[-_./: ]/;
+  let at = -1;
+  for (let i = t.length - 2; i > 0; i--) {
+    if (!SEP.test(t[i])) continue;
+    if (t.length - (i + 1) > max) break;
+    at = i + 1;
+  }
+  if (at < 0 || t.length - at < 3) at = t.length - 6;
+  const c = t.charCodeAt(at);
+  if (c >= 0xdc00 && c <= 0xdfff) at -= 1;
+  return [t.slice(0, at), t.slice(at)];
+}
+
+/**
+ * A name that is cut in the middle when its box is too narrow (round 4c): the head shrinks with
+ * "…" while the tail (splitTail) stays whole, "ceo-assi…res-2", so names that share a start (two
+ * spaces "ceo-assistant-…") stay apart. The caller sizes the box (w, flex) and sets the text style
+ * on it. o.room / o.size (px): the box's width and font size; a name that surely fits (0.6 em a
+ * character, wider than the UI font's) stays one plain box, as does a name with no tail: three
+ * elements only where a cut may come. o.tail: the tail's most characters (splitTail's max, 8; a
+ * roomier line takes more, so "…search-eng" and "…billing-eng" stay apart). o.tooltip puts the
+ * whole name on hover when it is split (a row whose own tooltip names it passes false).
+ */
+export function middleCut(text, o = {}) {
+  const t = String(text ?? "");
+  const fits = Number.isFinite(o.room) && Number.isFinite(o.size) && t.length * o.size * 0.6 <= o.room;
+  const [head, tail] = fits ? [t, ""] : splitTail(t, Number.isFinite(o.tail) ? o.tail : 8);
+  const el = div();
+  if (o.id) el.id(o.id);
+  if (o.tooltip && tail) el.tooltip(t);
+  if (!tail) return el.min_w(0).truncate().child(t);
+  // a head ending in a space keeps it (text boxes drop a trailing space)
+  const h = /\s$/.test(head) ? `${head.slice(0, -1)}\u00A0` : head;
+  return el.flex().flex_row().min_w(0).overflow_hidden().whitespace_nowrap()
+    .child(div().min_w(0).truncate().child(h))
+    .child(div().flex_none().child(tail));
+}
+
 export function clamp01(x) {
   return Number.isFinite(x) ? Math.max(0, Math.min(1, x)) : 0;
 }

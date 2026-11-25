@@ -823,3 +823,41 @@ describe("retreat and paused fights", () => {
     assert.deepEqual(herd.fight.ids, [1, 2]);
   });
 });
+
+describe("header notes keep their point in short forms (round 4c)", () => {
+  test("a Review's note is about its hero (first name in the short forms); a fight's notes drop the boss's name; a Postmortem and a FIXED keep theirs", () => {
+    // a Review: about one hero, "REVIEW: Hana vs …" then "REVIEW: Hana"
+    const w = makeWorld({ seed: 2, heroes: [{ cls: "hotfixer", L: 30, mapId: "3-2", rev: [0, 0] }] });
+    const h = heroOf(w, 1);
+    h.name = "Hana of the Long Uptime";
+    const ev = makeEv();
+    const f = Bo.startFight(w, "review", 0, null, ev);
+    const tag = ev.noteTag(/^REVIEW: /);
+    assert.equal(tag.heroId, h.id);
+    assert.deepEqual(tag.short, [`REVIEW: Hana vs ${f.name}`, "REVIEW: Hana"]);
+    // Bloatodon's "Install complete": the boss's name dropped (its arena names it)
+    const s = solo(4, "rubberducker", 70, 1);
+    const body = s.f.parts[0];
+    body.hp = body.maxHp = s.f.pool = s.f.mech.base = 1e9;
+    s.f.mech.deps = 9;
+    s.f.t = 119;
+    stepWorld(s.w, s.ev, 1);
+    const enrage = s.ev.calls.find((c) => c.type === "note" && /Install complete$/.test(c.text));
+    assert.equal(enrage.text, `${D.BOSSES[4].name}: Install complete`);
+    assert.equal(enrage.tag.short, "Install complete");
+    // a Postmortem: its retry time, then the word alone
+    const p = makeWorld({ seed: 3, heroes: [{ cls: "refactorer", L: 44, mapId: "4-3" }] });
+    openDoor(p, 3);
+    const pev = makeEv();
+    const pf = Bo.startFight(p, "boss", 3, [1], pev);
+    heroOf(p, 1).cups = 999;
+    pf.t = pf.timer - 20;
+    pf.enraged = true;
+    assert.equal(finish(p, pev), "lost");
+    assert.deepEqual(pev.noteTag(/^Postmortem: /).short, ["Postmortem · retry in 10 working min", "Postmortem"]);
+    // every note a fight raised: a short form is shorter and never ends cut
+    for (const c of [...ev.calls, ...s.ev.calls, ...pev.calls].filter((x) => x.type === "note" && x.tag && x.tag.short != null)) {
+      for (const x of [].concat(c.tag.short)) assert.ok(x.length < c.text.length && !x.endsWith("…"), `${c.text} -> ${x}`);
+    }
+  });
+});

@@ -95,10 +95,12 @@
  * @typedef {object} HeaderNoteVMAdditions
  * @property {string} [tooltip]  The note's whole text (the hires of one tick: every hire's own line);
  *           shown on hover when the note is cut (between words) or merged.
- * @property {string} [short]  A shorter form shown whole when the text fits nowhere whole (the
- *           hires of one tick without their names: "Hired 6 contractors").
- * @property {number|null} [heroId]  The roster hero the note is about: the note sits over that
- *           hero's room; null: herd-wide, at the strip's right end by the camp (headerNote()).
+ * @property {string|string[]} [short]  Shorter forms, longest first, shown whole where the text
+ *           does not fit (the hires of one tick without their names: "Hired 6 contractors"; a note
+ *           about one hero without its epithet: "Tamsin: chest opened Unreviewed"; round 4c).
+ * @property {number|null} [heroId]  The hero the note is about: the note sits over that hero's
+ *           room, or by the camp when it has none (never over another hero's room); null:
+ *           herd-wide, at the strip's right end by the camp (headerNote()).
  *
  * FxVM: x/y = centre at age 0; age 1 is drawn at (x + dx, y + dy) fading out (two-tick
  * pattern). levelup/pillar/stamp are multi-tick: shown statically while the VM keeps them.
@@ -1509,23 +1511,33 @@ export function noteText(text, room) {
 /**
  * The ≤ 3 s header note (D§11.15: "text only, inside the header band"). It never covers a room
  * title and never leaves the band (below it, on short stages, are heads and "!" bubbles).
- *  - About one hero (HeaderNote.heroId, e.g. a single hire): right-aligned in the header of that
- *    hero's own room when it fits whole, else whole in the Localhost scenery right beside that
- *    room (a lone first hire's slot), else cut over its room.
- *  - Herd-wide (several hires at once, a release, a badge, a new zone), or that hero's room has no
- *    room for it, or the hero is at camp: right-aligned at the strip's right end, the herd's
- *    corner by the camp chip or the Localhost scenery, reaching left over the free end of the last
- *    room's header, when it fits whole there; else whole in the left end's scenery or, as before,
- *    the room header with the most free space; else the one showing most of it, cut. A stage short enough
- *    that the camp's "+N" reaches the header band keeps the note off the camp.
- * The boss arena's header holds the slim boss HUD on short stages, so it takes no note there. The
- * text is cut only between words, its whole text (HeaderNote.tooltip) in the tooltip; a note with
- * no room for its first word is not shown.
+ * Its forms, longest first: the text, then its short forms (HeaderNote.short, round 4c: a note
+ * about one hero says its first name and the event, "Tamsin: chest opened Unreviewed"; the hires of
+ * one tick say "Hired 6 contractors"). Each place below takes the longest form that fits whole.
+ *  - About one hero (HeaderNote.heroId, e.g. a single hire) with a room on the stage: right-aligned
+ *    in the header of that room, else in the Localhost scenery right beside it (a lone first
+ *    hire's slot); else whole at the herd's corners below; else cut over its room.
+ *  - About one hero with no room of its own (off duty, at camp, retired): the herd's corners only,
+ *    never over another hero's room header (round 4c).
+ *  - Herd-wide (several hires at once, a release, a badge, a new zone): right-aligned at the strip's
+ *    right end, the herd's corner by the camp chip or the Localhost scenery, reaching left over the
+ *    free end of the last room's header; else the left end's scenery or the room header with the
+ *    most free space. A stage short enough that the camp's "+N" reaches the header band keeps the
+ *    note off the camp.
+ * Where no form fits whole, the shortest is cut between words where it shows most (the right end
+ * on a tie), its whole text (HeaderNote.tooltip) in the tooltip; a note with no room for its first
+ * word is not shown. The boss arena's header holds the slim boss HUD on short stages, so it takes
+ * no note there.
  */
 function headerNote(n, ctx, rooms) {
   const text = String(n.text ?? "");
-  const want = Math.min(ctx.W - 16, monoW(text, 10) + NOTE_PAD + 6);
-  const need = Math.min(want, NOTE_MIN_W);
+  const forms = [text];
+  for (const x of Array.isArray(n.short) ? n.short : n.short != null ? [n.short] : []) {
+    const f = String(x ?? "");
+    if (f && !forms.includes(f)) forms.push(f);
+  }
+  const widthOf = (t) => monoW(t, 10) + NOTE_PAD + 6;
+  const fits = (t, x) => widthOf(t) <= Math.min(x.free, ctx.W - 16);
   const arena = ctx.vm.boss?.arena ?? null;
   const hud = (r) => arena && ctx.H < SLIM_HUD_H && num(r.x, 0) + num(r.w, 0) > num(arena.x, 0) + 1 && num(r.x, 0) < num(arena.x, 0) + num(arena.w, 0) - 1;
   const freeOf = (r) => {
@@ -1536,58 +1548,63 @@ function headerNote(n, ctx, rooms) {
   const lo = rooms.length ? Math.min(...rooms.map((r) => num(r.x, 0))) : 0;
   const hi = rooms.length ? Math.max(...rooms.map((r) => num(r.x, 0) + num(r.w, 0))) : 0;
   const end = ctx.vm.overflow ? num(ctx.vm.overflow.x, ctx.W) : ctx.W;
-  let spot = null;
-  // about one hero: over its own room, whole; else whole in the scenery beside it (a lone first
-  // hire's 320 px slot); else over its room, cut between words
+  // about one hero with a room: its room's header, the scenery right beside it
+  let own = null;
   if (n.heroId != null) {
     const h = placed(ctx.vm.heroes).find((x) => x.heroId === n.heroId);
     const r = h ? rooms.find((x) => !hud(x) && h.x >= num(x.x, 0) && h.x < num(x.x, 0) + num(x.w, 0)) : null;
     if (r) {
-      const f = freeOf(r);
       const x0 = num(r.x, 0), x1 = x0 + num(r.w, 0);
-      const before = x0 <= lo + 0.5 ? { free: lo - 8, right: x0 - 4 } : null;
-      const after = x1 >= hi - 0.5 ? { free: end - hi - 8, left: x1 + 4 } : null;
-      spot = f.free >= want ? f : before && before.free >= want ? before : after && after.free >= want ? after : f.free >= need ? f : null;
+      own = [freeOf(r)];
+      if (x0 <= lo + 0.5) own.push({ free: lo - 8, right: x0 - 4 });
+      if (x1 >= hi - 0.5) own.push({ free: end - hi - 8, left: x1 + 4 });
     }
   }
-  // herd-wide: the strip's right end (the camp or the Localhost scenery, and the free end of the
-  // last room's header) when it fits whole there; else whole in the left end's scenery or the room
-  // header with the most free space; else the one that shows most of it, cut. On a stage short
-  // enough that the camp's "+N" reaches the header band (under about 130 px), the right end stops
-  // before the camp.
-  if (!spot) {
-    const last = rooms.reduce((m, r) => (!m || num(r.x, 0) + num(r.w, 0) > num(m.x, 0) + num(m.w, 0) ? r : m), null);
-    const from = !last ? 4 : hud(last) ? hi + 4 : num(last.x, 0) + headerFit(last, num(last.w, 0), ctx.bareRooms).used + 4;
-    const edge = ctx.vm.overflow && ctx.oy + CAMP_LABEL_TOP < 20 ? end - 4 : ctx.W - 4;
-    const right = { free: edge - from, right: edge };
-    const left = { free: lo - 8, left: 4 };
+  // the herd's corners: the strip's right end (the camp or the Localhost scenery, and the free end
+  // of the last room's header; on a stage short enough that the camp's "+N" reaches the header band,
+  // under about 130 px, it stops before the camp) and the left end's scenery; a herd-wide note also
+  // takes the room header with the most free space, a note about one hero never another's (round 4c)
+  const last = rooms.reduce((m, r) => (!m || num(r.x, 0) + num(r.w, 0) > num(m.x, 0) + num(m.w, 0) ? r : m), null);
+  const from = !last ? 4 : hud(last) ? hi + 4 : num(last.x, 0) + headerFit(last, num(last.w, 0), ctx.bareRooms).used + 4;
+  const edge = ctx.vm.overflow && ctx.oy + CAMP_LABEL_TOP < 20 ? end - 4 : ctx.W - 4;
+  const corners = [{ free: edge - from, right: edge }, { free: lo - 8, left: 4 }];
+  if (n.heroId == null) {
     let roomy = null;
     for (const r of rooms) {
       if (hud(r)) continue;
       const f = freeOf(r);
       if (!roomy || f.free > roomy.free) roomy = f;
     }
-    const all = [right, left].concat(roomy ? [roomy] : []);
-    // (cut everywhere: the spot that shows the most of it, the right end on a tie)
-    const shows = (x) => (x.free >= need ? (noteText(text, Math.min(want, x.free) - NOTE_PAD - 6) || "").length : -1);
-    spot = right.free >= want ? right
-      : all.find((x) => x.free >= want) ?? all.reduce((m, x) => (shows(x) > shows(m) ? x : m), right);
+    if (roomy) corners.push(roomy);
   }
-  // a note with a short form (the hires of one tick: "Hired 6 contractors" without the names)
-  // shows that whole rather than its long text cut, wherever the long text fits nowhere whole
-  const short = n.short != null && String(n.short) !== text ? String(n.short) : null;
-  const again = () => headerNote(Object.assign({}, n, { text: short, short: null, tooltip: n.tooltip ?? text }), ctx, rooms);
-  if (!spot || spot.free < need) return short ? again() : null;
-  const bw = Math.min(want, spot.free);
-  const shown = noteText(text, bw - NOTE_PAD - 6);
-  if (shown !== text && short) return again();
-  if (!shown) return null;
-  const w = Math.min(bw, monoW(shown, 10) + NOTE_PAD + 6);
+  // whole: the longest form that fits, by the hero first, then at the corners
+  let spot = null;
+  let shown = null;
+  for (const group of own ? [own, corners] : [corners]) {
+    for (const t of forms) {
+      spot = group.find((x) => fits(t, x)) ?? null;
+      if (spot) { shown = t; break; }
+    }
+    if (spot) break;
+  }
+  if (!spot) {
+    // nowhere whole: the shortest form cut between words, over the hero's own room when it has
+    // 60 px to spare, else wherever shows most of it (the right end on a tie)
+    const t = forms[forms.length - 1];
+    const want = Math.min(ctx.W - 16, widthOf(t));
+    const need = Math.min(want, NOTE_MIN_W);
+    const shows = (x) => (x.free >= need ? (noteText(t, Math.min(want, x.free) - NOTE_PAD - 6) || "").length : -1);
+    spot = own && own[0].free >= need ? own[0] : corners.reduce((m, x) => (shows(x) > shows(m) ? x : m), corners[0]);
+    if (spot.free < need) return null;
+    shown = noteText(t, Math.min(want, spot.free) - NOTE_PAD - 6);
+    if (!shown) return null;
+  }
+  const w = Math.min(spot.free, widthOf(shown));
   const left = spot.left != null ? spot.left : spot.right - w;
   const tip = String(n.tooltip ?? text);
   return div().id(n.key).absolute().left(r2(clampX(left, w, ctx))).top(1).w(r2(w)).h(16).rounded(8)
     .bg("#0B0A12EB").border(1).border_color(alpha(n.color ?? CREAM, 0.55))
-    .when(shown !== text || tip !== text, (el) => el.tooltip(tip))
+    .when(shown !== tip, (el) => el.tooltip(tip))
     .flex().items_center().justify_center().px(8).truncate()
     .text_size(10).line_height(1).font_weight(700).text_color(n.color ?? CREAM).child(shown);
 }

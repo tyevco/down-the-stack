@@ -357,7 +357,7 @@ function build(spec, { width, height, tick = 0 } = {}) {
   return {
     tick: now, width, height, calm: Boolean(spec.calm), nums: spec.nums ?? "all", stillness: !anyQuesting,
     empty: null,
-    headerNote: spec.note && tick === 0 ? { key: `note:${TICK0}`, text: spec.note[0], color: spec.note[1] ?? COL.cream, tooltip: spec.note[2] ?? spec.note[0], heroId: spec.note[3] ?? null } : null,
+    headerNote: spec.note && tick === 0 ? { key: `note:${TICK0}`, text: spec.note[0], color: spec.note[1] ?? COL.cream, tooltip: spec.note[2] ?? spec.note[0], heroId: spec.note[3] ?? null, ...(spec.note[4] ? { short: spec.note[4] } : {}) } : null,
     herdBanner: spec.herdBanner ? { key: `herd:${TICK0}`, text: spec.herdBanner } : null,
     rooms: roomVMs, heroes, mobs, chests, boss, fx, signs,
     overflow: L.chip ? campChip(L, folded) : null,
@@ -384,7 +384,8 @@ const kip = (o = {}) => ({ id: 1, name: "Kip the Idempotent", level: 14, cls: "r
 const SPECS = {
   "first-day": {
     width: 1200,
-    note: ["New hire: Nib Two-Spaces", COL.cream],
+    // (short forms, round 4c: the stage shows the longest that fits whole)
+    note: ["New hire: Nib Two-Spaces", COL.cream, null, null, ["New hire: Nib"]],
     frontier: { mapId: "1-1", quota: [12, 40] },
     heroes: [
       { id: 1, name: "Kip the Idempotent", level: 3, cls: "intern", career: "Intern", program: "claude", space: "s1", map: "1-1", state: "questing", attacking: true, focused: true, hp: 0.86, xp: 0.62, tier: 1, quest: "add a README badge",

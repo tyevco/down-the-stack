@@ -1740,10 +1740,13 @@ function rebindVM(world, idx, hero) {
     const space = str(l.spaceName).trim() || str(l.space) || "no space";
     const title = taskLabel(l);
     const who = h.contractor ? "contractor" : `${h.name}, Lv ${h.L} ${careerOf(h).title}`;
-    return action(`rebind:${l.address}`, "Bind", "rebind", { heroId: hero.id, address: str(l.address) }, {
+    // line (round 4c): the tooltip in three parts, [before the space, the space, after it], so the
+    // sheet cuts the space in the middle and two "ceo-assistant-…" agents stay apart
+    const line = [`${prog} in `, space, `${title ? ` · “${title}”` : ""} (${who})`];
+    return Object.assign(action(`rebind:${l.address}`, "Bind", "rebind", { heroId: hero.id, address: str(l.address) }, {
       confirm: "Bind here?",
-      tooltip: `${prog} in ${space}${title ? ` · “${title}”` : ""} (${who})`,
-    });
+      tooltip: line.join(""),
+    }), { line });
   });
   return {
     title: "Rebind a live agent",

@@ -393,6 +393,45 @@ test("sheet career (benched): Rebind moves a live agent onto the hero", async ()
   assert.ok(m.text().includes("Off duty since"));
 });
 
+test("round 4c (reviewer): the sheet's Rebind lines cut the space in the middle, so two agents in spaces that share a start stay apart; the rest of the line gives way first", async () => {
+  const joined = (n) => (n.type === "text" ? n.text : n.children.map(joined).join(""));
+  const base = S.scenarios.benched;
+  const opt = (addr, prog, space, rest) => ({ ...base.career.rebind.options[0], key: `rebind:${addr}`, args: { heroId: 7, address: addr }, tooltip: `${prog} in ${space}${rest}`, line: [`${prog} in `, space, rest] });
+  const options = [
+    opt("t21", "Claude Code", "ceo-assistant-search-eng", " · “Tune BM25 weights” (contractor)"),
+    opt("t22", "Claude Code", "ceo-assistant-billing-eng", " · “Reconcile invoices” (contractor)"),
+    opt("t23", "Pi", "docs", " (contractor)"),
+  ];
+  const vm = { ...base, career: { ...base.career, rebind: { ...base.career.rebind, options } } };
+  const rowsOf = (m) => m.findAll((n) => n.children.some((c) => typeof c.id === "string" && c.id.startsWith("sh-rb-rebind:")));
+  for (const width of [640, 760]) {
+    const { m, host } = await mount("sheet", "benched", { width, host: { vm } });
+    const rows = rowsOf(m);
+    assert.equal(rows.length, 3, `${width}: one line per option`);
+    const tails = [];
+    rows.forEach((row, i) => {
+      const line = row.children[0];
+      assert.equal(joined(line).replace(/\u00A0/g, " "), options[i].tooltip, `${width}: the whole line, in parts`);
+      const [lead, space, rest] = line.children;
+      assert.ok(lead.has("flex_none") && rest.has("flex_1") && rest.has("truncate"), `${width}: what follows the space gives way first`);
+      if (options[i].line[1] === "docs") { assert.equal(space.children[0].text, "docs"); return; }
+      const [head, tail] = space.children;
+      assert.ok(head.has("truncate") && head.has("min_w") && tail.has("flex_none"), `${width}: the space's head gives way, its tail stays whole`);
+      assert.equal(head.children[0].text, "ceo-assistant-");
+      tails.push(tail.children[0].text);
+    });
+    assert.deepEqual(tails, ["search-eng", "billing-eng"], `${width}: the two lines end apart`);
+    click(m, "sh-rb-rebind:t22");
+    assert.deepEqual(host.commands, [["rebind", { heroId: 7, address: "t22" }]]);
+    assert.deepEqual(errorsOf(m), []);
+  }
+  // a view without the parts (an older sample): the line is cut at its end, as before
+  const { m } = await mount("sheet", "benched", { host: { vm: { ...base, career: { ...base.career, rebind: { ...base.career.rebind, options: [{ ...options[0], line: undefined }] } } } } });
+  const line = rowsOf(m)[0].children[0];
+  assert.equal(line.children[0].text, options[0].tooltip);
+  assert.ok(line.has("truncate"));
+});
+
 test("sheet: the doll's Termling blinks and bobs unless calm; calm stops every loop", async () => {
   const gear = await mount("sheet", "gear");
   assert.ok(has(gear.m, "frames"), "working face blinks");
@@ -980,10 +1019,12 @@ test("round 4 (P4, P1): a space with one hero has no header line, its row names 
     const vm = { ...base, roster: { ...base.roster, slim } };
     const { m } = await mount("herd", "roster", { host: { vm } });
     const text = m.text();
+    // (a space name that may not fit is drawn as a head and a tail since round 4c)
+    const joined = (n) => (n.type === "text" ? n.text : n.children.map(joined).join(""));
     assert.equal(text.includes("One hero per space"), false, `${slim}: the one-hero block has no header`);
     assert.ok(text.includes("herdr-app · 3") && text.includes("Off duty · 4"), `${slim}: spaces with two or more keep theirs`);
-    assert.equal(m.node("hd-sp-r:9").children[0].text, "docs-site");
-    assert.equal(m.node("hd-sp-r:-1").children[0].text, "ref-client");
+    assert.equal(joined(m.node("hd-sp-r:9")), "docs-site");
+    assert.equal(joined(m.node("hd-sp-r:-1")), "ref-client");
     assert.equal(m.node("hd-sp-r:1"), null, "a row under its space's header does not repeat it");
     assert.equal(m.node("hd-hire-r:-1").children[0].text, "Hired tomorrow 04:00");
     assert.match(tipOf(m, "hd-hire-r:-1"), /^Hired at the next 04:00 game day/);
@@ -991,6 +1032,55 @@ test("round 4 (P4, P1): a space with one hero has no header line, its row names 
     assert.ok(text.includes("1 contractor, the next hired tomorrow at 04:00"));
     if (slim) assert.match(tipOf(m, "hd-r:-1"), /^ref-client · Wren Monorepo-Raised \(contractor\) · .* · Hired at the next 04:00 game day/);
     assertClean(m, `roster slim=${slim}`);
+  }
+});
+
+test("round 4c: space names that share a start are cut in the middle in the Roster ('ceo-assi…res-2'), the whole name on hover, so two rows stay apart", async () => {
+  const joined = (n) => (n.type === "text" ? n.text : n.children.map(joined).join(""));
+  const base = H.scenarios.roster;
+  const [one, ...rest] = base.roster.groups;
+  const [a, b] = one.rows;
+  // a space whose header does not fit a 640 px dialog (a long folder name)
+  const long = "ceo-assistant-lead-platform-infrastructure-migration-for-the-north-america-west-region-and-the-eu-backup";
+  for (const slim of [true, false]) {
+    for (const width of [640, 760]) {
+      const groups = [
+        { ...one, rows: [{ ...a, space: "ceo-assistant-res-2" }, { ...b, space: "ceo-assistant-writer" }] },
+        { ...rest[0], key: "g:long", name: long },
+        ...rest.slice(1),
+      ];
+      const vm = { ...base, roster: { ...base.roster, slim, groups } };
+      const { m } = await mount("herd", "roster", { width, host: { vm } });
+      const where = `slim ${slim} at ${width}`;
+      const tails = [];
+      for (const [row, name] of [[a, "ceo-assistant-res-2"], [b, "ceo-assistant-writer"]]) {
+        const cell = m.node(`hd-sp-${row.key}`);
+        assert.equal(joined(cell), name, `${where}: the whole name`);
+        if (!slim) {
+          // a wide row's 160 px space cell has room for it: one plain box, as before
+          assert.equal(cell.children[0].type, "text", where);
+          continue;
+        }
+        // a slim row's 92 / 118 px column: a head that gives way and a tail that stays whole
+        const [head, tail] = cell.children;
+        assert.ok(head.has("truncate") && head.has("min_w"), `${where}: the head gives way`);
+        assert.ok(tail.has("flex_none") && !tail.has("truncate"), `${where}: the tail stays whole`);
+        assert.equal(head.children[0].text, "ceo-assistant-");
+        tails.push(tail.children[0].text);
+        // the whole name on hover: the slim row's own tooltip starts with it
+        assert.ok(tipOf(m, `hd-${row.key}`).startsWith(`${name} · `), where);
+      }
+      if (slim) assert.deepEqual(tails, ["res-2", "writer"], `${where}: the two rows end apart`);
+      // a space's header too long for the dialog: cut in the middle, its whole name on hover, its
+      // count whole; a short one stays one text ("herdr-app · 3" above)
+      const gt = m.node("hd-gt-g:long");
+      assert.ok(gt, `${where}: split`);
+      assert.equal(joined(gt), long);
+      assert.equal(tipOf(m, "hd-gt-g:long"), long);
+      assert.ok(gt.children[1].has("flex_none"));
+      assert.equal(joined(gt.parent).replace(/\u00A0/g, " "), `${long} · ${rest[0].rows.length}`);
+      assertClean(m, where);
+    }
   }
 });
 

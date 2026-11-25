@@ -220,7 +220,9 @@
  * @property {{name:string, hint:string, canRename?:boolean}} identity   rename: act("rename", {heroId, name: typed});
  *                              canRename false (Contractors) disables the button
  * @property {ActionVM|null} retire     null for contractors; disabled below Lv 30 (tooltip says so)
- * @property {null|{title:string, hint:string, options:ActionVM[]}} rebind   benched heroes only
+ * @property {null|{title:string, hint:string, options:Array<ActionVM & {line?:string[]}>}} rebind
+ *            benched heroes only; line (round 4c): the tooltip as [before the space, the space,
+ *            after it], so the space is cut in the middle (rebindLine)
  *
  * @typedef {Object} JournalVM
  * @property {Array<{key:string, when:string, icon:string, color:string, text:string,
@@ -241,7 +243,7 @@
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex, Input, InputState, ScrollHandle } from "gpui-base";
 import { closeOverlay, theme as herdrTheme } from "herdr";
-import { C, T, MONO, art, zoom, alpha, kids, clamp01, hex } from "./kit.js";
+import { C, T, MONO, art, zoom, alpha, kids, clamp01, hex, middleCut } from "./kit.js";
 import { isLight, mix, ink, tone, track, thinBar, portrait, focusAgent, chromeCommand } from "./party.js";
 import { renderTermling } from "./termling.js";
 
@@ -1177,8 +1179,28 @@ function rebindCard(r, env, ui, t) {
   return panel("sh-rebind", t, r.title)
     .child(div().text_size(11).text_color(t.dim).child(r.hint))
     .child(v_flex().gap(4).children((r.options ?? []).map((o) => h_flex().gap(8).items_center()
-      .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.muted).child(o.tooltip ?? ""))
+      .child(rebindLine(o, t))
       .child(actionButton(`sh-rb-${o.key}`, o, env, ui, t, { h: 22, px: 8, size: 11, cost: false })))));
+}
+
+/**
+ * A Rebind option's line, "Claude Code in ceo-assistant-billing-qa · “Write tests…” (contractor)"
+ * (round 4c): with the view's three parts (ActionVM.line), what follows the space gives way first,
+ * then the space is cut in the middle, both ends kept ("ceo-a…billing-eng"), so two agents in
+ * spaces that share a start stay apart; the whole line is on the Bind button's hover. Without
+ * them, the line is cut at its end as before.
+ */
+function rebindLine(o, t) {
+  const p = Array.isArray(o.line) && o.line.length === 3 ? o.line.map((x) => String(x ?? "")) : null;
+  const box = () => h_flex().flex_1().min_w(0).overflow_hidden().whitespace_nowrap().text_size(11.5).text_color(t.muted);
+  if (!p || !p[1]) return div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.muted).child(o.tooltip ?? "");
+  // (a text box drops a space at either end: no-break spaces keep "in " and " · ")
+  const lead = p[0].replace(/ $/, "\u00A0");
+  const rest = p[2].replace(/^ /, "\u00A0");
+  return box()
+    .when(Boolean(lead), (e) => e.child(div().flex_none().child(lead)))
+    .child(middleCut(p[1], { tail: 12 }))
+    .when(Boolean(rest), (e) => e.child(div().flex_1().min_w(0).truncate().child(rest)));
 }
 
 function identity(vm, env, ui, t) {

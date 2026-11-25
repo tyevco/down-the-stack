@@ -44,7 +44,7 @@ import {
   TUNING as T, ZONES, BACKLOG, MAP_BY_ID, MOB_BY_ID, BOSSES, CLASSES, PALETTE, ITEM_BASES, CLASS_COLORS,
   RARITIES, HOLO_DUCK, ELITE,
 } from "../data.js";
-import { fmtNum, fmtDuration, itemTier, need } from "../formulas.js";
+import { fmtNum, fmtDuration, itemTier, need, shortName } from "../formulas.js";
 import { careerOf } from "../heroes.js";
 import { chestInfo } from "../agents.js";
 import { freshEyesCapMin, doorOpen, sprintTarget, mapUnlocked } from "../herd.js";
@@ -1435,9 +1435,23 @@ function namesLine(names) {
 }
 
 /**
+ * A note's short forms (round 4c), longest first: the engine's (world.pushNote `short`), else a hire
+ * note's without the epithet ("Hired: Nell (was a contractor)", "Hired Nell"; "New hire: Nell");
+ * null when it has none.
+ */
+function shortOf(n, hire) {
+  if (Array.isArray(n.short) && n.short.length) return n.short.map((x) => String(x));
+  if (!hire) return null;
+  const sn = shortName(hire.name);
+  return hire.promoted ? [`Hired: ${sn} (was a contractor)`, `Hired ${sn}`] : [`New hire: ${sn}`];
+}
+
+/**
  * The header note due now (D§11.15: one at a time, 3 s each, in the header band), or null:
  * {key, text, short?, color, tooltip, heroId}. heroId: the roster hero the note is about (the stage puts it
- * over that hero's room); null: a herd-wide note (the stage's right end, by the camp).
+ * over that hero's room); null: a herd-wide note (the stage's right end, by the camp). short: what
+ * the stage shows whole where the text does not fit, longest first (shortOf; a merged hire note's
+ * "Hired 6 contractors").
  * The hires of one tick (six at the 04:00 game day turn) are one note, "Hired 6 contractors: Zed,
  * Coda and 4 more", its tooltip every hire's own line; it holds the time the engine's queue gave
  * its hires (3 s each), so it can be read and hovered. It is remembered per tick of birth
@@ -1468,7 +1482,7 @@ function headerNote(world, memo) {
         // short: what the stage shows when the names do not fit whole anywhere (a crowded strip),
         // rather than a list cut mid-way ("6 new hires: Dot, Kaia and 4…")
         merged = {
-          key: `${group[0].key}:hires`, text: `${head}: ${namesLine(list.map((x) => x.name))}`, short: head, color,
+          key: `${group[0].key}:hires`, text: `${head}: ${namesLine(list.map((x) => x.name))}`, short: [head], color,
           tooltip: list.map((x) => x.line).join("\n"), heroId: null,
         };
       }
@@ -1479,7 +1493,10 @@ function headerNote(world, memo) {
     if (merged) return merged;
   }
   const text = String(due.text);
-  return { key: due.key, text, color, tooltip: text, heroId: noteHeroId(world, due, hire) };
+  const vm = { key: due.key, text, color, tooltip: text, heroId: noteHeroId(world, due, hire) };
+  const short = shortOf(due, hire);
+  if (short) vm.short = short;
+  return vm;
 }
 
 /** Herd-first boss kills only (rt.banner also carries fight entrances, shown in the arena). */

@@ -28,7 +28,7 @@ import {
   TUNING as T, CLASS_IDX, CLASS_BY_ID, MAPS, MAP_BY_ID, MOB_BY_ID, MOBS, TRAITS, ELITE, BACKLOG, ZONES, SKILL_BY_ID, BUILDING_IDX,
 } from "./data.js";
 import {
-  mobStats, gap, DR, gold as goldOf, itemTier, fmtNum, crowding, partyXp, freshEyesCap, coffeePrice, shiftKillMult,
+  mobStats, gap, DR, gold as goldOf, itemTier, fmtNum, crowding, partyXp, freshEyesCap, coffeePrice, shiftKillMult, shortName,
 } from "./formulas.js";
 import { rngNext, rngInt, rngPick } from "./rng.js";
 import { stats, skillValue, grantXP, effectiveRank } from "./heroes.js";
@@ -1272,7 +1272,8 @@ function countQuota(C, map) {
     const next = MAPS[map.n + 1];
     const text = next && next.zone === map.zone ? `${map.id} cleared: ${next.id} ${next.name} open` : `${map.id} cleared`;
     if (ev) {
-      if (typeof ev.note === "function") ev.note(text);
+      // (short, round 4c: "3-1 cleared: 3-2 open" keeps the point where the map's name has no room)
+      if (typeof ev.note === "function") ev.note(text, null, next && next.zone === map.zone ? { short: `${map.id} cleared: ${next.id} open` } : undefined);
       if (typeof ev.journal === "function") ev.journal("map", C.hero.id, text, map.n);
       if (typeof ev.major === "function") ev.major();
     }
@@ -1490,7 +1491,7 @@ function crashRule(C, room) {
   live.dropMap = { mapId: down.id, untilMs: rt.nowMs + T.crash.dropMapForSec * 1000 };
   if (live.mapId) live.mapId = down.id;
   const ev = C.ev;
-  if (ev && typeof ev.note === "function") ev.note(`${C.hero.name} fell back to ${down.id}`, null, { heroId: C.hero.id });
+  if (ev && typeof ev.note === "function") ev.note(`${C.hero.name} fell back to ${down.id}`, null, { heroId: C.hero.id, short: `${shortName(C.hero.name)} fell back to ${down.id}` });
 }
 
 // Room scratch (actors of the room's fighting heroes), reused between calls.

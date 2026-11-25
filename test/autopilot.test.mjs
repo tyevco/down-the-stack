@@ -263,6 +263,7 @@ describe("gear (D§8.7, D§8.8)", () => {
     assert.equal(w.state.herd.bld[0], 1);
     assert.equal(w.state.herd.gold, 1700);
     assert.equal(ev.notes[0], "Localhost: Campfire 1");
+    assert.deepEqual(ev.noteTag("Localhost: Campfire 1"), { short: "Campfire 1" }, "a short form for a crowded strip (round 4c)");
     assert.equal(AP.autoBuild(w, ev), null);
   });
 

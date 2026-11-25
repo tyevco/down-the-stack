@@ -91,6 +91,31 @@ change that keeps a promise already made. Each says what to change to decide oth
    heroes no longer on the roster can show another hero's name or "A hero". Accepted as cosmetic;
    a version bump would make older builds open newer saves read-only instead. D§13.2.
 
+### Round 4c (decided by default; the owner can change either)
+
+1. **Header notes keep their point** (Round 4b, 5 follow-up). Every note about one hero has short
+   forms that keep the event and the hero's first name and drop the epithet: "Tamsin: chest
+   opened Unreviewed" (then "Tamsin: chest Unreviewed"), "Hired: Nell (was a contractor)" (then
+   "Hired Nell"), "New hire: Nell", "Tamsin: provisional Hotfixer" (then "Tamsin: Hotfixer"),
+   "Tamsin fell back to 1-1", "REVIEW: Tamsin vs …" (then "REVIEW: Tamsin"), "Tamsin retired". The
+   stage shows the longest form that fits whole; the whole text stays in the tooltip. A note about
+   a hero with no room of its own (off duty, at camp, retired) goes where herd-wide notes go, by
+   the camp at the strip's ends, never over another hero's room header; a hero with a room gets
+   its room, else the scenery beside it, else the camp's corner whole rather than cut over its
+   room. Herd-wide notes that lost their point when cut got short forms too: a fight's notes drop
+   the boss's name ("Install complete"), "3-1 cleared: 3-2 open", "Dependency Jungle open",
+   "Coffee Machine 12", "Postmortem · retry in 10 working min", "Boss fight paused", "Boss
+   FIXED". To decide otherwise: a form list in the engine's note tag (`short`). D§11.15.
+2. **Space names are cut in the middle** (Round 4b, 6 follow-up). Where several space names are
+   cut to one width (the Roster's space column and space headers, the party's group headers, the
+   character sheet's Rebind lines), a name that may not fit keeps both ends, "ceo-assi…res-2": its
+   last part stays whole and the start gives way, so two "ceo-assistant-…" spaces stay apart; the
+   whole name is in the tooltip (the slim row's own tooltip names it; a Rebind line's is on its
+   Bind button). A Rebind line, "Claude Code in ceo-a…billing-eng · “…”", lets the task title give
+   way first and keeps up to 12 characters of the space's end, so "…search-eng" and "…billing-eng"
+   stay apart. The stage's room headers name maps, not spaces, and the sheet's header names one
+   space, so neither changes. D§11.14.
+
 ### Earlier rounds
 
 - Round 3: the palette's sheet and calm-mode entries were dropped (decision 4 above keeps it so).

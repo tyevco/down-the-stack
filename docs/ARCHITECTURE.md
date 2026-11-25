@@ -317,9 +317,10 @@ world.rt = {                // rebuilt from snapshots; never saved
 }                           // a Contractor (rt.contractors) also carries since: when it arrived, its
                             // place in the hiring line (promoteContractors: longest-running first)
                             // Note = {key, text, color, bornTick, showTick, kind?, heroId?, name?,
-                            //   promoted?, extra?}: round 4b tags from ev.note(text, color, tag)
-                            //   (world.js pushNote); extra: a tick's second and later hire notes,
-                            //   which do not count against the six-note queue
+                            //   promoted?, extra?, short?}: round 4b tags from ev.note(text, color,
+                            //   tag) (world.js pushNote); extra: a tick's second and later hire
+                            //   notes, which do not count against the six-note queue; short (round
+                            //   4c): [string], shorter forms, longest first
 
 Live = {                    // per bound, live hero
   address, status, seq, statusSince, state: "questing"|"waiting"|"shipped"|"resting"|"supervising"|"crashed",
@@ -387,6 +388,7 @@ export const g, refHit, refHP, refArmor, refDPS, mobHP, mobATK, mobXP, gold, K, 
        weaponDmg, armorPiece, itemPower, polishCost, buildingCost, releaseSeals, fmtNum, fmtDuration
 export function autoOn(state, key) -> boolean       // an autopilot system: its switch AND the master switch
 export function cutText(s, n) -> string             // at most n UTF-16 units, never half a surrogate pair
+export function shortName(name, max = 10) -> string // a hero's first word for a short note (round 4c), cut with cutText
 export function wellFormed(s, repl = "\uFFFD") -> string  // lone surrogates replaced (or dropped with "")
 // herdr's bridge refuses a string with a lone surrogate (rquickjs's UTF-8 conversion): every cut of
 // outside text (titles, seats, task labels) goes through cutText
@@ -529,7 +531,10 @@ export function takeMilestones(world, nowMs) -> [{n, kind, at, title, body}]   /
 journal(kind, heroId, text, value, name?), milestone(kind, data) }` that `world.tick` creates per tick
 (note's `tag`, round 4b: `{kind: "hire", heroId, name, promoted?}` for a hire, `{heroId}` for a note
 about one hero, the provisional class, a fall-back and chests opened Unreviewed; the stage reads
-them, and a tick's second and later hire notes do not count against the six-note queue)
+them, and a tick's second and later hire notes do not count against the six-note queue; round 4c:
+`short`, a string or a list, longest first, of shorter forms that keep the note's point, "Tamsin:
+chest opened Unreviewed" (`formulas.shortName` gives the first name), on any note; a Review's and a
+retirement's notes carry the hero's id too)
 (journal's `name`, round 4: the hero's name, which `emitJournal` and `boss.jot` fill in; leave and
 retire lines pass it because the hero has left the roster); it enforces the fx budgets (D§11.7)
 and marks `rt.version++`. `ev.milestone` (kind `boss` | `lts` | `principal`) passes only on a *live*
@@ -840,7 +845,7 @@ export function stageView(world, { width, height, nowMs }) -> StageVM
 StageVM = {
   tick, width, height, calm, nums, stillness:boolean,          // stillness: nothing questing anywhere
   empty: null | { kind: "no_agents"|"loading", title, text },
-  headerNote: null | { key, text, short?, color, tooltip, heroId },  // notes (D§11.15); round 4b below
+  headerNote: null | { key, text, short?:[string], color, tooltip, heroId },  // notes (D§11.15); round 4b, 4c below
   herdBanner: null | { key, text },                            // herd-first boss kill (D§11.8)
   rooms: [{ key, x, w, zone, mapId, title, shortTitle, palette:{sky,far,ground,accent},
             skyBands:[hex×4], quota:null|{have,need}, sprint:null|{have,need}, door:boolean,
@@ -1044,6 +1049,24 @@ SheetVM / HerdVM typedefs in `ui/sheet.js` / `ui/herdpanel.js` are the full list
   about N min" / "Hired in ~N min" from `atMs`);
 - round 4b (looks): `termlingColors` takes the hoodie from `heroes.lookOf`, and the stage's and the
   sheet's hat colour is `PALETTE.hatTint[hatToneOf(uid)]`.
+- round 4c (header notes, D§11.15): `HeaderNote.short` is a list of forms, longest first (the
+  engine's `short` tag, else a hire's without the epithet; a merged note's `[head]`), and
+  `HeaderNote.heroId` may name a hero with no room on the stage (off duty, at camp, retired).
+  `ui/stage.js headerNote` tries the text, then each short form, whole: over the hero's room and the
+  scenery beside it, then the strip's ends by the camp (a herd-wide note also the roomiest room
+  header; a note about one hero never another hero's); where none fits whole, the shortest is cut
+  between words. The tooltip is the whole text whenever what shows differs from it;
+- round 4c (space names, D§11.14): `ui/kit.js middleCut(text, {id, tooltip, room, size})` draws a
+  name that may not fit its box (estimated at 0.6 em a character) as a head that truncates and a
+  tail that stays whole (`splitTail`: the trailing parts after a separator that fit in `o.tail`
+  characters, 8 by default, else the last 6; never through a surrogate pair), so a narrow box shows
+  "ceo-assi…res-2", with the whole name on hover; a name that surely fits stays one plain box (no
+  extra elements). Used by the slim and wide Roster rows' space cell, the Roster's space headers
+  (`hd-gt-<key>`, only when the header may not fit the dialog), the party's group headers
+  (`pg-<key>-name`) and the sheet's Rebind lines (tail 12: the view's Rebind options carry
+  `line: [before the space, the space, after it]`, which join to the tooltip; the part after the
+  space gives way first). It splits the view's string for layout only; the text shown is the
+  view's.
 
 `sheetView`/`herdView` shapes are owned jointly by the engine-world author and the sheet/herd
 UI author; their exact fields are defined in `game/view.js` JSDoc, which is the source of truth.

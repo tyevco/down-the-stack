@@ -1515,6 +1515,13 @@ test("rules: the sheet names a terminal's work as the party does, never a bare p
   advance(world, 1);
   const tip2 = V.sheetView(world, { heroId: h3, tab: "career", filter: FILTER }).career.rebind.options.find((o) => o.args.address === "t1").tooltip;
   assert.match(tip2, /· “Fix flaky auth test” \(/, tip2);
+  // (reviewer, round 4c) the line in three parts, [before the space, the space, after it], so the
+  // sheet cuts the space in the middle; they join to the tooltip
+  for (const o of V.sheetView(world, { heroId: h3, tab: "career", filter: FILTER }).career.rebind.options) {
+    assert.equal(o.line.length, 3);
+    assert.equal(o.line.join(""), o.tooltip);
+    assert.ok(o.line[0].endsWith(" in ") && o.line[1].length > 0, JSON.stringify(o.line));
+  }
   // the digest's "Chests waiting" line quotes a chest's task, never a shell name an older save kept
   const fd = D.demoWorld("first-day", NOW).world;
   const hero = fd.state.heroes.find((h) => h.id === fd.rt.bind.get("t1"));

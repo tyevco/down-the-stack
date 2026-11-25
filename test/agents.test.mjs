@@ -878,6 +878,9 @@ describe("round 4b: looks for life, the off-duty grace, promotions leave no Cont
       assert.ok(h && !h.contractor, `${n.text}: tagged with its roster id`);
       assert.deepEqual([n.kind, n.name, n.promoted], ["hire", h.name, true]);
       assert.equal(n.text, `Hired: ${h.name} (was a contractor)`);
+      // round 4c: short forms without the epithet, for a strip with no room for the whole name
+      const f = h.name.split(" ")[0];
+      assert.deepEqual(n.short, [`Hired: ${f} (was a contractor)`, `Hired ${f}`]);
     }
     // a note raised while the six queue (6 x 3 s): it still shows, after them
     const ev = W.makeEmitter(sim.w, { live: true });
@@ -906,6 +909,7 @@ describe("round 4b: looks for life, the off-duty grace, promotions leave no Cont
     const one = V.stageView(sim.w, { width: 1600, height: 200, nowMs: sim.now }).headerNote;
     assert.equal(one.text, `New hire: ${newbie.name}`);
     assert.equal(one.heroId, newbie.id, "the tag, not the (shared) name");
+    assert.deepEqual(one.short, [`New hire: ${newbie.name.split(" ")[0]}`], "its short form drops the epithet (round 4c)");
     noErrors(sim);
   });
 });
@@ -985,6 +989,11 @@ describe("chests lost Unreviewed stay in sight (round 4)", () => {
     }
     assert.ok(noted, "a header note at the moment of the loss");
     assert.equal(noted.text, `${h.name}: a chest opened Unreviewed (half value)`);
+    // round 4c: about that hero (by the camp when it has no room), with short forms that keep the
+    // point and drop the epithet
+    const first = h.name.split(" ")[0];
+    assert.equal(noted.heroId, h.id);
+    assert.deepEqual(noted.short, [`${first}: a chest opened Unreviewed (half value)`, `${first}: chest opened Unreviewed`, `${first}: chest Unreviewed`]);
     assert.equal(h.pend.length, 0);
     assert.equal(HerdM.unseenLosses(sim.state), 1);
     assert.equal(HerdM.digestDot(sim.w), true, "the dot lights at the loss, not dark");
@@ -1010,7 +1019,10 @@ describe("chests lost Unreviewed stay in sight (round 4)", () => {
     assert.ok(c.contractor);
     c.pend = [{ min: 12, fmin: 0, title: "Spike", at: sim.now, sealFactor: 1 }, { min: 30, fmin: 0, title: "Spike 2", at: sim.now, sealFactor: 1 }];
     sim.drop("c1").tick();
-    assert.ok(sim.w.rt.notes.some((n) => n.text === `${c.name}: 2 chests opened Unreviewed (half value)`));
+    const two = sim.w.rt.notes.find((n) => n.text === `${c.name}: 2 chests opened Unreviewed (half value)`);
+    assert.ok(two);
+    const cf = c.name.split(" ")[0];
+    assert.deepEqual(two.short, [`${cf}: 2 chests opened Unreviewed (half value)`, `${cf}: 2 chests opened Unreviewed`, `${cf}: chests Unreviewed`], "round 4c");
     assert.equal(HerdM.unseenLosses(sim.state), 2);
     assert.equal(HerdM.digest(sim.state).unseenLosses, 2);
     assert.equal(W.command(sim.w, "digestSeen", {}, sim.now).ok, true);
@@ -1294,9 +1306,15 @@ describe("tasks and the 8-tick close (D§2.3)", () => {
     h.sig = { tm: [3, 3, 3, 3, 3], tb: [0, 0, 0, 0, 0], ts: [0, 0, 0, 0, 0], blocks: 0, workMin: 15, subTasks: 0, n: 5 };
     sim.w.rt.apGear.clear();
     live.task.workSec = 180;
-    A.closeTask(sim.w, h, live, "done", null);
+    sim.w.rt.notes = [];
+    A.closeTask(sim.w, h, live, "done", W.makeEmitter(sim.w));
     assert.equal(h.cls, D.CLASS_IDX.hotfixer, "switched for free (D§4.2)");
     assert.ok(sim.w.rt.apGear.has(h.id), "the targeted equip sweep runs this tick");
+    // its note is about that hero; its short forms drop the epithet, then "provisional" (round 4c)
+    const n = sim.w.rt.notes.find((x) => x.text === `${h.name}: provisional Hotfixer`);
+    const f = h.name.split(" ")[0];
+    assert.equal(n.heroId, h.id);
+    assert.deepEqual(n.short, [`${f}: provisional Hotfixer`, `${f}: Hotfixer`]);
   });
 
   test("a provisional switch re-spends the refunded points only while the herd's auto-learn is on (and the autopilot master switch)", () => {

@@ -457,6 +457,15 @@ export function cutText(s, n) {
 }
 
 /**
+ * A hero's name as a short header note says it (round 4c): its first word ("Tamsin" for "Tamsin
+ * the Composable"), at most `max` characters (a longer one ends in "…", cut with cutText).
+ */
+export function shortName(name, max = 10) {
+  const first = String(name ?? "").trim().split(/\s+/)[0] || "";
+  return first.length > max ? `${cutText(first, max - 1)}…` : first;
+}
+
+/**
  * `s` with every lone surrogate (half of an emoji) replaced by `repl` (default U+FFFD, the
  * replacement character; "" drops it); well-formed text comes back as it is. A regex rather than
  * String.prototype.toWellFormed, which an older QuickJS lacks.

@@ -26,7 +26,7 @@
 import {
   TUNING as T, BOSSES, REVIEWS, ZONES, MOB_BY_ID, BOSS_PARTS, BACKLOG, TRAITS, KEEPSAKES, BUILDING_IDX,
 } from "./data.js";
-import { mobHP, mobATK, bossHP, bossSwing, refDPS, gold as goldOf, itemTier, bossXP, gap, fmtNum, coffeePrice, autoOn } from "./formulas.js";
+import { mobHP, mobATK, bossHP, bossSwing, refDPS, gold as goldOf, itemTier, bossXP, gap, fmtNum, coffeePrice, autoOn, shortName } from "./formulas.js";
 import { rngNext, rngInt } from "./rng.js";
 import { stats, grantXP, winReview, careerOf } from "./heroes.js";
 import { rollItem, rollKeepsake, rollReviewReward, stashPut, itemName } from "./items.js";
@@ -56,8 +56,18 @@ function nowMs(world) {
   return world.rt.nowMs || world.state.herd.lastMs || 0;
 }
 
-function note(ev, text, color) {
-  if (ev && typeof ev.note === "function") ev.note(text, color);
+/**
+ * A header note. `short` (round 4c): shorter forms, longest first, that keep its point for the
+ * stage to show whole where the text has no room: a fight's notes drop the boss's name (its arena
+ * names it), "Install complete" for "Bloatodon, the Heaviest Object: Install complete". `heroId`:
+ * the note is about one hero (a Review).
+ */
+function note(ev, text, color, short, heroId) {
+  if (!ev || typeof ev.note !== "function") return;
+  const tag = {};
+  if (short != null) tag.short = short;
+  if (heroId != null) tag.heroId = heroId;
+  ev.note(text, color, short != null || heroId != null ? tag : undefined);
 }
 function jot(world, ev, kind, heroId, text, value) {
   if (ev && typeof ev.journal === "function") ev.journal(kind, heroId, text, value);
@@ -463,7 +473,8 @@ export function startFight(world, kind, idx, heroIds, ev) {
   if (kind !== "review") state.herd.fight = packFight(fight);
   if (kind === "review") {
     const hero = findHero(world, ids[0]);
-    note(ev, `REVIEW: ${hero.name} vs ${fight.name}`);
+    const sn = shortName(hero.name);
+    note(ev, `REVIEW: ${hero.name} vs ${fight.name}`, null, [`REVIEW: ${sn} vs ${fight.name}`, `REVIEW: ${sn}`], hero.id);
   } else {
     if (ev && typeof ev.banner === "function") ev.banner(fight.name, fight.banner.sub);
   }
@@ -749,7 +760,7 @@ const KITS = {
         f.phase = 2;
         f.phaseLabel = m2.label;
         spawnAdd(f, m2.add, m2.count);
-        note(ev, `${f.name}: ${m2.label}`);
+        note(ev, `${f.name}: ${m2.label}`, null, m2.label);
       } else if (!f.mech.p2 && f.t % m1.every === 0 && aliveAdds(f) < m1.maxAlive) {
         spawnAdd(f, m1.add, 1);
         f.mech.warnAt = f.t;
@@ -802,7 +813,7 @@ const KITS = {
           const pct = aliveAdds(f) === 0 ? brk.then.ifAddsDead : brk.then.hitAllPctMaxHp;
           for (let i = 0; i < n; i++) pctHit(A[i], pct, f.level);
           f.phaseLabel = brk.then.label;
-          note(ev, `${f.name}: resolve() ${Math.round(pct * 100)}%`);
+          note(ev, `${f.name}: resolve() ${Math.round(pct * 100)}%`, null, `resolve() ${Math.round(pct * 100)}%`);
         }
       }
       f.invuln = f.mech.wait > 0;
@@ -1052,7 +1063,7 @@ const KITS = {
             const s = newPart(f, CODE_SERVICE, i, each);
             f.parts.push(s);
           }
-          note(ev, `${f.name}: ${p2.label}`);
+          note(ev, `${f.name}: ${p2.label}`, null, p2.label);
         } else if (f.t % p1.slam.every === 0) {
           for (let i = 0; i < n; i++) bossHit(f, A[i], f.swing * p1.slam.pctOfSwing);
         }
@@ -1066,7 +1077,7 @@ const KITS = {
             }
           }
         } else if (alive.length === 1) {
-          if (!f.mech.last) { f.mech.last = 1; f.phase = 3; f.phaseLabel = p3.label; note(ev, `${f.name}: ${p3.label}`); }
+          if (!f.mech.last) { f.mech.last = 1; f.phase = 3; f.phaseLabel = p3.label; note(ev, `${f.name}: ${p3.label}`, null, p3.label); }
           if (n > 0 && f.t % p3.swingEvery === 0) bossHit(f, frontOf(A, n), f.swing);
         }
         f.mechText = alive.length > 1 ? `Service Mesh: ${alive.length} services` : p3.label;
@@ -1089,7 +1100,7 @@ const KITS = {
         f.phase = phase;
         f.phaseLabel = phase === 3 ? p3.label : p2.label;
         if (phase === 2) f.mech.wyv = f.t;
-        note(ev, `${f.name}: ${f.phaseLabel}`);
+        note(ev, `${f.name}: ${f.phaseLabel}`, null, f.phaseLabel);
       }
       if (phase === 2 && f.t > f.mech.wyv && (f.t - f.mech.wyv) % p2.every === 0) spawnAdd(f, p2.add, p2.add.count);
       const len = phase === 3 ? p3.clockTicks : clock.ticks;
@@ -1194,7 +1205,7 @@ function enrage(f, ev) {
   const e = f._enc.def && f._enc.def.enrage;
   const name = e ? e.name : "Out of patience";
   f.phaseLabel = name;
-  note(ev, `${f.name}: ${name}`, "#FF5A5F");
+  note(ev, `${f.name}: ${name}`, "#FF5A5F", name);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1403,7 +1414,7 @@ function endFight(world, fight, result, ev) {
   if (result === "suspended") {
     if (fight.kind !== "review") {
       state.herd.fight = packFight(fight);
-      note(ev, `${fight.name}: fight paused until someone works in the zone`);
+      note(ev, `${fight.name}: fight paused until someone works in the zone`, null, ["Fight paused until someone works in the zone", "Boss fight paused"]);
     }
     return result;
   }
@@ -1425,9 +1436,10 @@ function postmortem(world, fight, ev) {
   herd.wounds[key] = [Math.round(frac * 1e4) / 1e4, nowMs(world) + B.woundsSec * 1000, B.retryWorkingSec];
   herd.lessons[key] = Math.min(Math.round(B.lessonsCap / B.lessonsPerFail), (herd.lessons[key] || 0) + 1);
   const lessons = Math.round(lessonsOf(world, key) * 100);
-  const text = `Postmortem: ${Math.round(frac * 100)}% wounds kept · Lessons Learned +${lessons}% · retry in ${Math.round(B.retryWorkingSec / 60)} working min`;
+  const retry = `retry in ${Math.round(B.retryWorkingSec / 60)} working min`;
+  const text = `Postmortem: ${Math.round(frac * 100)}% wounds kept · Lessons Learned +${lessons}% · ${retry}`;
   fight.stamp = { key: `${fight.key}:pm`, text: "POSTMORTEM", tick: world.rt.tick };
-  note(ev, text);
+  note(ev, text, null, [`Postmortem · ${retry}`, "Postmortem"]);
   jot(world, ev, "boss", fight.heroIds[0] || 0, `${fight.name}: Postmortem`, Math.round(frac * 100));
   major(ev);
 }
@@ -1496,7 +1508,7 @@ function winFight(world, fight, ev) {
     if (b.floor === fight.floor) { b.floor++; b.kills = 0; }
     delete (herd.wounds || {})[woundKey("backlog", fight.floor)];
     delete (herd.lessons || {})[woundKey("backlog", fight.floor)];
-    note(ev, `${fight.name} FIXED · Backlog floor ${b.floor}`);
+    note(ev, `${fight.name} FIXED · Backlog floor ${b.floor}`, null, `FIXED · Backlog floor ${b.floor}`);
     jot(world, ev, "boss", heroes[0] ? heroes[0].id : 0, fight.name, fight.floor);
     major(ev);
     return;
@@ -1522,7 +1534,7 @@ function winFight(world, fight, ev) {
   } else {
     jot(world, ev, "boss", heroes[0] ? heroes[0].id : 0, `${fight.name} fixed again`, idx);
   }
-  note(ev, `${fight.name}: FIXED`);
+  note(ev, `${fight.name}: FIXED`, null, "Boss FIXED");
   major(ev);
 }
 

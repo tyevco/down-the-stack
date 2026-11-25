@@ -110,7 +110,13 @@ export function makeEv() {
       ev.calls.push(Object.assign({ type: "fx" }, f));
       ev.fxs.push(f);
     },
-    note(text, color) { ev.calls.push({ type: "note", text, color }); ev.notes.push(text); },
+    // (tag: what the note is about and its short forms, round 4b / 4c; world.pushNote)
+    note(text, color, tag) { ev.calls.push({ type: "note", text, color, tag }); ev.notes.push(text); },
+    /** The tag of the first note whose text passes `test` (a RegExp or a string to match exactly). */
+    noteTag(test) {
+      const c = ev.calls.find((x) => x.type === "note" && (test instanceof RegExp ? test.test(x.text) : x.text === test));
+      return c ? c.tag : undefined;
+    },
     banner(text, sub) { ev.calls.push({ type: "banner", text, sub }); ev.banners.push({ text, sub }); },
     major() { ev.calls.push({ type: "major" }); ev.majors++; },
     journal(kind, heroId, text, value) {

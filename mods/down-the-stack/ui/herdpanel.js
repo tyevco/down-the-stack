@@ -60,10 +60,23 @@
  * @property {ActionVM|null} buy   cmd "buy" {building}; label "Buy", cost "64.8k gold"; null when maxed
  * @property {string} tooltip   "Heavier than it looks." (flavour / rules)
  *
- * @typedef {Object} UpgradesVM
+ * @typedef {Object} UpgradesVM   the first tab: Localhost (docs/TOWN.md §7.5), "Upgrades" with the town off
  * @property {BuildingVM[]} buildings   6, in D§10.2 order
  * @property {string} note      "Autopilot buys the cheapest upgrade when gold ≥ 3× its cost (Auto buildings: on)."
  * @property {string|null} trophies   "Trophies: +3% damage and max HP for every hero"
+ * @property {LocalhostVM|null} town   the town (null with the town off: the tab as it was)
+ *
+ * @typedef {Object} LocalhostVM
+ * @property {string} header    "99% uptime · 12 on duty (Review Desk 12) · vendor/: 2 contractors · next hired 04:00"
+ * @property {string} headerTip what Uptime is and its next nine
+ * @property {null|{label:string, frac:number, text:string, tooltip:string}} shelf   the LGTM row:
+ *            label "LGTMs 40 / 70", frac its bar, text "+10% XP and gold on chests you open · today
+ *            206 of 340 (61%)"; null before the Review Desk opens
+ * @property {null|{text:string, tooltip:string}} titles   "Last approved: “Bump deps” (Fizz) · …"
+ *            (the last five, runtime only), the tooltip names who approved each
+ * @property {BuildingVM} desk  the Review Desk (buy: cmd "buy" {building:"review_desk"}), drawn as
+ *            the building grid's first card, across both columns
+ * @property {string} hint      "Heroes of Lv 10+ work here while their agents rest… Nothing here needs you."
  *
  * @typedef {Object} HerdStashVM   StashVM (ui/sheet.js) plus
  * @property {CardVM|null} card    the focused item; owner = "Best on Kip · score +3.2%", its
@@ -132,6 +145,8 @@
  *                              (a space with one hero, round 4); null under a space's header
  * @property {null|{text:string, tooltip:string, color:string}} hire   a Contractor: when it joins
  *                              the roster ("Hired tomorrow 04:00"; owner decision, round 4); else null
+ * @property {string|null} [job]   Localhost (docs/TOWN.md §7.5): the row's tooltip line ("At the
+ *                              Review Desk · Committer reviewer"); never a column or a status word
  *
  * @typedef {Object} RosterVM
  * @property {string} count     "12 / 30 heroes · 2 hired today (6 a day)" (+ " · 3 contractors, the next
@@ -203,7 +218,7 @@ import {
 
 export const HERD_TABS = ["upgrades", "stash", "tracker", "bosses", "roster", "digest", "settings"];
 const TAB_ICONS = {
-  upgrades: "ui/star.svg", stash: "ui/chest.svg", tracker: "ui/sheet.svg", bosses: "ui/boss.svg",
+  upgrades: "ui/desk.svg", stash: "ui/chest.svg", tracker: "ui/sheet.svg", bosses: "ui/boss.svg",
   roster: "ui/herd.svg", digest: "ui/journal.svg", settings: "ui/gear.svg",
 };
 const STAGE_PX = { min: 64, max: 420 };
@@ -345,6 +360,7 @@ function headerSub(h, t) {
 // ── Upgrades ─────────────────────────────────────────────────────────────────────────────────
 
 function upgradesTab(u, env, ui, t, width) {
+  if (u.town) return localhostTab(u, env, ui, t, width);
   const colW = Math.floor((Math.max(560, width) - 32 - 12) / 2);
   return [v_flex().w_full().h_full().gap(10)
     .child(h_flex().flex_wrap().gap(12).children((u.buildings ?? []).map((b) => buildingCard(b, env, ui, t, colW))))
@@ -352,6 +368,43 @@ function upgradesTab(u, env, ui, t, width) {
     .child(h_flex().gap(10).items_center()
       .child(div().flex_1().min_w(0).text_size(11).text_color(t.muted).child(u.note ?? ""))
       .when(Boolean(u.trophies), (e) => e.child(div().flex_none().text_size(11).text_color(t.muted).child(u.trophies))))];
+}
+
+/**
+ * The Localhost tab (docs/TOWN.md §7.5): the town's lines stay on top (header with Uptime, the LGTM
+ * shelf, the last approved titles); the building grid, the Review Desk first across both columns,
+ * scrolls below them (four rows of cards are taller than the dialog's 520 px), the autopilot note
+ * and the town's hint last.
+ */
+function localhostTab(u, env, ui, t, width) {
+  const town = u.town;
+  // the scroll column keeps 4 px for its bar
+  const colW = Math.floor((Math.max(560, width) - 32 - 12 - 4) / 2);
+  const xp = ink(C.xp, t);
+  const top = v_flex().id("hd-town").flex_none().gap(5)
+    // (the header wraps rather than cut: a big herd's vendor/ line runs past a narrow dialog)
+    .child(h_flex().min_h(18).gap(8).items_start().tooltip(town.headerTip ?? "")
+      .child(div().flex_none().h(18).flex().items_center().text_size(13).font_semibold().child("Localhost"))
+      .child(div().id("hd-town-head").flex_1().min_w(0).pt(1).text_size(11.5).line_height(1.35).text_color(t.muted).child(town.header ?? "")))
+    .when(Boolean(town.shelf), (e) => e.child(h_flex().id("hd-town-lgtm").min_h(18).gap(8).items_center().tooltip(town.shelf.tooltip ?? "")
+      .child(div().flex_none().font_family(MONO).text_size(11.5).font_semibold().text_color(xp).whitespace_nowrap().child(town.shelf.label))
+      .child(div().w(96).flex_none().child(fluidBar(town.shelf.frac, 5, xp, alpha(t.fg.slice(0, 7), t.light ? 0.12 : 0.14))))
+      .child(div().id("hd-town-lgtm-text").flex_1().min_w(0).text_size(11.5).line_height(1.25).text_color(t.fg).child(town.shelf.text))))
+    .when(Boolean(town.titles), (e) => e.child(div().id("hd-town-titles").min_w(0).truncate().text_size(11.5).text_color(t.muted)
+      .tooltip(town.titles.tooltip ?? town.titles.text).child(town.titles.text)));
+  // the Review Desk spans the grid's two columns: its name stays whole in a narrow dialog (a 760 px
+  // dialog at zoom 1.25 is 608 px wide), and the six D§10.2 buildings keep their 3 × 2 grid below it
+  const cards = [town.desk ? buildingCard(town.desk, env, ui, t, 2 * colW + 12) : null, ...(u.buildings ?? []).map((b) => buildingCard(b, env, ui, t, colW))].filter(Boolean);
+  const body = v_flex().gap(10).pr(4)
+    .child(h_flex().flex_wrap().gap(12).children(cards))
+    .child(h_flex().gap(10).items_center()
+      .child(div().flex_1().min_w(0).text_size(11).text_color(t.muted).child(u.note ?? ""))
+      .when(Boolean(u.trophies), (e) => e.child(div().flex_none().text_size(11).text_color(t.muted).child(u.trophies))))
+    .child(div().text_size(11).text_color(t.dim).child(town.hint ?? ""));
+  return [v_flex().w_full().h_full().gap(10)
+    .child(top)
+    .child(div().relative().flex_1().min_h(0)
+      .child(v_flex().id("hd-upgrades").absolute().left(0).top(0).size_full().overflow_y_scroll().child(body)))];
 }
 
 function buildingCard(b, env, ui, t, w) {
@@ -619,6 +672,7 @@ function rosterRow(row, env, ui, t, calm) {
     .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(`${row.title} · ${row.where}`));
   return h_flex().id(`hd-${row.key}`).flex_none().h(42).pl(4).pr(8).gap(9).items_center().rounded(8)
     .hover((s) => s.bg(t.hover))
+    .when(Boolean(row.job), (e) => e.tooltip(String(row.job)))
     .child(div().w(3).h(28).flex_none().rounded(2).bg(tone(row.stripe, t)))
     .child(div().when(off, (e) => e.opacity(0.65))
       .child(portrait(`hd-p-${row.key}`, { ...row.portrait, status: off ? "idle" : row.status, focused: false }, 28, t, { calm })))
@@ -654,7 +708,8 @@ function rosterRowSlim(row, env, ui, t, _calm, cols = SLIM_COLS) {
     : cols.retire === false ? null : div().w(52).flex_none();
   // (a Contractor's name carries no "(contractor)" when its hire moment shows; the tooltip says it)
   const who = row.contractor && row.hire && !/\(contractor\)$/.test(String(row.name)) ? `${row.name} (contractor)` : row.name;
-  const tip = [row.space, who, `${row.level} ${row.title}`, row.where, row.seen, row.hire ? row.hire.tooltip : null].filter(Boolean).join(" · ");
+  const tip = [row.space, who, `${row.level} ${row.title}`, row.where, row.seen, row.hire ? row.hire.tooltip : null].filter(Boolean).join(" · ")
+    + (row.job ? `\n${row.job}` : "");
   return h_flex().id(`hd-${row.key}`).flex_none().h(26).pl(4).pr(4).gap(8).items_center().rounded(6)
     .hover((s) => s.bg(t.hover))
     .tooltip(tip)

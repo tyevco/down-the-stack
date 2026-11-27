@@ -13,6 +13,7 @@ import {
 } from "./data.js";
 import { buildingCost, releaseOf, releaseSeals, releaseLabel, trackerTier, freshEyesCap, LOG_MAX, logMax, shortName } from "./formulas.js";
 import { stashPut, itemName } from "./items.js";
+import { markDigest as markTownDigest, digestTown, fameRank, jobTitle } from "./town.js";
 
 // The journal length (D§13.3 60 lines; balance: up to 120, docs/BALANCE.md §10) lives in
 // formulas.js so items.js, which writes journal lines too and cannot import this module (herd.js
@@ -582,6 +583,9 @@ export function retire(world, heroId, nowMs, ev) {
   }
   if (!state.herd.fame) state.herd.fame = [];
   const entry = [hero.name, hero.cls, hero.L, nowMs ?? state.herd.lastMs ?? 0];
+  // Localhost (docs/TOWN.md §4, §8): the job rank it reached, kept by the Hall of Fame card
+  const rank = fameRank(hero);
+  if (rank > 0) entry.push(rank);
   state.herd.fame.push(entry);
   const msg = `${hero.name} retired to the Hall of Fame`;
   if (ev) {
@@ -597,11 +601,18 @@ export function retire(world, heroId, nowMs, ev) {
   return { ok: true, entry, msg };
 }
 
-/** Hall of Fame rows for the UI: [{name, clsId, clsName, level, at}], newest first. */
+/**
+ * Hall of Fame rows for the UI: [{name, clsId, clsName, level, at, rank?, jobTitle?}], newest first.
+ * rank and jobTitle (Localhost, docs/TOWN.md §4): the job rank the hero retired with (1 Contributor
+ * .. 4 Core) and its title ("Core reviewer"), only on a row whose hero had one (no field: Drive-by).
+ */
 export function hallOfFame(state) {
   return (state.herd.fame || []).map((e) => {
     const c = CLASSES[e[1]] || CLASSES[0];
-    return { name: String(e[0]), clsId: c.id, clsName: c.name, level: e[2] || 1, at: e[3] || 0 };
+    const row = { name: String(e[0]), clsId: c.id, clsName: c.name, level: e[2] || 1, at: e[3] || 0 };
+    const rank = Math.max(0, Math.min(4, Math.floor(Number(e[4]) || 0)));
+    if (rank > 0) { row.rank = rank; row.jobTitle = jobTitle(rank); }
+    return row;
   }).reverse();
 }
 
@@ -643,7 +654,8 @@ export const DIGEST_AWAY = DIGEST_AWAY_MS;
 /**
  * Records what the digest diffs against (D§10.7): every hero's level, boss kills, credited Seals,
  * notable drops and badges at `nowMs` (world.js calls it when the person marks the digest read).
- * herd.digestSnap = {at, lv: {heroId: L}, bk: [kills x9], seals, drops, badges: [ids]}.
+ * herd.digestSnap = {at, lv: {heroId: L}, bk: [kills x9], seals, drops, badges: [ids]}; the town's
+ * own baseline is herd.town.dg (town.markDigest).
  */
 export function digestMark(state, nowMs) {
   const herd = state.herd;
@@ -654,6 +666,8 @@ export function digestMark(state, nowMs) {
     at: nowMs, lv, bk: (herd.bossKills || []).slice(), seals: herd.seals || 0, drops: herd.drops || 0,
     badges: (herd.badges || []).slice(),
   };
+  // Localhost (docs/TOWN.md §7.7): its lifetime counters (herd.town.dg) and no rank-ups waiting
+  markTownDigest(state);
   return herd.digestSnap;
 }
 
@@ -769,6 +783,9 @@ export function digest(state, sinceMs) {
     }
   }
   out.unseenLosses = unseenLosses(state);
+  // Localhost's one line (docs/TOWN.md §7.7, town.digestTown), or null; never counted in `empty`, so
+  // the town alone never lights the Herd dot
+  out.town = digestTown(state);
   out.empty = !out.levels.length && !out.drops.length && !out.bosses.length && !out.shipped.length && !out.badges.length &&
     !out.unreviewed.length && !out.chestsWaiting && !out.dropsMore && !out.shippedMore;
   return out;

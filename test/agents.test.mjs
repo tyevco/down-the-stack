@@ -281,7 +281,8 @@ describe("roster limits and Contractors (D§3.4)", () => {
     assert.equal(c.L, 1, "max(1, median - 5)");
     assert.ok(!sim.state.heroes.some((h) => h.name === c.name), "a Contractor has a name of its own");
     const saved = JSON.parse(W.serialize(sim.w));
-    assert.equal(saved.heroes.length, 6, "Contractors are never saved");
+    assert.equal(saved.heroes.length, 6, "Contractors are not saved as heroes");
+    assert.deepEqual(saved.herd.ct.map((r) => r[0]), [-c.id], "only as a slim record (round 5)");
     assert.ok(saved.heroes.every((h) => h.id > 0));
     // next local day
     sim.drop("t6").tick();

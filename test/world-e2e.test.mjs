@@ -368,7 +368,7 @@ describe("scale", () => {
       });
     }
     const w = W.createWorld({ nowMs: T0, seed: 2 });
-    // six heroes a day (D§3.4): the other six play as unsaved Contractors
+    // six heroes a day (D§3.4): the other six play as Contractors (not on the roster)
     Dm.runCast(w, Dm.makeCast(specs), T0 + 20 * MIN * 1000);
     assert.equal(w.state.heroes.length, 6);
     assert.equal(w.rt.contractors.size, 6);
@@ -376,7 +376,8 @@ describe("scale", () => {
     assert.ok(w.rt.rooms.length >= 2);
     for (const c of w.rt.contractors.values()) assert.ok(c.id < 0 && c.st.kills > 0, "Contractors fight too");
     assertClean(w);
-    assert.ok(!W.serialize(w).includes('"Contractor'), "Contractors are never saved");
+    assert.ok(!W.serialize(w).includes('"Contractor'), "Contractors are never saved as heroes");
+    assert.equal(JSON.parse(W.serialize(w)).herd.ct.length, 6, "only as slim records (round 5)");
   });
 
   test("every demo world keeps ticking cleanly for a minute", () => {

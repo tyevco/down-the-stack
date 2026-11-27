@@ -64,7 +64,7 @@ export const scenarios = {
     programIcon: ICON.pi, hpFrac: 0.41, xpFrac: 0.88, feFrac: 0, colors: SHELLMANCER,
     chip: { text: "BOSS 41%", short: "BOSS 41%", color: "#FF5A5F" }, tooltip: "Juno of the Green Build · Lv 31 Senior Shellmancer\nFighting the Pyramid of Doom: 41% left",
   },
-  /** A Contractor (roster full): not saved, tagged. */
+  /** A Contractor (roster full): not on the roster, tagged. */
   contractor: {
     ...kip, heroId: -7, name: "Vik the Patient", level: 26, careerTitle: "Junior Shellmancer", clsName: "Shellmancer",
     programIcon: ICON.claude, hpFrac: 0.9, xpFrac: 0.1, feFrac: 0, colors: SHELLMANCER, contractor: true,

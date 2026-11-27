@@ -7,7 +7,8 @@
 // The roster maximum (TUNING.roster.max 30), and the stage's element and animation budget's hardest
 // case (D§11.9.7, ARCHITECTURE §6.1): 30 agents hired over five days (6 a day) in three spaces,
 // every sixth with three sub-agents (Forklings), high levels and rare gear, a full stash, the late
-// zones open, and a zone boss fight started 30 s before `nowMs`.
+// zones open, Localhost's Review Desk at work (round 1: every resting hero of the herd on duty, the
+// shelf filling), and a zone boss fight started 30 s before `nowMs`.
 
 const SEC = 1000;
 const DAY = 24 * 3600 * SEC;
@@ -47,6 +48,17 @@ export function stressWorld(G, nowMs) {
   G.addSnippets(world.state, 40000);
   world.state.herd.bld = [9, 9, 8, 9, 7, 6];
   world.state.herd.born = world.state.herd.day - 64;
+  // Localhost (docs/TOWN.md round 1, its town phase): the Review Desk at its max level with the shelf
+  // 37.5 / 100 (room for every on-duty hero's share on every tick), today's counters, every hero with
+  // seen work today and job XP across all five ranks, a few rank-ups waiting for the Digest. Plain
+  // data in the engine's own shape (game/town.js), so this recipe still imports nothing.
+  const day = world.state.herd.day;
+  world.state.herd.town = { s: [37.5, 0], rd: 10, u: [20480, 0], t: [206, 1, 340], ru: [] };
+  heroes.forEach((h, i) => {
+    if (!(h.id > 0)) return;
+    h.st.tw = [[3, 40, 160, 420, 1250][i % 5] + i, day];
+    if (i < 3) world.state.herd.town.ru.push([h.id, (i % 4) + 1]);
+  });
   Demo.runCast(world, cast, nowMs - 30 * SEC);
   world.rt.demo = { cast };
   const challenge = W.command(world, "challenge", { kind: "boss", idx: 7 }, nowMs - 30 * SEC);

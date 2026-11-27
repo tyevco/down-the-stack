@@ -91,6 +91,12 @@
  *
  * @typedef {object} OverflowVMAdditions
  * @property {string} [label]  Chip label (default "+count").
+ * @property {{text:string, label:string}|null} [town]  The Localhost chip (docs/TOWN.md §7.2),
+ *           once the Review Desk is open: `text` "LGTM ×206" is drawn in the ground band in XP
+ *           cyan, and the three tents become Localhost's props (desk, campfire, desk). At the
+ *           coarsest detail levels (lean marks) the line folds into the label, `label`
+ *           "+25 · LGTM ×206", so the always-drawn chip never costs more than the camp chip did.
+ *           null / absent: the camp chip (tents, "+count").
  *
  * @typedef {object} HeaderNoteVMAdditions
  * @property {string} [tooltip]  The note's whole text (the hires of one tick: every hire's own line);
@@ -104,6 +110,12 @@
  *
  * FxVM: x/y = centre at age 0; age 1 is drawn at (x + dx, y + dy) fading out (two-tick
  * pattern). levelup/pillar/stamp are multi-tick: shown statically while the VM keeps them.
+ * A coin with `text` (a chest that took an LGTM: "+1.2k · LGTM", docs/TOWN.md §7.2) is drawn as a
+ * text float in its colour instead of the coin sprite: the same one element, ranked with the
+ * status floats.
+ * HeroVM.campfire.station: "review_desk" draws Localhost's desk and its lamp glow (fx/desk.svg)
+ * where the campfire would be (a resting hero on duty, TOWN.md §7.2); "campfire" (or absent) the
+ * campfire. Same cost: 2 elements and 1 loop, 1 element at the bare levels.
  * A pillar's optional `sheet: {heroId, itemUid}` makes it a click target (D§11.16): the sheet
  * opens on that item's compare card. The target is a transparent box painted under everything
  * that takes clicks (`pillarHit`), so a hero, chest or bubble in the light keeps its own click.
@@ -283,7 +295,7 @@ export function renderStage(model, env = {}) {
   }
   for (const c of vm.chests ?? []) put(scene, chest(c, ctx), ctx);
   if (!ctx.compact) {
-    for (const h of heroes) if (h.campfire) scene.children(campfire(h.key, h.campfire, ctx));
+    for (const h of heroes) if (h.campfire) scene.children(restProp(h.key, h.campfire, ctx));
     for (const h of heroes) if (crated(h, ctx)) scene.child(image(art("fx/crate.svg")).absolute().left(r2(h.x - 12)).top(r2(ctx.oy + h.y - 16)).w(24).h(16));
     for (const m of vm.mobs ?? []) if (mobShown(m, ctx)) scene.children(mob(m, ctx));
   }
@@ -569,6 +581,8 @@ function sceneCost(vm, rooms, heroes, ctx, d) {
     const w = num(o.w, 150);
     el += 4 + (compact ? 0 : 1 + Math.min(3, Math.max(1, n)));
     el += Math.min((o.dots ?? []).length, Math.max(1, Math.min(10, Math.floor((w - 12) / 9))));
+    // the Localhost chip's "LGTM ×n" line, unless it folds into the label (chipFold)
+    if (chipTown(o) && !chipFold(o, d.leanMarks).folded) el++;
   }
   return { el, an };
 }
@@ -628,11 +642,13 @@ function fxShown(f, calm, nums) {
 
 /** Effects in the order they keep their place when the budget is short (none on a compact stage). */
 const FX_KEEP = { unblocked: 0, ship: 0, pillar: 1, levelup: 1, stamp: 1 };
+// a coin's "+1.2k · LGTM" (TOWN.md §7.2) is a status float too
+const fxKeep = (f) => (f.kind === "coin" && f.text ? 0 : num(FX_KEEP[f.kind], 2));
 function rankedFx(list, ctx, vm) {
   if (ctx.compact || !Array.isArray(list)) return [];
   const calm = Boolean(ctx.calm ?? vm.calm);
   return list.filter((f) => f && fxShown(f, calm, vm.nums ?? "all"))
-    .sort((a, b) => num(FX_KEEP[a.kind], 2) - num(FX_KEEP[b.kind], 2) || num(a.age, 0) - num(b.age, 0));
+    .sort((a, b) => fxKeep(a) - fxKeep(b) || num(a.age, 0) - num(b.age, 0));
 }
 
 /** A loot pillar's sheet target (D§11.16), or null. */
@@ -877,6 +893,23 @@ function chestMarks(c, ctx) {
       .flex().items_center().text_size(8).font_family(MONO).font_weight(700).text_color(CREAM).whitespace_nowrap().child(`×${c.count}`));
   }
   return out;
+}
+
+/** A resting hero's prop: its station's (Localhost's desk, TOWN.md §7.2) or the campfire. */
+function restProp(key, f, ctx) {
+  return f.station === "review_desk" ? desk(key, f, ctx) : campfire(key, f, ctx);
+}
+
+/**
+ * Localhost's Review Desk (fx/desk.svg, 24 × 20, feet at y): its lamp glows slowly under the
+ * sprite (a lamp breathes, a fire flickers: allowed in stillness, not in calm), as the campfire.
+ */
+function desk(key, f, ctx) {
+  const sprite = image(art("fx/desk.svg")).absolute().left(r2(f.x - 12)).top(r2(ctx.oy + f.y - 20)).w(24).h(20);
+  if (ctx.bare) return [sprite];
+  const glow = div().absolute().left(r2(f.x - 11)).top(r2(ctx.oy + f.y - 18)).w(15).h(10).rounded(5).bg("#FFC2577A").opacity(0.7);
+  if (!ctx.calm) glow.loop("opacity", { from: 0.4, to: 0.85, period: jitter(key, 2600, 37), easing: "ease-in-out" });
+  return [glow, sprite];
 }
 
 /** Campfire: a glow that flickers (allowed in stillness, not in calm) under the fire sprite. */
@@ -1389,7 +1422,8 @@ function fx(f, ctx) {
 
   switch (k) {
     case "poof": return [move(image(art("fx/poof.svg")).id(f.key).absolute().left(r2(x - 12)).top(r2(y - 12)).w(24).h(24))];
-    case "coin": return [move(image(art("fx/coin.svg")).id(f.key).absolute().left(r2(x - 3)).top(r2(y - 3)).w(6).h(6))];
+    // a coin with text (an LGTM'd chest, "+1.2k · LGTM") is a text float, below
+    case "coin": if (f.text) break; return [move(image(art("fx/coin.svg")).id(f.key).absolute().left(r2(x - 3)).top(r2(y - 3)).w(6).h(6))];
     case "loot": return [move(svg(art("fx/loot.svg")).id(f.key).absolute().left(r2(x - 5)).top(r2(y - 5)).w(10).h(10).text_color(f.color ?? C.white))];
     case "coffee": return [move(image(art("fx/mug.svg")).id(f.key).absolute().left(r2(x - 6)).top(r2(y - 6)).w(12).h(12))];
     case "stamp": return [image(art("fx/stamp-fixed.svg")).id(f.key).absolute().left(r2(f.x - 40)).top(r2(oy + f.y - 14)).w(80).h(28)];
@@ -1398,7 +1432,7 @@ function fx(f, ctx) {
     default: break;
   }
   // Text floats: numbers, HTTP jokes, skill names, Unblocked, +Ship XP.
-  const size = num(f.size, k === "crit" ? 13 : k === "incoming" ? 9 : k === "skill" ? 10 : 11);
+  const size = num(f.size, k === "crit" ? 13 : k === "incoming" ? 9 : k === "skill" || k === "coin" ? 10 : 11);
   const text = String(f.text ?? "");
   const tw = monoW(text, size) + 8;
   const th = Math.ceil(size + 5);
@@ -1618,11 +1652,42 @@ function herdBanner(b, ctx) {
     .child(image(art("fx/banner.svg")).w(8).h(12))];
 }
 
-/** "+n" camp chip at the right end: tents with status dots; hover lists the folded heroes. */
+/** The chip's Localhost part ({text, label}) when the VM has a usable one, else null. */
+function chipTown(o) {
+  const t = o && o.town;
+  return t && typeof t.text === "string" && t.text && typeof t.label === "string" && t.label ? t : null;
+}
+
+/**
+ * The Localhost chip's label (docs/TOWN.md §7.2): at the coarsest detail levels (lean marks) its
+ * "LGTM ×n" line folds into the label ("+25 · LGTM ×206", 133 px of a 150 px chip), at a smaller
+ * size where a narrow chip needs it, so the chip costs what the camp chip did; a chip too narrow
+ * for even that keeps the line apart (a strip under 600 px never comes near the budget).
+ * {label, size, folded}.
+ */
+function chipFold(o, lean) {
+  const n = Math.max(0, Math.round(num(o.count, 0)));
+  const plain = { label: String(o.label ?? `+${n}`), size: 13, folded: false };
+  const t = chipTown(o);
+  if (!t || !lean) return plain;
+  const w = num(o.w, 150);
+  for (const size of [13, 11, 9.5]) if (monoW(t.label, size) + 16 <= w - 6) return { label: t.label, size, folded: true };
+  return plain;
+}
+
+/** Localhost's props in the chip, left to right (TOWN.md §7.2: desk, campfire, desk). */
+const CHIP_PROPS = [["fx/desk.svg", 24, 20], ["fx/campfire.svg", 24, 24], ["fx/desk.svg", 24, 20]];
+
+/**
+ * "+n" camp chip at the right end: tents with status dots; hover lists the folded heroes. Once the
+ * Review Desk is open it is the Localhost chip (OverflowVM.town): Localhost's props for the tents
+ * and today's "LGTM ×n" in the ground band (folded into the label at the coarse levels).
+ */
 function overflowChip(o, ctx) {
   const { oy, H, night } = ctx;
   const w = num(o.w, 150);
   const gy = oy + GROUND;
+  const town = chipTown(o);
   const el = div().id(o.key).absolute().left(o.x).top(0).w(w).h(H).overflow_hidden().bg(night.sky)
     .border_l(2).border_color(INK);
   if (o.tooltip) el.tooltip(String(o.tooltip));
@@ -1631,17 +1696,32 @@ function overflowChip(o, ctx) {
   el.child(div().absolute().left(0).top(r2(gy)).w(w).h(2).bg(night.line));
   const n = Math.max(0, Math.round(num(o.count, 0)));
   if (!ctx.compact) {
-    const tents = Math.min(3, Math.max(1, n));
-    for (let i = 0; i < tents; i++) {
-      const tx = w / 2 + (i - (tents - 1) / 2) * 30 - 8;
-      el.child(image(art("fx/tent.svg")).absolute().left(r2(tx)).top(r2(gy - 14)).w(16).h(14));
+    const props = Math.min(3, Math.max(1, n));
+    for (let i = 0; i < props; i++) {
+      if (town) {
+        const [sprite, pw, ph] = CHIP_PROPS[i];
+        const px = w / 2 + (i - (props - 1) / 2) * 30 - pw / 2;
+        el.child(image(art(sprite)).absolute().left(r2(px)).top(r2(gy - ph)).w(pw).h(ph));
+      } else {
+        const tx = w / 2 + (i - (props - 1) / 2) * 30 - 8;
+        el.child(image(art("fx/tent.svg")).absolute().left(r2(tx)).top(r2(gy - 14)).w(16).h(14));
+      }
     }
   }
-  const label = o.label ?? `+${n}`;
-  const lw = monoW(label, 13) + 16;
-  el.child(div().absolute().left(r2(w / 2 - lw / 2)).top(r2(ctx.compact ? Math.max(2, gy - 22) : oy + CAMP_LABEL_TOP)).w(lw).h(20).rounded(10)
+  const fold = chipFold(o, ctx.leanMarks);
+  const label = fold.label;
+  const lw = Math.min(w - 4, monoW(label, fold.size) + 16);
+  el.child(div().id(`${o.key}/label`).absolute().left(r2(w / 2 - lw / 2)).top(r2(ctx.compact ? Math.max(2, gy - 22) : oy + CAMP_LABEL_TOP)).w(lw).h(20).rounded(10)
     .bg("#0B0A12CC").border(1).border_color(alpha(CREAM, 0.3)).flex().items_center().justify_center()
-    .text_size(13).line_height(1).font_family(MONO).font_weight(800).text_color(CREAM).child(label));
+    .text_size(fold.size).line_height(1).font_family(MONO).font_weight(800).text_color(CREAM).whitespace_nowrap().child(label));
+  if (town && !fold.folded) {
+    // today's LGTMs, in the ground band, in XP cyan (an LGTM is XP); below the dots on a compact strip
+    const lh = 12;
+    const ly = ctx.compact ? gy + 15 : gy + 10;
+    el.child(div().id(`${o.key}/lgtm`).absolute().left(2).top(r2(Math.min(H - lh - 1, ly))).w(w - 4).h(lh)
+      .flex().items_center().justify_center().text_size(10).line_height(1).font_family(MONO).font_weight(800)
+      .text_color(C.xp).whitespace_nowrap().child(town.text));
+  }
   const dots = (o.dots ?? []).slice(0, Math.max(1, Math.min(10, Math.floor((w - 12) / 9))));
   const dy = ctx.compact ? gy + 6 : oy + 116;
   dots.forEach((c, i) => {

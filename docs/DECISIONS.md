@@ -116,6 +116,178 @@ change that keeps a promise already made. Each says what to change to decide oth
    stay apart. The stage's room headers name maps, not spaces, and the sheet's header names one
    space, so neither changes. D§11.14.
 
+### Round 5
+
+1. **Contractors across a restart: a slim record** (owner decision; was open since round 4). A
+   Contractor is kept as a slim record in the save (`herd.ct`, about 35 bytes with a seat a saved
+   hero shares, 60 with a seat of its own like "ceo-assistant-res-2/claude"): its number (its id,
+   which gives its default name, hoodie and hat), seat, level, XP, class (with its provisional flag
+   and reviews; the signature window too while the class can still change, an Intern's or a
+   provisional one, 3 bytes a task), its place in the hiring line and the game day it was last seen,
+   and a 5-character tag of its terminal's address. After a restart or a hot reload a new terminal
+   of its seat with no saved hero to take is that Contractor again (its own terminal first, by the
+   tag; herdr's core keeps terminals while the app is closed), so herdr closed across 04:00 hires a
+   waiting Contractor at its level. For a short reconnect window after a load (60 s,
+   `T.roster.reconnectSec`) a record whose terminal is not listed yet keeps its hire and its place in
+   line, so a newcomer listed first takes only the hires left beyond it. A record not claimed for 7
+   game days is dropped (`T.roster.contractorKeepDays`); the records are capped at the roster's
+   size (30), live Contractors first, the oldest unclaimed going first. A read-only world neither
+   claims nor writes one. SAVE_VERSION stays 1: an older build drops the records (its Contractors
+   come back new, as before). D§3.2, D§3.4, D§13.2.
+
+Decided by default with it (the smallest change that keeps the promise; each says what to change
+to decide otherwise):
+
+2. **A Contractor whose terminal ends keeps its record too**, not only one live at a save: closing
+   its pane then quitting the app, or restarting its agent in a new pane, brings it back as itself
+   with its seat's next terminal (the record's 7 game days apply). Otherwise: write records for live
+   Contractors only (`agents.goOffDuty` keepRecord).
+3. **A saved hero of the seat comes first**: a new terminal takes a free saved hero of its seat
+   (D§3.2) before a Contractor record, even when it is that Contractor's own terminal; the record
+   waits. A terminal of the seat listed a few snapshots before the Contractor's own takes the record
+   by seat, as a free saved hero is taken today (round 4b's own-first rule holds within one listing).
+   So when herdr lists a seat's two terminals in different snapshots after a start, the two can swap:
+   the Contractor's terminal, listed first, takes the seat's saved hero (its own terminal not listed
+   yet), and the hero's terminal then takes the Contractor's record (in the review's random restarts
+   listed over three snapshots, 37 of 300 had such a swap; none when every terminal is listed at
+   once). Before round 5 the same terminal took the saved hero too and the hero's agent came back as
+   a new Contractor. Otherwise: a terminal's own record (by tag) before a free saved hero of its seat
+   (`reconcile` step 1a skips a terminal whose own record is there, and 1a' claims it).
+4. **What a record does not keep**: its kit (rebuilt as the reference kit for its level and class),
+   its skills (re-spent by the auto-learn rule), XP below the whole point, Daily Shift, Fresh Eyes,
+   HP, cooldowns and pending chests. The chests keep round 4's behaviour: while its agent plays they
+   wait for "seen" and pay the herd; when its terminal ends they open Unreviewed for the herd at once;
+   chests still waiting when the app closes are not kept. Session-keyed state (journal ids, review
+   Wounds and Lessons, inbox finder, fight seats) is dropped on load as before; its journal lines
+   keep its name.
+5. **A newcomer held back by the window** plays as a Contractor (at the herd's median level minus
+   five) and is promoted keeping that level when a hire is left for it, as any agent that arrives
+   while the day's hires are taken. Otherwise: hold the newcomer unbound until the window ends.
+6. **Rebind lets the Contractor go**: moving a Contractor's agent onto a benched hero keeps no record
+   of it (the person chose the saved hero). Otherwise: keepRecord in `agents.rebind`.
+7. **Told**: a Contractor's sheet banner reads "… · not on the roster until then; …" (was "not
+   saved until then"), its tooltip adds that the herd remembers its name, level, XP, class and place
+   in line across restarts and for 7 game days while its agent is away (not its kit or chests);
+   right after a load, one behind a held record reads "Hired in about 40 s, unless a contractor from
+   before the restart comes back first"; the Roster's count line ends "· 1 contractor off duty" for
+   records waiting for their agent. D§11.13, D§11.14.
+
+### Town round 1: "The Review Desk opens" (docs/TOWN.md)
+
+The owner's decisions (TOWN.md §13, 2026-11-27; final):
+
+1. **The town is Localhost**, the name already on screen in the Herd panel's header, the empty
+   stage and the header notes.
+2. **A hero always fights while its agent works.** There is no stay-in-town switch, ever: the
+   town never takes a working agent's hero out of the field (TOWN.md's build round 4 is dropped).
+3. **+10% XP and gold on a chest you opened with full value** while an LGTM is on the shelf
+   (`T.town.lgtmBonus` 0.10; measured 1.2–1.6% of the personas' XP, docs/BALANCE.md §14).
+4. **The Docs Library as the second station, from round 2** (Runbooks, +10 s on a big fight's clock,
+   never in the win estimate), with **stations picked from the space names, then class**. Round 1
+   puts every hero on duty at the Review Desk; the station is derived, never saved, so round 2
+   adds them without a save change.
+5. **The whole town on the stage when nothing has worked for 15 minutes**, from round 3; round 1
+   keeps the field, with desks in resting slots and the Localhost chip.
+
+Decided by default in round 1 (the spec left them open; each says what to change to decide
+otherwise). D§10.8 is the rule as built.
+
+6. **The duty rule's credit** is the absolute game day of the hero's last chest opened with full
+   value (`hero.st.tw[1]`), saved as its age in days (0 or 1) and left out at 2 or more, so the 04:00
+   turn ages it without code at the turn. It is recorded from any chest opened with full value, for
+   roster heroes of any level and for Contractors, even before the Review Desk exists. The age
+   counts back from the day the town was written on, `herd.x.town.d` (≈ 10 bytes a save, written
+   whenever the town or a credit is), not from the save's own `day`: an older build keeps the town
+   and the ages as they were while its saves move `day` on, so a credit it carried for days reads as
+   days old (follow-up: counted from the save's `day`, an older build's save 5 game days later put
+   every such hero back on duty, making job XP and LGTMs from idle time), and the town's game-day
+   turn that build skipped runs on load (`town.loadDay`). Otherwise: save the absolute day (2 bytes
+   more a hero, ≈ 60 for 30 heroes).
+7. **Review Desk level 1** needs a Lv 10+ roster hero *with seen work* and 3,000 gold, not just a
+   Lv 10 hero, which keeps the always-working bot byte for byte the same by construction.
+   Otherwise: `town.autoDesk`'s first test.
+8. **The demand rule's flags**: "full" when the shelf reaches its cap (and at the 04:00 turn if it
+   still is); "dry" only when a chest opened with full value finds less than 1 LGTM after "full" on
+   the same game day; "wanted" set at the turn for that game day and dropped at the next. The buy
+   happens on autopilot's 60-tick pass, never while an offline gap settles. After a gap of several
+   days the check reads the last day the app was open, once. Otherwise: `town.dayTurn`.
+9. **The gold path.** With the cheap ×2 curve and the demand rule the small herds buy Review Desk
+   levels 1–3 (Typical 1–5) in their first week, each after a day whose shelf ran dry; that moves
+   the Docs Library's levels by minutes and its herd XP bonus by at most 0.1 points
+   (docs/BALANCE.md §14.4). Otherwise (the owner's call): no Review Desk level above 1 while a
+   building waits for gold.
+10. **The coverage count**: today's chests opened with full value while the desk is open
+    (`herd.town.t[2]`, ≤ 4 bytes), for "today 206 of 340 (61%)". Otherwise: drop the percentage.
+11. **Rounding.** The save keeps job XP in whole units and the shelf to a tenth, both rounded down,
+    so a reload never lifts a rank or the shelf. A **hot reload** hands the exact values over with
+    the world (integrator, round 1: before, every hot reload lost up to 1 job XP a hero and 0.1
+    LGTM), so it changes no outcome; a **restart** loses up to that (the personas restart daily:
+    about 0.5 job XP a hero a day of their 12–19). Otherwise: one decimal for job XP (about 2 bytes
+    a hero).
+12. **Who approved a title** ("“Bump deps” (Fizz), by Rue"): the hero with the most LGTMs made and
+    not yet taken, preferring another hero than the chest's own; after a restart, the top-ranked
+    hero with seen work. The last five titles are runtime only (a hot reload keeps them, a restart
+    starts the line empty, as TOWN.md §7.5 says). Otherwise: `town.reviewerFor`.
+13. **Header notes**: "Localhost: the Review Desk is open" once, "Localhost: Review Desk n" for the
+    later levels as any building's; nothing for production, rank-ups, an empty shelf, Uptime's
+    nines (round 3) or a settling gap. No toasts, no badge count, no Herd dot.
+14. **Ranks**: one entry a hero in the Digest's rank-ups (its newest rank), pruned on the 60-tick
+    pass for heroes who left the roster. A retired hero's rank is kept in its Hall of Fame entry
+    (only when above Drive-by); the Hall of Fame card does not show it yet. Otherwise: show
+    `hallOfFame`'s `jobTitle` on the card.
+15. **Contractors**: a promotion keeps today's credit and starts job XP at 0. A Contractor's slim
+    record (round 5) carries no credit, so one restarted before its promotion goes on duty only
+    after its next seen chest. Otherwise: add the credit day to the record (2 bytes).
+16. **The offline gap**: heroes waiting at reopen earn nothing (as Fresh Eyes); every other Lv 10+
+    hero counts for the gap with the credit it held when the gap began (a chest seen as the app
+    comes back does not reach back into the gap), and the shelf's room is shared as ticking the gap
+    would have shared it (the heroes on duty while it filled).
+17. **A read-only save** accrues nothing, takes nothing and buys nothing; with **the clock behind**
+    there is no duty and no production, but a chest that opens still takes an LGTM (the field opens
+    it as usual). With the town off (`--no-town`) nothing at all happens, the 04:00 turn included.
+18. **The status surfaces stay the agent's**: a resting hero on duty reads "Resting" with the job on
+    its tooltip's next line ("At the Review Desk · Committer reviewer"), one not on duty keeps
+    "Resting at the campfire"; the sheet's header reads "resting · “<its own last task>”" (follow-up:
+    "resting · at the Review Desk · “Fix flaky auth test”" read as the agent reviewing that task, so
+    the job moved to the line's tooltip; a hero not on duty reads "resting at the campfire"); a shipped
+    hero on duty, drawn by its chest in the field, says "On duty for the Review Desk while its
+    chest waits" (integrator: it said "At the Review Desk"); the Roster gets no column, only a
+    tooltip line. Otherwise: `town.heroTown`'s `tip` and `view/chrome.js dutyNote`.
+19. **The Localhost chip**: its three tents become desk, campfire, desk (round 1 has no shelf art),
+    the same count; "LGTM ×n" folds into the label at the three coarsest detail levels (13 → 11 →
+    9.5 px), and a 96 px chip keeps it as its own element. Its tooltip's header stays "At camp (n):"
+    (folded working heroes are not in town); it adds `vendor/`'s line (TOWN.md §2.4, a round
+    early).
+20. **The LGTM coin float** is one element, a text float in coin brass instead of the coin sprite,
+    rising from just above the chest, its pill at the chest's left edge (clear of the hero's face);
+    it ranks with the status floats and shows in calm mode as "Unblocked" does. It is the one place
+    a gold amount is shown as a number on the stage (D§11.7).
+21. **The Localhost tab**: the town lines stay at the top and the building grid scrolls below; the
+    Review Desk card is drawn first and across both columns (TOWN.md §7.5 drew it last; first keeps
+    its Buy in view, and the full width keeps its name whole at 608 px, the 760 px dialog at zoom
+    1.25); the maintainer, staff count and demand rule are in the header and the card's tooltip.
+    The tab id stays `upgrades`.
+22. **The Job card** is read-only, at the top of the Career tab's right column (the Lv 60+ boss card
+    in the left column stays in view); its rank line moves under the title in a narrow sheet. The
+    override chips are round 2's; the Stats tab's Chest / LGTM split and the spare-width scenery
+    (TOWN.md §7.2, §7.6) are not built yet.
+23. **The Digest card**: at most two lines, what was made (Uptime on its right, "was …" only when
+    the nine changed), then the rank-ups grouped by rank, highest first. It counts from the lifetime
+    counters at the last "Mark as read", kept in the town (`herd.x.town.dg`), not in
+    `herd.digestSnap` as TOWN.md §8 drew it: an older build's Digest writes `digestSnap` anew, and
+    the next card then counted every lifetime LGTM as new (follow-up). The town keeps its own
+    baseline, so after an older build the card counts from the last read in a build with the town.
+24. **Pacing gates** (tools/pacing-sim.mjs): the mean shift is the mean over Lv 20/30/50/60/90/100
+    of each milestone's hour ratio minus 1 (milestones reached in both runs); with the town, a
+    milestone off ±15% counts against the gate unless it is also off without the town and no
+    further off; `--no-town` keeps the plain ±15% rule; `--persona big`'s byte gate is 0.8 × 1024 B.
+25. **The sweep's gear** is harvested without the town, so `--sweep` prints the same bytes either
+    way (with the town, the same seed rolls its drops at other moments and the auto-kit sweep moves
+    as another seed's does: docs/BALANCE.md §14.4). Otherwise: harvest with the town and accept
+    that seed's noise in the sweep.
+26. **The demo worlds** `late` and `idle` (previews, tests) and the QuickJS stress30 world carry a
+    seeded town.
+
 ### Earlier rounds
 
 - Round 3: the palette's sheet and calm-mode entries were dropped (decision 4 above keeps it so).
@@ -141,13 +313,9 @@ Each item says what the game does now; nothing changes until the owner decides.
 - **A herd-first kill's Keepsake.** It is named in the boss toast while "Herd-first boss kill" is
   on, so the kill spends one of the day's three toasts; it raises its own "LTS or Keepsake drop"
   toast only while the boss kind is off. D§11.15.
-- **Contractors in a paused fight.** Contractors are never saved, so a restart or hot reload drops
-  them from a paused or running boss fight; they rejoin by questing in the fight's zone.
-- **Contractors across a restart** (round 4; the owner has been asked). Contractors are never
-  saved. After a restart or hot reload the hiring line re-forms in snapshot order, so
-  "longest-running first" is lost, and closing herdr across 04:00 makes a waiting Contractor come
-  back as a new terminal: it is hired fresh at Lv 1 if hires remain, without its level or kit.
-  Saving Contractors would fix both (a save format change). D§3.4.
+- **Contractors in a paused fight.** A Contractor's slim record (round 5) does not keep its seat in
+  a fight, so a restart or hot reload drops it from a paused or running boss fight; it rejoins by
+  questing in the fight's zone.
 - **A restart in a new pane** (round 4b). The off-duty grace (Round 4b, 1) protects a restarted
   agent's hero for 15 minutes. A relaunch in the same pane (the agent exits inside herdr's shell,
   or a new terminal in a pane that survived) takes its own hero back; closing the pane and opening
@@ -166,6 +334,5 @@ Each item says what the game does now; nothing changes until the owner decides.
 
 ## Ideas for later
 
-- **Town.** The fighting agents keep levelling in the field; other agents could be assigned to
-  jobs and stations in a town (a setting named to fit the game). Not designed yet; to be written
-  up as a GitHub issue.
+- **Town** (GitHub issue #1): designed in docs/TOWN.md; round 1 (the Review Desk) is built
+  (D§10.8); rounds 2 (the Docs Library, Runbooks, role words) and 3 (the town view) follow.

@@ -21,6 +21,7 @@ import { mapUnlocked, backlogOpen, doorOpen, autoBuyPick, buy, buildingLevel } f
 import { polishMax, g, weaponDmg, iRef, refHP, refDR, autoOn } from "./formulas.js";
 import { heroCtx } from "./combat.js";
 import * as B from "./boss.js";
+import { autoDesk, refreshStations } from "./town.js";
 
 const MAX_LAG = 5; //       gearLag() reports at most 5 levels
 const CONVERGE_BELOW = 4; // convergence never takes a hero to a map whose mid is more than 4 under its level
@@ -626,5 +627,9 @@ export function autopilot(world, ev, opts = {}) {
 
   if (auto.polish) autoPolish(world);
   if (auto.buildings) autoBuild(world, ev);
+  // Localhost's Review Desk (docs/TOWN.md §5.2): demand-gated, outside autoBuyPick's cheapest-first
+  // queue (the six buildings' order is untouched), behind the same "Buildings" switch
+  if (auto.buildings) autoDesk(world, ev);
+  refreshStations(world);
   autoChallenge(world, ev, auto);
 }

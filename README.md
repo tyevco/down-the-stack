@@ -5,6 +5,15 @@ An idle side-scrolling dungeon for [herdr](https://herdr.dev). Every coding agen
 works, waits on a crate while the agent needs you, and drops a Commit Chest when the agent ships.
 Nothing needs playing: one tick per second, autopilot for everything.
 
+Between tasks the heroes go home to **Localhost**, the town. A hero of level 10 or more whose agent
+is resting (or done, or closed for the night) sits at the **Review Desk** instead of its campfire,
+on days you looked at its agent's work, and approves your tasks: each chest you open then pays 10%
+more XP and gold ("+1.2k · LGTM"), and the camp corner of the strip counts them ("LGTM ×206").
+A hero always fights while its agent works; the town never takes one out of the field, needs
+nothing from you, and sends no toasts. The Herd panel's Localhost tab shows the town, the last
+tasks it approved and the Review Desk, which autopilot builds and grows when your herd's reviews
+run out.
+
 ![Down the Stack](preview.png)
 
 It is a herdr-app 0.1.17 **layout** (`layouts/Down-the-Stack.json`) plus the **mod** it shows
@@ -222,7 +231,7 @@ it where Node finds it.
 | `npm run windows -- --roles --preview` | whole-window screenshots of the demo worlds into `out/` (`--roles` adds each role alone, `--preview` also rewrites `preview.png`) |
 | `npm run art` | regenerate `mods/down-the-stack/art/` and `preview.svg` (never hand-edit art) |
 | `node tools/art-sheet.mjs` | a contact sheet of every generated asset into `out/art-sheet.png` |
-| `npm run pacing` | the headless persona simulator (`-- --sweep` for the full sweep) |
+| `npm run pacing` | the headless persona simulator with the town (`-- --no-town` without it, `-- --seeds 1-4` for four seeds and a summary, `-- --persona big` for the 32-agent owner model, `-- --sweep` for the full sweep) |
 | `npm run qjs` | the mod in QuickJS-ng with herdr's limits and sandbox (`tools/qjs/README.md`) |
 
 Some tests read herdr-app 0.1.17's source: set `HERDR_SRC` to a checkout (by default a
@@ -232,7 +241,8 @@ QuickJS packages, each such test prints one `SKIPPED GATE:` line and skips;
 
 Read `docs/ARCHITECTURE.md` (the build contract and herdr's runtime rules) before changing the
 mod. `docs/BALANCE.md` lists the intended deviations from the design, and `docs/DECISIONS.md` the
-owner's product calls, made and open. `docs/herdr-notes/` has research notes on herdr, with source
+owner's product calls, made and open. `docs/TOWN.md` is the design of Localhost and its build
+plan (round 1, the Review Desk, is built). `docs/herdr-notes/` has research notes on herdr, with source
 citations.
 
 ## Licence

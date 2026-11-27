@@ -144,6 +144,10 @@ const NULLABLE = {
   upgrades: "object", stash: "object", tracker: "object", bosses: "object", roster: "object", digest: "object", settings: "object",
   // round 4: a tab's badge meaning, a roster row's space (no header) and a Contractor's hire, the digest's seen command
   tip: "string", space: "string", hire: "object", seen: "object",
+  // Localhost (docs/TOWN.md round 1): the tab's town (null with the town off), its LGTM row and
+  // titles (none before the desk opens), the Job line (line: none for an Intern or a Contractor),
+  // a roster row's job tooltip
+  town: "object", shelf: "object", titles: "object", job: ["object", "string"], line: "string",
 };
 // settings values / option ids / chrome hooks, filter patches and command args differ per item
 const ANY = new Set(["value", "id", "chrome", "set", "args"]);
@@ -1288,9 +1292,10 @@ test("rules: the item-score cache keeps only live heroes (Contractor churn does 
   let now = NOW;
   const hired = [];
   for (let i = 1; i <= 12; i++) {
-    // an agent past today's roster becomes a Contractor (a fresh negative id each time); its gear
+    // an agent past today's roster becomes a Contractor (a fresh negative id each time: each in a
+    // space of its own, so none comes back as the one before it from its record, round 5); its gear
     // sheet prices items; then it leaves
-    const ag = { ...snapshot.agents[0], address: `tc${i}`, pane: `p_tc${i}`, seq: 700 + i, focused: false };
+    const ag = { ...snapshot.agents[0], address: `tc${i}`, pane: `p_tc${i}`, seq: 700 + i, focused: false, space: `s_tc${i}`, space_name: `churn-${i}` };
     now += 1000;
     W.tick(world, { ...snapshot, nowMs: now, agents: [...snapshot.agents, ag] });
     const id = world.rt.bind.get(`tc${i}`);
@@ -1688,9 +1693,11 @@ test("rules (round 4, P1): a Contractor's banner, tag and roster row say when it
   const first = cs.reduce((a, b) => (a.since <= b.since ? a : b));
   // the day's six hires are spent: the next 04:00 game day reopens hiring (tomorrow, NOW being 09:30 UTC)
   const sheet = V.sheetView(world, { heroId: first.id, tab: "gear", filter: FILTER });
-  assert.match(sheet.note.text, /^Contractor: hired tomorrow at 04:00 · not saved until then; its kills and chests still pay the herd$/);
+  assert.match(sheet.note.text, /^Contractor: hired tomorrow at 04:00 · not on the roster until then; its kills and chests still pay the herd$/);
   assert.match(sheet.note.tooltip, /^Hired at the next 04:00 game day/);
-  assert.match(sheet.note.tooltip, /keeps its name, level, XP and class, and its kit becomes saved Alpha gear\. Contractors don't get equity\.$/);
+  assert.match(sheet.note.tooltip, /keeps its name, level, XP and class, and its kit becomes saved Alpha gear\. /);
+  // round 5: a Contractor is kept as a slim record until it is hired
+  assert.match(sheet.note.tooltip, /Until then the herd remembers its name, level, XP, class and place in line across restarts, and for 7 game days while its agent is away \(not its kit or chests\)\. Contractors don't get equity\.$/);
   assert.match(sheet.header.tagTip, /^Contractor: Hired at the next 04:00 game day/);
   const roster = V.herdView(world, { tab: "roster", filter: FILTER }).roster;
   assert.match(roster.count, / · 2 contractors, the next hired tomorrow at 04:00$/);
@@ -1733,7 +1740,7 @@ test("rules (round 4b): a Contractor waiting on a hero's off-duty grace is told 
   assert.equal(o.when, "grace", JSON.stringify(o));
   assert.equal(o.atMs, world.rt.nowMs + 10 * 60000);
   const sheet = V.sheetView(world, { heroId: c.id, tab: "gear", filter: FILTER });
-  assert.match(sheet.note.text, /^Contractor: hired in about 10 min · not saved until then; /);
+  assert.match(sheet.note.text, /^Contractor: hired in about 10 min · not on the roster until then; /);
   assert.match(sheet.note.tooltip, /^Hired in about 10 min, once a hero below Lv 10 has been off duty for 15 min \(unless its agent comes back\)/);
   const roster = V.herdView(world, { tab: "roster", filter: FILTER }).roster;
   assert.equal(roster.groups.flatMap((g) => g.rows).find((r) => r.heroId === c.id).hire.text, "Hired in ~10 min");
@@ -1867,4 +1874,267 @@ test("render (round 4, P4, P1): 30 heroes in 25 spaces, then 6 heroes and 24 Con
   assert.equal(rows.filter((r) => r.hire && r.hire.text === "Hired Nov 26 04:00").length, 6);
   const h = await mount("herd", c, { props: { tab: "roster" } });
   assertClean(h.m, "6 heroes + 24 contractors", 450);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Localhost, the town (docs/TOWN.md round 1: §7.4-§7.7)
+// ---------------------------------------------------------------------------------------------
+
+const TW = await import("../mods/down-the-stack/game/town.js");
+const fresh = (kind) => D.demoWorld(kind, NOW).world;
+const bump = (w) => { w.rt.version++; return w; };
+
+test("Localhost tab (TOWN.md §7.5): the first tab is Localhost; header with Uptime, the LGTM shelf row, the last five approved titles, the Review Desk card first (level, cost, Buy); the six buildings stay", async () => {
+  const w = fresh("late");
+  const vm = V.herdView(w, { tab: "upgrades", filter: FILTER });
+  assert.deepEqual(vm.tabs[0], { id: "upgrades", label: "Localhost", badge: null, tip: null });
+  const up = vm.upgrades;
+  assert.equal(up.buildings.length, 6, "the six D§10.2 buildings stay");
+  const town = up.town;
+  const info = TW.townInfo(w);
+  assert.equal(town.header, `99% uptime · ${info.onDuty} on duty (Review Desk ${info.onDuty}) · maintainer ${info.maintainer.name.split(" ")[0]}`);
+  // (the next nine without its cosmetic unlock: the town view and its props come in round 3)
+  assert.match(town.headerTip, /^Uptime 99%: [\d,]+ served .* 99\.9% at 2,500\. Cosmetic: it pays nothing\.$/);
+  assert.equal(town.shelf.label, `LGTMs ${info.shelf.n} / 70`);
+  assert.ok(town.shelf.frac > 0.5 && town.shelf.frac < 0.6);
+  assert.equal(town.shelf.text, `+10% XP and gold on chests you open · today ${info.today.lgtm} of ${info.today.chests} (${info.today.pct}%)`);
+  // the last five approved, by their real titles (runtime only), who approved each in the tooltip
+  const titles = TW.lastTitles(w);
+  assert.equal(titles.length, 5);
+  assert.equal(town.titles.text, `Last approved: ${titles.map((e) => `“${e.title}” (${e.name.split(" ")[0]})`).join(" · ")}`);
+  assert.deepEqual(town.titles.tooltip.split("\n").slice(1), titles.map((e) => `“${e.title}” (${e.name.split(" ")[0]}), by ${e.byName.split(" ")[0]}`));
+  const desk = town.desk;
+  assert.deepEqual([desk.key, desk.id, desk.name, desk.level, desk.levelText, desk.effect, desk.next, desk.maxed],
+    ["b:review_desk", "review_desk", "Review Desk", 7, "7 / 10", `Shelf 70 · ${info.staff} reviewers`, "Next: shelf 80", false]);
+  assert.deepEqual(desk.icon, { path: "fx/desk.svg", mask: false });
+  assert.deepEqual([desk.buy.cmd, desk.buy.args, desk.buy.cost, desk.buy.enabled], ["buy", { building: "review_desk" }, "128k gold", true]);
+  // the Buy runs the engine's buy (one level, its price in gold)
+  const gold = w.state.herd.gold;
+  const r = W.command(w, "buy", desk.buy.args, NOW);
+  assert.ok(r.ok, r.error);
+  assert.equal(TW.deskLevel(w.state), 8);
+  assert.equal(gold - w.state.herd.gold, 128000);
+  // the tab as rendered: the town's lines on top, the Review Desk the grid's first card
+  const h = await mount("herd", fresh("late"), { props: { tab: "upgrades" } });
+  assert.ok(h.m.node("hd-town") && h.m.node("hd-town-lgtm") && h.m.node("hd-town-titles"));
+  const cards = h.m.findAll((n) => /^hd-b:/.test(String(n.id))).map((n) => n.id);
+  assert.deepEqual(cards, ["hd-b:review_desk", ...up.buildings.map((b) => `hd-${b.key}`)], "the Review Desk first, then the six");
+  assert.ok(h.m.node("hd-buy-b:review_desk"), "the desk's Buy");
+});
+
+test("Localhost tab before the Review Desk opens: no shelf yet, the card says what it opens; with the town off the tab is Upgrades as before", () => {
+  const w = fresh("mid");
+  w.state.herd.town = undefined;
+  bump(w);
+  const vm = V.herdView(w, { tab: "upgrades", filter: FILTER });
+  const town = vm.upgrades.town;
+  assert.match(town.header, /^closed: opens with the Review Desk's first level/);
+  assert.equal(town.shelf, null);
+  assert.equal(town.titles, null);
+  assert.deepEqual([town.desk.level, town.desk.levelText, town.desk.effect, town.desk.next, town.desk.buy.cost], [0, "0 / 10", "Opens Localhost", "Auto at 3.0k gold", "1.0k gold"]);
+  const T = DATA.TUNING.town;
+  const on = T.on;
+  try {
+    T.on = false;
+    const off = V.herdView(bump(w), { tab: "upgrades", filter: FILTER });
+    assert.equal(off.tabs[0].label, "Upgrades");
+    assert.equal(off.upgrades.town, null);
+  } finally {
+    T.on = on;
+  }
+});
+
+test("Job line (TOWN.md §7.6): station, rank and job XP, why the hero is or is not on duty; the agent's own words stay on the status surfaces, the job only in secondary text and tooltips (§7.4)", () => {
+  const w = fresh("idle");
+  const resting = [...w.rt.live.values()].find((l) => l.state === "resting");
+  const hero = w.state.heroes.find((h) => h.id === resting.heroId);
+  const vm = V.sheetView(w, { heroId: hero.id, tab: "career", filter: FILTER });
+  const job = vm.career.job;
+  assert.equal(job.title, "Job · Review Desk");
+  assert.match(job.line, /^(Drive-by|Contributor|Committer|Maintainer|Core) reviewer · \d+ \/ [\d.,k]+$/);
+  assert.match(job.status, /^On duty: resting \(seen work today\) · made \d+ LGTMs?/);
+  assert.equal(job.onDuty, true);
+  assert.ok(job.frac >= 0 && job.frac <= 1);
+  // the sheet's header line keeps the agent's own word and its own last task: "at the Review Desk"
+  // right before the quoted task read as the agent reviewing it (an idle pr-review-* terminal), so
+  // the job is only in the line's tooltip (and the Job card)
+  resting.spaceName = "pr-review-eng-1";
+  resting.title = "Fix flaky auth test";
+  const head = V.sheetView(bump(w), { heroId: hero.id, tab: "career", filter: FILTER }).header;
+  assert.equal(head.quest, "Fix flaky auth test");
+  assert.match(head.sub, /^pr-review-eng-1 · .+ · resting$/);
+  const composed = `${head.sub} · “${head.quest}”`; // as ui/sheet.js draws it
+  assert.ok(!/Review Desk/.test(composed), composed);
+  assert.match(head.subTip, /^At the Review Desk · \w[\w-]* reviewer/);
+  // status surfaces: the pane header's chip and the party row keep the agent's words
+  const plate = V.nameplateView(w, { terminal: resting.address });
+  assert.deepEqual([plate.chip.text, plate.status], ["resting", "idle"]);
+  assert.match(plate.tooltip, /\nResting\nAt the Review Desk · /);
+  const row = V.partyView(w, { width: 300, nowMs: NOW }).groups.flatMap((g) => g.rows).find((r) => r.heroId === hero.id);
+  assert.equal(row.status, "idle");
+  assert.match(row.tooltip, /\nResting\nAt the Review Desk · \w[\w-]* reviewer/);
+  const roster = V.herdView(w, { tab: "roster", filter: FILTER }).roster.groups.flatMap((g) => g.rows).find((r) => r.heroId === hero.id);
+  assert.equal(roster.status, "idle");
+  assert.match(roster.seen, /^resting /);
+  assert.match(roster.job, /^At the Review Desk · /);
+  for (const s of [plate.chip.text, row.status, roster.status, roster.seen]) assert.ok(!/review|LGTM|desk/i.test(s), s);
+  // lapsed: why it is not on duty
+  hero.st.tw[1] = w.state.herd.day - 2;
+  const lapsedVM = V.sheetView(bump(w), { heroId: hero.id, tab: "career", filter: FILTER });
+  const lapsed = lapsedVM.career.job;
+  assert.equal(lapsed.status, "Back on duty after you see its next chest");
+  assert.equal(lapsed.onDuty, false);
+  // not on duty: the header reads as before the town, its tooltip says why
+  assert.match(lapsedVM.header.sub, / · resting at the campfire$/);
+  assert.equal(lapsedVM.header.subTip, "Back on duty after you see its next chest");
+  // an Intern: no job yet
+  hero.L = 7;
+  const intern = V.sheetView(bump(w), { heroId: hero.id, tab: "career", filter: FILTER }).career.job;
+  assert.deepEqual([intern.title, intern.line, intern.status], ["Job", null, "Gets a job at Lv 10 (Junior)"]);
+});
+
+test("Job line: a Contractor holds no job (and says when it is hired); an off-duty hero's Roster tooltip says where it works", () => {
+  const extra = [{ address: "c1", program: "claude", space: "spc_9", spaceName: "pr-review-eng-1" }];
+  const w = sameDayWorld(extra, { heroes: 30, spaces: 3 });
+  const c = [...w.rt.contractors.values()][0];
+  assert.ok(c, "a Contractor past the roster");
+  const job = V.sheetView(w, { heroId: c.id, tab: "career", filter: FILTER }).career.job;
+  assert.equal(job.title, "Job");
+  assert.equal(job.line, null);
+  assert.match(job.status, /^Contractors don't hold jobs( \(.+\))?$/);
+  // an off-duty hero (its terminal gone) of Lv 10+ with seen work, the town open: on duty, says the Roster's tooltip
+  const late = fresh("late");
+  const [h, live] = [...late.rt.live].map(([id, l]) => [late.state.heroes.find((x) => x.id === id), l]).find(([x]) => x && x.L >= 10);
+  late.rt.live.delete(h.id);
+  late.rt.bind && late.rt.bind.delete && late.rt.bind.delete(live.address);
+  assert.equal(TW.onDuty(late, h, null), true);
+  const row = V.herdView(bump(late), { tab: "roster", filter: FILTER }).roster.groups.flatMap((g) => g.rows).find((r) => r.heroId === h.id);
+  assert.equal(row.status, "off");
+  assert.match(row.job, /^Off duty · at the Review Desk \(\w[\w-]* reviewer\)$/);
+});
+
+test("Digest (TOWN.md §7.7): one Localhost card after the gains, before the chests waiting; never in the badge or the Herd dot; gone once read", () => {
+  const w = fresh("late");
+  const vm = V.herdView(w, { tab: "digest", filter: FILTER });
+  const keys = vm.digest.sections.map((s) => s.key);
+  const at = keys.indexOf("town");
+  assert.ok(at >= 0, keys.join(","));
+  if (keys.includes("chests")) assert.equal(keys[at + 1], "chests");
+  for (const k of ["levels", "drops", "bosses", "shipped", "badges"]) if (keys.includes(k)) assert.ok(keys.indexOf(k) < at, `${k} before Localhost`);
+  const card = vm.digest.sections[at];
+  assert.deepEqual([card.title, card.icon], ["Localhost", "ui/desk.svg"]);
+  const used = w.state.herd.town.u[0];
+  assert.deepEqual(card.lines.map((l) => [l.text, l.sub]), [[`${used.toLocaleString("en-US")} chests LGTM'd (+10% XP and gold)`, "99% uptime"]]);
+  // the badge counts what it counted before the town: the same with the town's counters at zero
+  const badge = vm.tabs.find((t) => t.id === "digest").badge;
+  const z = fresh("late");
+  z.state.herd.town.u = [0, 0];
+  z.state.herd.town.ru = [];
+  assert.equal(V.herdView(bump(z), { tab: "digest", filter: FILTER }).tabs.find((t) => t.id === "digest").badge, badge);
+  assert.equal(V.herdView(z, { tab: "digest", filter: FILTER }).digest.sections.some((s) => s.key === "town"), false, "nothing new: no card");
+  // no Herd dot for the town alone
+  assert.equal(Herd.digest(z.state).town, null);
+  // rank-ups since the Digest was read: "Kip and 1 more reached Committer"
+  const r = fresh("late");
+  const [a, b, c] = r.state.heroes;
+  r.state.herd.town.ru = [[a.id, 2], [b.id, 2], [c.id, 1]];
+  const lines = V.herdView(bump(r), { tab: "digest", filter: FILTER }).digest.sections.find((s) => s.key === "town").lines;
+  assert.equal(lines[1].text, `${a.name.split(" ")[0]} and 1 more reached Committer · ${c.name.split(" ")[0]} reached Contributor`);
+  // "Mark as read" clears it (herd.digestMark writes the town's counters)
+  assert.ok(W.command(r, "digestSeen", {}, NOW).ok);
+  assert.equal(V.herdView(bump(r), { tab: "digest", filter: FILTER }).digest.sections.some((s) => s.key === "town"), false);
+});
+
+test("'Localhost: the Review Desk is open' (TOWN.md §7.7): one herd-wide header note at the strip's right end, once; later levels 'Localhost: Review Desk n'", () => {
+  const w = fresh("mid");
+  w.state.herd.town = undefined;
+  w.state.herd.gold = 1e6;
+  bump(w);
+  const n0 = w.rt.notes.length;
+  assert.ok(W.command(w, "buy", { building: "review_desk" }, NOW).ok);
+  const note = w.rt.notes.slice(n0).find((n) => /Review Desk/.test(n.text));
+  assert.equal(note.text, "Localhost: the Review Desk is open");
+  // its turn in the note queue: herd-wide (the strip's right end), with its short form
+  w.rt.tick = note.showTick;
+  const hn = V.stageView(bump(w), { width: 1600, height: 200, nowMs: NOW }).headerNote;
+  assert.equal(hn.text, note.text);
+  assert.equal(hn.heroId, null, "herd-wide");
+  assert.deepEqual(hn.short, ["Review Desk open"]);
+  assert.ok(W.command(w, "buy", { building: "review_desk" }, NOW).ok);
+  assert.ok(w.rt.notes.some((n) => n.text === "Localhost: Review Desk 2"));
+  assert.equal(w.rt.notes.filter((n) => n.text === "Localhost: the Review Desk is open").length, 1, "once");
+});
+
+test("layout: the Localhost tab at 608 (760 at zoom 1.25), 640, 760 and 1000 px: nothing under the footer, the town's lines and the Review Desk card whole (its name too), the Buy in view", async (t) => {
+  let pw;
+  try { pw = (await import("node:module")).createRequire(import.meta.url)("playwright"); } catch { return G.skipGate(t, "the Localhost tab's layout in Chromium", "Playwright is not installed"); }
+  const browser = await pw.chromium.launch();
+  try {
+    const page = await browser.newPage();
+    let checked = 0;
+    for (const kind of ["late", "idle", "mid"]) {
+      const world = D.demoWorld(kind, NOW).world;
+      for (const width of [608, 640, 760, 1000]) {
+        const h = await mount("herd", world, { width, props: { tab: "upgrades" } });
+        const L = await layoutOf(page, h.m, { width, height: 520, buttons: ["hd-buy-b:review_desk", "hd-town-head", "hd-town-lgtm"] });
+        const where = `${kind} @${width}`;
+        assert.deepEqual(L.spills, [], where);
+        // the header and the LGTM row whole (the titles line is cut at its end by design: its tooltip lists them)
+        assert.deepEqual(L.cut.filter((c) => /^hd-town-(head|lgtm)/.test(c)), [], `${where}: the town's lines`);
+        // the Review Desk's card whole, its name too: it spans both columns of the grid (the other
+        // cards' long names may give way at 640 px, as they did before the town)
+        assert.deepEqual(L.cut.filter((c) => c.startsWith("hd-b:review_desk")), [], `${where}: the desk card`);
+        assert.ok(L.buttons["hd-buy-b:review_desk"]?.inView, `${where}: the desk's Buy in view`);
+        assert.ok(L.buttons["hd-town-head"]?.inView, `${where}: the header in view`);
+        checked++;
+      }
+    }
+    t.diagnostic(`Localhost tab layouts checked: ${checked}`);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("Job line: whole job XP numbers as the rank ladder names them ('Maintainer reviewer · 412 / 1,000', never '1.0k')", () => {
+  const w = fresh("late");
+  const jobs = w.state.heroes.map((h) => V.sheetView(w, { heroId: h.id, tab: "career", filter: FILTER }).career.job).filter((j) => j && j.line);
+  const m = jobs.find((j) => /^Maintainer reviewer/.test(j.line));
+  assert.ok(m, "the late herd has a Maintainer");
+  assert.match(m.line, /^Maintainer reviewer · \d{3} \/ 1,000$/);
+  const core = jobs.find((j) => /^Core reviewer/.test(j.line));
+  assert.ok(core, "and a Core reviewer");
+  assert.match(core.line, /^Core reviewer · 1,\d{3}$/);
+  for (const j of jobs) assert.ok(!/\dk\b/.test(j.line), j.line);
+});
+
+test("layout: the Job card at 608 (760 at zoom 1.25) and 760 px keeps 'Job · Review Desk' on one line and its rank line whole (the rank line wraps under the title instead)", async (t) => {
+  let pw;
+  try { pw = (await import("node:module")).createRequire(import.meta.url)("playwright"); } catch { return G.skipGate(t, "the Job card's layout in Chromium", "Playwright is not installed"); }
+  const { treeToHtml } = await import("../tools/preview/render.mjs");
+  const { resolveTheme } = await import("../tools/mock/theme.mjs");
+  const browser = await pw.chromium.launch();
+  try {
+    const page = await browser.newPage();
+    const w = D.demoWorld("late", NOW).world;
+    // the longest rank line of the late herd ("Maintainer reviewer · 412 / 1,000")
+    const hero = w.state.heroes.find((h) => /^Maintainer/.test(String((V.sheetView(w, { heroId: h.id, tab: "career", filter: FILTER }).career.job || {}).line)));
+    assert.ok(hero);
+    for (const width of [608, 760]) {
+      const h = await mount("sheet", w, { width, props: { heroId: hero.id, tab: "career" } });
+      await page.setViewportSize({ width, height: 500 });
+      await page.setContent(treeToHtml(h.m.tree, { width, height: 500, zoom: 1, theme: resolveTheme("graphite") }), { waitUntil: "load" });
+      await page.evaluate(() => document.fonts?.ready);
+      const r = await page.evaluate(() => {
+        const card = document.querySelector('[data-id="sh-job"]');
+        const rank = document.querySelector('[data-id="sh-job-rank"]');
+        const title = [...card.querySelectorAll("*")].find((e) => [...e.childNodes].some((n) => n.nodeType === 3 && /^Job · /.test(n.textContent.trim())));
+        const c = card.getBoundingClientRect(), k = rank.getBoundingClientRect(), ti = title.getBoundingClientRect();
+        return { titleH: ti.height, inside: k.left >= c.left - 0.5 && k.right <= c.right + 0.5, whole: rank.scrollWidth <= rank.clientWidth + 0.5, rank: rank.textContent };
+      });
+      assert.ok(r.titleH < 20, `@${width}: the title on one line (${r.titleH} px)`);
+      assert.ok(r.inside && r.whole, `@${width}: "${r.rank}" whole inside the card`);
+    }
+  } finally {
+    await browser.close();
+  }
 });

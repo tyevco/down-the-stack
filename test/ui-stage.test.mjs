@@ -793,9 +793,11 @@ test("header notes (round 4c): a note about one hero shows its longest short for
   assert.ok(corner === 6 && own > 0, `${corner} / ${own}`);
 });
 
-test("stillness: only campfire glows and blocked bubbles move", async () => {
+test("stillness: only campfire and desk-lamp glows and blocked bubbles move", async () => {
   const vm = scenarios["all-idle"];
   assert.equal(vm.stillness, true);
+  // (Localhost, docs/TOWN.md §7.2-7.3: a resting hero on duty's desk lamp glows as a campfire does)
+  assert.ok(vm.heroes.some((h) => h.campfire && h.campfire.station === "review_desk"), "a desk in the sample");
   const { mod } = await mountStage(vm);
   const looping = mod.findAll((n) => methodsOf(n, "loop").length > 0);
   assert.ok(looping.length > 0, "campfires still flicker");
@@ -1143,4 +1145,105 @@ test("termling: the rig's cost function matches what it builds, full, lean, smal
   assert.equal(tiny.children.find((c) => c.type === "text")?.text, h.face);
   assert.equal(methodsOf(tiny, "text_color").at(-1)[0], h.colors.faceInk);
   assert.equal(methodsOf(tiny, "border_color").at(-1)[0], h.colors.hoodie);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Localhost, the town (docs/TOWN.md round 1, §7.2)
+// ---------------------------------------------------------------------------------------------
+
+const srcOf = (mod, name) => mod.findAll((n) => n.src === `mods/down-the-stack/art/${name}`);
+const textIn = (n) => n.children.filter((c) => c.type === "text").map((c) => c.text).join("");
+
+test("Localhost: a resting hero on duty gets the desk and its lamp glow in the campfire's place (2 elements, 1 loop; 1 at the bare levels)", async () => {
+  const vm = makeScenario("late-wide");
+  const desks = vm.heroes.filter((h) => h.campfire && h.campfire.station === "review_desk");
+  const fires = vm.heroes.filter((h) => h.campfire && h.campfire.station !== "review_desk");
+  assert.ok(desks.length >= 1 && fires.length >= 1, "the sample has both");
+  const { mod } = await mountStage(vm);
+  assert.deepEqual(problems(mod), []);
+  // in the slots (the chip draws its own props: counted apart below)
+  const inChip = (n) => Boolean(mod.node("overflow")) && mod.node("overflow").children.includes(n);
+  const deskImgs = srcOf(mod, "fx/desk.svg").filter((n) => !inChip(n));
+  const fireImgs = srcOf(mod, "fx/campfire.svg").filter((n) => !inChip(n));
+  assert.equal(deskImgs.length, desks.length);
+  assert.equal(fireImgs.length, fires.length);
+  for (const h of desks) {
+    const img = deskImgs.find((n) => Math.abs(methodsOf(n, "left").at(-1)[0] - (h.campfire.x - 12)) < 0.01);
+    assert.ok(img, `${h.key}: its desk at the campfire's x`);
+    assert.deepEqual([methodsOf(img, "w").at(-1)[0], methodsOf(img, "h").at(-1)[0]], [24, 20]);
+  }
+  // one glow a prop, looping (a lamp breathes slowly: at least 2.6 s a period)
+  // (the mock records a loop as [prop, from, to, period, easing])
+  const lampLoop = (l) => l[0] === "opacity" && l[3] >= 2600 && l[3] <= 2600 + 37 * 8;
+  const loops = mod.findAll((n) => methodsOf(n, "loop").some(lampLoop));
+  assert.ok(loops.length >= desks.length, `${loops.length} lamp glows`);
+  // the bare levels: the sprite alone, as the campfire
+  const swamped = makeScenario("swamped", { width: 3200 });
+  const { mod: m2, stage } = await mountStage(swamped, { width: 3200 });
+  assert.ok(B.atLevel(levelOf(stage)).bare, "swamped @3200 is bare");
+  const n = swamped.heroes.filter((h) => h.campfire && h.campfire.station === "review_desk").length;
+  assert.ok(n >= 1);
+  assert.equal(srcOf(m2, "fx/desk.svg").filter((x) => !m2.node("overflow").children.includes(x)).length, n);
+  assert.equal(m2.findAll((x) => methodsOf(x, "loop").some(lampLoop)).length, 0, "no lamp glow at the bare level");
+});
+
+test("Localhost chip: Localhost's props and today's 'LGTM ×n' in XP cyan; at the lean levels the line folds into the label, so the chip costs what the camp chip did", async () => {
+  const late = makeScenario("late");
+  const camp = { ...late, overflow: { ...late.overflow, town: null } };
+  const { mod } = await mountStage(late);
+  const { mod: m0 } = await mountStage(camp);
+  const chip = mod.node("overflow");
+  const line = mod.node("overflow/lgtm");
+  assert.ok(line, "the line");
+  assert.equal(textIn(line), "LGTM ×206");
+  assert.equal(methodsOf(line, "text_color").at(-1)[0], "#7FE9F5");
+  assert.equal(textIn(mod.node("overflow/label")), `+${late.overflow.count}`);
+  // props: desk, campfire, desk instead of the tents
+  const kids = chip.children.filter((c) => c.src);
+  assert.deepEqual(kids.map((c) => c.src.split("/art/")[1]), ["fx/desk.svg", "fx/campfire.svg", "fx/desk.svg"]);
+  assert.equal(srcOf(m0, "fx/tent.svg").filter((x) => m0.node("overflow").children.includes(x)).length, 3, "the camp chip keeps its tents");
+  // at full detail the line is the one element more
+  assert.equal(mod.stats.elements - m0.stats.elements, 1);
+  // the coarse levels (lean marks): the line folds into the label, no element more than the camp chip
+  for (const width of [2600, 3200]) {
+    const sw = makeScenario("swamped", { width });
+    const { mod: m1, stage } = await mountStage(sw, { width });
+    const { mod: m2 } = await mountStage({ ...sw, overflow: { ...sw.overflow, town: null } }, { width });
+    assert.ok(B.atLevel(levelOf(stage)).leanMarks, `@${width}: lean marks`);
+    assert.equal(m1.node("overflow/lgtm"), null, `@${width}: no line element`);
+    assert.equal(textIn(m1.node("overflow/label")), sw.overflow.town.label);
+    assert.match(sw.overflow.town.label, /^\+\d+ · LGTM ×212$/);
+    assert.equal(m1.stats.elements, m2.stats.elements, `@${width}: the Localhost chip costs what the camp chip did`);
+    const lw = methodsOf(m1.node("overflow/label"), "w").at(-1)[0];
+    assert.ok(lw <= sw.overflow.w - 4, `@${width}: the folded label fits the chip (${lw} of ${sw.overflow.w})`);
+  }
+  // a compact strip (64 px): the line under the dots
+  const compact = makeScenario("compact", { width: 360 });
+  assert.ok(compact.overflow && compact.overflow.town);
+  const { mod: mc } = await mountStage(compact, { width: 360, height: 64 });
+  assert.deepEqual(problems(mc), []);
+  const lc = mc.node("overflow/lgtm");
+  assert.ok(lc);
+  const top = methodsOf(lc, "top").at(-1)[0];
+  assert.ok(top + 12 <= 64, `the line inside the 64 px strip (top ${top})`);
+});
+
+test("an LGTM'd chest's coin float is a text float in coin brass, '+1.2k · LGTM' (the same one element as the coin); a plain coin stays the sprite", async () => {
+  const vm = makeScenario("late");
+  const f = vm.fx.find((x) => x.kind === "coin" && x.text);
+  assert.ok(f, "the sample has an LGTM coin");
+  const { mod } = await mountStage(vm);
+  const node = mod.node(f.key);
+  assert.ok(node && !node.src, "a text float, not the coin sprite");
+  assert.equal(textIn(node), "+1.2k · LGTM");
+  assert.equal(methodsOf(node, "text_color").at(-1)[0], "#C89B3C");
+  // a coin without text is still the sprite
+  const plain = makeScenario("first-day");
+  const c = plain.fx.find((x) => x.kind === "coin");
+  const { mod: m2 } = await mountStage(plain);
+  assert.equal(m2.node(c.key).src, "mods/down-the-stack/art/fx/coin.svg");
+  // the estimate counts it as one effect either way
+  const { stageDetail } = stageMod;
+  const d = stageDetail(vm, vm.rooms, vm.heroes, { W: vm.width, H: 200, vm });
+  assert.ok(d.fxKept.some((x) => x.key === f.key), "kept (a status float ranks first)");
 });

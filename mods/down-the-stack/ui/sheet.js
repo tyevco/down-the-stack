@@ -126,7 +126,7 @@
  * @property {SheetHeaderVM} header
  * @property {null|{text:string, color:string, tooltip?:string|null}} note   a line under the header
  *                              ("Off duty since 14:02 · its chests wait", "Contractor: hired tomorrow at
- *                              04:00 · not saved until then; …"); tooltip: the whole story (the line is cut)
+ *                              04:00 · not on the roster until then; …"); tooltip: the whole story (the line is cut)
  * @property {GearVM|null} gear       only the shown tab's part is filled; the others are null
  * @property {SkillsVM|null} skills
  * @property {StatsVM|null} stats
@@ -143,6 +143,8 @@
  *                              whose class chip locks it) or null (a plain label)
  * @property {string} sub       "herdr-app · Claude Code · fighting 2-2 Nested Tunnels"
  * @property {string|null} quest   current quest (terminal title), shown in quotes
+ * @property {string|null} [subTip] the hero's town job for the line's tooltip ("At the Review Desk ·
+ *                              Committer reviewer · …"; never in the line itself, TOWN.md §7.4)
  * @property {"working"|"blocked"|"done"|"idle"|"off"} status   portrait face blink + stripe
  * @property {{frac:number, text:string}} hp        "1,240 / 1,602"
  * @property {{frac:number, feFrac:number, text:string, tooltip:string}} xp   "41.2%"; tooltip =
@@ -219,6 +221,11 @@
  *            paused; fighting: that fight is on, so the card leads the tab, its Retreat in view)
  * @property {{name:string, hint:string, canRename?:boolean}} identity   rename: act("rename", {heroId, name: typed});
  *                              canRename false (Contractors) disables the button
+ * @property {null|{title:string, line:string|null, frac:number, status:string, tooltip:string,
+ *            onDuty:boolean}} job   the Localhost Job line (docs/TOWN.md §7.6, read-only in round 1):
+ *            title "Job · Review Desk", line "Contributor reviewer · 61 / 100" (null for an Intern or
+ *            a Contractor), frac toward the next rank, status why it is or is not on duty; null with
+ *            the town off
  * @property {ActionVM|null} retire     null for contractors; disabled below Lv 30 (tooltip says so)
  * @property {null|{title:string, hint:string, options:Array<ActionVM & {line?:string[]}>}} rebind
  *            benched heroes only; line (round 4c): the tooltip as [before the space, the space,
@@ -804,7 +811,8 @@ function header(vm, env, ui, t, close, width) {
             .flex().items_center().child(h.level))
           .child(div().flex_none().text_size(12.5).text_color(t.muted).whitespace_nowrap().child(h.title))
           .when(Boolean(h.tag), (e) => e.child(headerTag(h, ui, t))))
-        .child(div().h(16).min_w(0).truncate().text_size(11.5).text_color(t.muted)
+        .child(div().id("sh-sub").h(16).min_w(0).truncate().text_size(11.5).text_color(t.muted)
+          .when(Boolean(h.subTip), (e) => e.tooltip(h.subTip))
           .child(h.quest ? `${h.sub} · “${h.quest}”` : h.sub)))
       .child(h_flex().flex_none().gap(4).items_center().self_start()
         .child(div().flex_none().h(24).px(7).rounded(6).border(1).border_color(t.input).font_family(MONO).text_size(11.5)
@@ -1052,6 +1060,7 @@ function careerTab(vm, env, ui, t) {
     .child(v_flex().id("sh-career-r").absolute().left(0).top(0).size_full().overflow_y_scroll()
       .child(v_flex().gap(10).pr(4).children(kids([
         c.rebind ? rebindCard(c.rebind, env, ui, t) : null,
+        c.job ? jobCard(c.job, t) : null,
         classCard(c, env, ui, t),
         mapCard(c.map, env, ui, t),
         identity(vm, env, ui, t),
@@ -1154,6 +1163,26 @@ function bossCard(b, env, ui, t) {
         .child(h_flex().gap(8).items_center()
           .child(div().id("sh-boss-status").flex_1().min_w(0).truncate().text_size(11).text_color(t.fg).child(b.status))
           .when(Boolean(b.estimate) && !estTop, (e) => e.child(est())))));
+}
+
+/**
+ * Localhost's Job line (docs/TOWN.md §7.6, round 1 read-only): the station in the title, the job
+ * title and job XP on the right with a thin bar toward the next rank, and why the hero is or is not
+ * on duty. Words of the job, never the agent's status (that stays "resting" in the header).
+ */
+function jobCard(j, t) {
+  // the panel's look with a head that wraps: in a narrow sheet (a 760 px dialog at zoom 1.25 is
+  // 608 px) the job title moves under "Job · Review Desk" instead of squeezing it onto three lines
+  const head = h_flex().flex_wrap().justify_between().items_center().gap_x(8).gap_y(3)
+    .child(div().flex_none().whitespace_nowrap().text_size(11).font_semibold().text_color(t.dim).child(j.title))
+    .when(Boolean(j.line), (e) => e.child(div().id("sh-job-rank").flex_none().whitespace_nowrap().font_family(MONO).text_size(10.5).text_color(ink(C.xp, t)).child(j.line)));
+  return v_flex().id("sh-job").px(12).py(10).gap(7).rounded(10).bg(t.card).border(1).border_color(t.border)
+    .child(head)
+    .tooltip(j.tooltip ?? j.status ?? "")
+    .when(Boolean(j.line), (e) => e.child(fluidBar(j.frac, 3, ink(C.xp, t), alpha(t.fg.slice(0, 7), t.light ? 0.12 : 0.14))))
+    .child(h_flex().gap(8).items_center()
+      .child(div().size(7).flex_none().rounded_full().bg(j.onDuty ? tone(C.xp, t) : alpha(t.fg.slice(0, 7), 0.3)))
+      .child(div().id("sh-job-status").flex_1().min_w(0).text_size(11.5).line_height(1.3).text_color(t.fg).child(j.status ?? "")));
 }
 
 function mapCard(m, env, ui, t) {

@@ -572,6 +572,36 @@ test("hot reload: the new build takes the previous build's world over (no rollba
   assert.deepEqual(mod.errors, []);
 });
 
+test("hot reload: Localhost's last approved titles (runtime only, never saved) go on with the world (docs/TOWN.md §7.5)", async () => {
+  M.resetState();
+  const mod = await mount({ role: "stage" }, { fixture: FX.demoFixture("late") });
+  const h1 = await hostOf(mod);
+  await M.tickAll(2000);
+  const Town = await mod.import("./game/town.js");
+  // three approved titles of this session (agents.openChests keeps them as chests take LGTMs)
+  const [a, b] = h1.world.state.heroes;
+  Town.takeTown(h1.world, { titles: [
+    { title: "Fix flaky auth test", heroId: a.id, name: a.name, byId: b.id, byName: b.name, at: 1 },
+    { title: "Bump deps", heroId: b.id, name: b.name, byId: a.id, byName: a.name, at: 2 },
+    { title: null, heroId: a.id, name: a.name, byId: null, byName: null, at: 3 },
+  ] });
+  assert.equal(Town.lastTitles(h1.world).length, 3);
+  // a reload after a save: the file's text has no titles (they are never saved)
+  await M.tickAll(31000);
+  assert.ok(!/Fix flaky auth test/.test(String(M.memfs.readText(SAVE)).split('"town"')[1] ?? ""), "titles are not in the save's town");
+  const now = Town.lastTitles(h1.world).map((e) => [e.title, e.heroId, e.byId]);
+  await mod.reload();
+  const h2 = await hostOf(mod);
+  assert.notEqual(h2, h1);
+  assert.equal(h2.stats.loadedFrom, "reload");
+  const Town2 = await mod.import("./game/town.js");
+  assert.deepEqual(Town2.lastTitles(h2.world).map((e) => [e.title, e.heroId, e.byId]), now, "the titles crossed the reload");
+  // and the Localhost tab still names them
+  const tab = h2.view("herd", { tab: "upgrades" });
+  assert.match(tab.upgrades.town.titles.text, /^Last approved: “/);
+  assert.deepEqual(mod.errors, []);
+});
+
 test("hot reload: a save the retired host still has in flight stands down (a copy whose reload failed keeps its build)", async () => {
   // herdr keeps an old instance running when its reload fails (watch.rs reload returns before the
   // release), so a write that instance's pump started is answered after the next build took the

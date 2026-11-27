@@ -250,3 +250,106 @@ minute and end-of-run save sizes: the personas never fill the roster or promote 
 | Terminals take their heroes back first | a newcomer listed before a returning terminal in the same snapshot (an app start lists them all at once) could let that terminal's own hero go to make room, or, in the same seat, take that hero itself (a terminal that played a Contractor has no saved hero, so at an app start it took the seat's free hero and its owner's terminal played as a Contractor); a relaunched agent's new terminal took the seat's highest-level free hero, leaving its own hero off duty | reconcile step 1a: every new terminal with a saved hero to take claims it before any promotion (step 1b) or new hire (step 2) may let a hero go: first every terminal's own hero (by address, D§3.2 step 1), then free heroes of the seat (step 2) in snapshot order; claimed heroes are never let go in that reconcile (replaces round 4's "spare the heroes whose terminals ended in this snapshot"). Among a seat's free heroes the one whose terminal ended in the new terminal's pane comes first (`rt.offPane`, this session only), then D§3.2's order | The same bug at an app restart; a restarted agent is the same hero |
 | A promotion leaves no Contractor id behind | rooms, room ids, effects' room ids, per-tick fight sets, review Wounds and Lessons Learned (`rv<review>.<id>`) and the chest inbox's finder kept the Contractor's negative id | `combat.renameHero` (rooms keep their objects and cached signature, so the lanes carry on), `boss.renameHero` (fights, the paused fight, review Wounds / Lessons Learned) and `agents.promote` (binding, live state, journal, inbox) move all of it to the new id. A load drops Contractor review Wounds / Lessons Learned and zeroes a Contractor inbox finder (Contractors are numbered afresh) | The integrator's "review wounds do not follow a promotion" |
 | Notes say who they are about (integrator) | a header note was text and a colour; the 04:00 turn's six hire notes filled the six-note queue, so any other note raised in those 18 s was dropped | `ev.note(text, color, tag)`: hires carry `{kind: "hire", heroId, name, promoted}`, and the provisional-class, fall-back and opened-Unreviewed notes `{heroId}` (the stage puts a note about one hero over its room and merges a tick's hires into one note); a tick's second and later hire notes are queued as `extra` and do not count against the queue, so a note raised meanwhile shows after them | The round-4b UI fixer's handoff: a single hire's note no longer depends on its name being unique, and nothing is lost at 04:00 |
+
+## 14. Localhost, the town (round 1: the Review Desk)
+
+docs/TOWN.md §9's `T.town` (`data.js`, marked `balance: new`; owner decisions of TOWN.md §13: +10%
+on a reviewed chest, `lgtmBonus` 0.10). A roster hero of Lv 10+ is on duty while its agent is
+shipped, resting or off duty (the app closed included) on a game day when, or the day after, a chest
+of its was opened with full value; it makes 1 LGTM a hero-hour (× 1.0–1.8 by job rank) into one
+shelf of 10 × the Review Desk's level, shared pro rata; each chest opened with full value takes one
+LGTM for +10% on its XP and gold (after ΣXP%, never its Seals, items or tier). The Review Desk costs
+1,000 gold × 2 a level (1,023,000 for all ten); autopilot (the Buildings switch) buys level 1 once a
+Lv 10+ hero has seen work and gold ≥ 3,000, and level n + 1 only after a game day whose shelf filled
+up and later ran dry, with gold ≥ 3 × its price. No field number moved.
+
+**The gates** (`tools/pacing-sim.mjs`, TOWN.md §6.3; `npm run pacing` runs the town by default and
+every persona twice on the same seed, with and without it): a persona's town share above 3% of its
+XP, a milestone within ±15% of D§12.1 without the town and off with it (or, off both ways, further
+off with it), or the mean of the Lv 20–100 hours more than 6% earlier than without the town, exit 1.
+`--no-town` (`T.town.on = false`) prints what 9cd00cd printed, apart from the wall-clock seconds
+(diffed); `--sweep` prints the same bytes with and without the town and as 9cd00cd (the sweep never
+opens a chest, and its real autopilot gear is harvested without the town); the bot never meets the
+town (never seen: no credit, no Review Desk), its save byte for byte the same. `test/pacing.test.mjs`
+asserts all of it (9cd00cd's numbers recorded in the test).
+
+### 14.1 Seeds 1–4 (`npm run pacing -- --seeds 1-4`; the share is the LGTM bonus over all XP earned, from the engine's own tallies)
+
+| Persona | Seed | Town share of XP | LGTM coverage | Review Desk (gold) | Ranks at the end | Uptime | Lv 20–100 hours vs `--no-town` | Worst milestone in hours with the town (the same without) | Milestones off ±15% with the town (without) |
+|---|---|---|---|---|---|---|---|---|---|
+| Casual | 1 | 1.30% | 99% | 3 (7,000) | Core ×1 | 99% | −3.7% | Lv 100 −10.6% (−6.0%) | 0 (0) |
+| Casual | 2 | 1.48% | 99% | 3 (7,000) | Core ×1 | 99% | −0.8% | Lv 60 −11.4% (+0.9%) | 0 (0) |
+| Casual | 3 | 1.41% | 99% | 3 (7,000) | Core ×1 | 99% | −2.6% | Lv 60 −8.6% (+6.7%) | 0 (0) |
+| Casual | 4 | 1.35% | 99% | 3 (7,000) | Core ×1 | 99% | +0.5% | Lv 10 −8.6% (−8.6%) | 0 (0) |
+| Solo | 1 | 1.35% | 98% | 3 (7,000) | Core ×1 | 99% | −3.1% | Lv 100 −11.0% (−7.0%) | 0 (0) |
+| Solo | 2 | 1.44% | 98% | 3 (7,000) | Core ×1 | 99% | −0.9% | Lv 30 −6.6% (−6.1%) | 0 (0) |
+| Solo | 3 | 1.28% | 98% | 3 (7,000) | Core ×1 | 99% | +0.9% | Lv 100 −9.1% (−9.6%) | 0 (0) |
+| Solo | 4 | 1.34% | 98% | 3 (7,000) | Core ×1 | 99% | −0.5% | Lv 50 −10.4% (−12.4%) | 0 (0) |
+| Typical | 1 | 1.25% | 97% | 5 (31,000) | Core ×3 | 99.9% | −1.3% | Lv 10 −10.0% (−10.0%) | 0 (0) |
+| Typical | 2 | 1.18% | 97% | 5 (31,000) | Core ×3 | 99.9% | −1.7% | Lv 50 −12.8% (−7.6%) | 0 (0) |
+| Typical | 3 | 1.22% | 97% | 5 (31,000) | Core ×3 | 99.9% | −1.8% | Lv 50 −12.1% (−5.1%) | 0 (0) |
+| Typical | 4 | 1.27% | 97% | 5 (31,000) | Core ×3 | 99.9% | +3.0% | Lv 30 −10.1% (−7.8%) | 0 (1: Lv 50, as TOWN.md §6.2 found) |
+| Heavy | 1 | 1.49% | 88% | 10 (1,023,000) | Maintainer ×5 | 99.9% | −3.3% | Lv 5 +9.3% (+9.3%) | 0 (0) |
+| Heavy | 2 | 1.53% | 88% | 10 (1,023,000) | Maintainer ×5 | 99.9% | +1.5% | Lv 5 +9.3% (+9.3%) | 0 (0) |
+| Heavy | 3 | 1.58% | 88% | 10 (1,023,000) | Maintainer ×5 | 99.9% | +2.2% | Lv 5 +9.3% (+9.3%) | 0 (0) |
+| Heavy | 4 | 1.51% | 88% | 10 (1,023,000) | Maintainer ×5 | 99.9% | −2.8% | Lv 20 −7.5% (−7.5%) | 0 (0) |
+
+- **Every gate holds on every seed**: the town is 1.18–1.58% of the personas' XP (gate 3%), none
+  of the 272 milestones is off ±15% with the town (without it, Typical seed 4's Lv 50 is), and the
+  mean Lv 20–100 shift runs from 3.7% earlier to 3.0% later (gate 6% earlier): about the seed noise
+  itself, as TOWN.md §6.2 measured with its overlay. The +10% owner decision stands; no town number
+  moved from TOWN.md §9.
+- Day-1 milestones are identical with and without the town on every seed (no LGTM exists before the
+  first night refills the shelf the Review Desk opened during day 1).
+- The demand rule settles where TOWN.md §5.2 expected, a level higher for the small herds: Casual
+  and Solo stop at Review Desk 3, Typical at 5, Heavy reaches 10 (TOWN.md's overlay counted one
+  chest a hero a tick and read the flags in any order; the engine counts every chest and needs the
+  shelf full before it runs dry).
+- Coverage: an LGTM rides on 97–99% of the small herds' full-value chests and 88% of Heavy's (one
+  shelf for five agents' 15-minute tasks).
+
+### 14.2 The owner model (`npm run pacing -- --persona big`, TOWN.md Appendix A, 7 days, about 75 s)
+
+32 agents in 25 spaces, herdr open overnight: on duty 30 of 30 at 03:00–07:00, 22.8 at 08:00, 12 at
+10:00, 11.9 at 18:00, 29.7 at 21:00; the shelf full overnight and empty from about noon. Coverage by
+game day 12% (day 1, Review Desk 1) → 22 → 32 → 42 → 52 → 55 → 57% (day 7, Review Desk 6; one
+level a day, each wanted); 39% over the week. **Town share 1.46%** of XP (gate 4%), kills 67.6% ·
+chests 29.2% · bosses and reviews 1.8%; ranks Contributor ×24 on day 7. **The town's own save bytes:
+610 B** (29,885 B with them, 29,275 B without; gate 0.8 KB; 600 B before the town carried its day,
+`x.town.d`).
+
+### 14.3 Save size and tick cost
+
+- The town's fields (TOWN.md §8): `st` extras `tw: [jobXp, d]` (12–15 B a hero, none for a hero with
+  neither), herd extras `town` (≈ 50–75 B, with its day `d` and the Digest's baseline `dg`), a Hall
+  of Fame entry's rank. D§13.3's 30-hero worst case with the town at its largest (Review Desk 10,
+  every counter in use, four-figure job XP for all, a rank-up waiting for each): 29,058 B, 796 B of
+  it the town's (`test/save.test.mjs`; 29,048 and 786 before the town's day stamp).
+  A save with the town at zero is byte for byte what 1b17497 wrote (every fixture, decoded and
+  encoded, and loaded, ticked and serialized, by both builds).
+- `npm run qjs` stress30 (its town phase: Review Desk 10, every hero credited today with job XP over
+  all ranks, the shelf at 37.5 / 100): tick p95 5.8–8.0 ms against 1b17497's 6.4–8.1 ms on the same
+  machine back to back (five runs each, 600 ticks, a second agent loading the machine; means 5.1–5.7
+  against 5.2–6.0 ms): no measurable rise. One pass over the roster a step, a few compares a hero.
+
+### 14.4 What the town changes elsewhere
+
+- The sustain sweep's real autopilot gear is harvested from the Typical persona **without** the town
+  (`harvestGear`), so `--sweep` is the same gear and the same bytes either way. With the town, the
+  same seed rolls its drops at other moments (an LGTM moves a level-up and so the map's item level),
+  and the auto-kit sweep built from that gear moves the way another seed's does: auto-kit cases over
+  3 cups an hour, Typical's gear of seeds 1 / 2 / 3, 0 / 0 / 4 without the town and 6 / 2 / 7 with it
+  (maps 2-2 to 4-3, shellmancer and forkbinder; worn EHP over the reference kit at Lv 30–50 ×1.15 /
+  1.03 / 1.10 without, ×1.05 / 1.16 / 1.09 with). That is the gear stream's own lumpiness (§11), not a
+  town rule: no town rule touches gear, drops or the sweep; the sweep's default seed-1 gear passes.
+- **The gold path** (TOWN.md §5.2, the engineering judge's must-avoid 6), measured in the engine:
+  seed 1, days 1–10, every building level and Review Desk level with the time it was bought, with
+  and without the town. The six buildings are bought in the same order either way (the Review Desk
+  sits outside `autoBuyPick`'s queue). The small herds do buy desk levels in those days (Casual and
+  Solo levels 1–3 on days 1, 3 and 4, about 1–4k gold each; Typical levels 1–5 by day 6), each one
+  after a game day whose shelf filled and ran dry. Those buys move the Docs Library's levels by −12 to
+  +39 minutes; one level, Solo's level 6, moves from late in day 5 to early in day 6. Averaged over the
+  ticks played, the Docs Library's herd XP bonus is 0.03 (Casual), 0.10 (Solo) and 0.03 (Typical)
+  points lower, against the town's own 1.2–1.5% of XP. That is flat by the spec's measure, so no
+  number moved; a stricter rule (no desk level above 1 while a building waits for gold) is the
+  owner's call.

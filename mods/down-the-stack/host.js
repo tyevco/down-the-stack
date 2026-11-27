@@ -70,6 +70,8 @@ import {
   MILESTONE_TTL_MS,
 } from "./game/world.js";
 import { crc32, saveSize } from "./game/save.js";
+// Localhost's runtime part (the last approved titles, docs/TOWN.md §7.5) crosses a hot reload
+import * as Town from "./game/town.js";
 import * as V from "./game/view.js";
 import {
   agents, terminals, spaces, focused, layout, window as herdrWindow, appHome, checking,
@@ -564,6 +566,11 @@ export class GameHost {
     // A world put in place while loading (tools/check fixtures) stays; it saves over the file.
     if (!this.world || this.world === this.placeholder) this.world = world;
     this.placeholder = null;
+    // the town's last approved titles are runtime only (never saved): a hot reload hands them over
+    // with the world they belong to (after a restart the Localhost tab's line starts empty)
+    if (from === "reload" && v2 && h.town && this.world === world && typeof Town.takeTown === "function") {
+      try { Town.takeTown(world, h.town); } catch (e) { this.error("hot reload (Localhost titles)", e); }
+    }
     const rt = this.world.rt;
     this.majorSaved = rt.majorAt || 0;
     if (from === "bak" || from === "fresh" || from === "unchecked" || from === "reload") {
@@ -653,6 +660,8 @@ export class GameHost {
       origin: this.origin, restoreNote: this.restoreNote, warning: this.stats.warning, loadedAt: this.loadedAt,
       failedWrites: this.failedWrites, noticeSeen: this.saveNoticeSeen,
       stage: { was: this.stageWas, on: this.collapseWas, idleSince: this.idleSince, hid: this.hidStage, idleNoted: this.idleNoted },
+      // Localhost's last approved titles (runtime only; plain data)
+      town: typeof Town.handoverTown === "function" ? Town.handoverTown(this.world) : null,
     };
   }
 

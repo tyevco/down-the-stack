@@ -62,7 +62,7 @@ const skyBands = (pal) => [0, 1, 2, 3].map((i) => mix(pal.sky, pal.far, i * 0.12
  * the strip's order within each), the dots in that order, and a tooltip of at most 12 heroes, then
  * "…and N more (…)" counting the rest by kind.
  */
-function campChip(L, folded) {
+function campChip(L, folded, spec = {}) {
   const rank = (h) => (h.state === "waiting" ? 0 : h.chest ? 1 : ["questing", "supervising", "crashed"].includes(h.state) ? 2 : 3);
   const list = folded.map((h, i) => ({ h, i, r: rank(h) })).sort((a, b) => a.r - b.r || a.i - b.i);
   const lines = list.slice(0, 12).map(({ h, r }) => `${h.name} · Lv ${h.level} · ${STATE_WORD[h.state].toLowerCase()}${r === 1 ? " · chest waiting" : ""}`);
@@ -72,10 +72,19 @@ function campChip(L, folded) {
     const parts = words.map((w, r) => [rest.filter((x) => x.r === r).length, w]).filter(([k]) => k).map(([k, w]) => `${k} ${w}`);
     lines.push(`…and ${rest.length} more (${parts.join(", ")})`);
   }
+  // the Localhost chip (docs/TOWN.md §7.2) once the Review Desk is open: today's LGTMs, the town's
+  // tooltip lines, and the label the line folds into at the coarsest detail levels
+  const lgtm = spec.town ? `LGTM ×${spec.town.lgtm}` : null;
+  if (spec.town) {
+    lines.push(`Localhost: ${spec.town.duty} on duty (Review Desk ${spec.town.duty}) · LGTM ${spec.town.shelf}`);
+    lines.push(`Last LGTM: “Fix flaky auth test” (Wynn), by Fable · ${spec.town.lgtm} today (61%) · 99% uptime`);
+    lines.push("vendor/: 2 contractors · next hired 04:00");
+  }
   return {
     key: "overflow", x: round(L.chip.x), w: round(L.chip.w), count: folded.length,
     dots: list.map(({ h }) => ({ questing: COL.working, supervising: COL.working, resting: COL.idle, shipped: COL.done, crashed: COL.hp, waiting: COL.blocked })[h.state]),
     tooltip: `At camp (${folded.length}):\n${lines.join("\n")}`,
+    town: lgtm ? { text: lgtm, label: `+${folded.length} · ${lgtm}` } : null,
   };
 }
 
@@ -195,7 +204,8 @@ function build(spec, { width, height, tick = 0 } = {}) {
       accessory: h.cls,
       bubble: h.state === "waiting" ? { label: `Waiting for you · ${h.blockedFor ?? "now"} · click to jump there` } : null,
       zzz: h.state === "resting" && Boolean(h.zzz),
-      campfire: h.state === "resting" ? { x: round(sx + 0.08 * w), y: 160 } : null,
+      // station: a resting hero on duty in Localhost sits at the Review Desk (docs/TOWN.md §7.2)
+      campfire: h.state === "resting" ? { x: round(sx + 0.08 * w), y: 160, station: h.desk ? "review_desk" : "campfire" } : null,
       crate: h.state === "waiting",
       tag, forklings, forklingExtra: Math.max(0, (h.forks ?? 0) - 3),
       tooltip: `${h.name} · Lv ${h.level} ${h.career}\nHP ${Math.round((h.hp ?? 1) * 100)}% · XP ${Math.round((h.xp ?? 0.4) * 100)}% · ${h.map} ${map.name}\n${STATE_WORD[h.state]} ${h.since ?? "4m"}${h.quest ? ` · ${h.quest}` : ""}`,
@@ -360,7 +370,7 @@ function build(spec, { width, height, tick = 0 } = {}) {
     headerNote: spec.note && tick === 0 ? { key: `note:${TICK0}`, text: spec.note[0], color: spec.note[1] ?? COL.cream, tooltip: spec.note[2] ?? spec.note[0], heroId: spec.note[3] ?? null, ...(spec.note[4] ? { short: spec.note[4] } : {}) } : null,
     herdBanner: spec.herdBanner ? { key: `herd:${TICK0}`, text: spec.herdBanner } : null,
     rooms: roomVMs, heroes, mobs, chests, boss, fx, signs,
-    overflow: L.chip ? campChip(L, folded) : null,
+    overflow: L.chip ? campChip(L, folded, spec) : null,
   };
 }
 
@@ -507,15 +517,20 @@ const SPECS = {
           map, state, attacking: state === "questing", hp: 0.6 + (i % 4) * 0.1, xp: (i * 0.13) % 1, tier: i < 3 ? 5 : 4, hat: i < 3 ? 5 : 4,
           blockedFor: state === "waiting" ? "12m" : undefined, chest: state === "shipped" ? { tier: "gold", seals: "7.2" } : null,
           forks: state === "supervising" ? 2 : 0, focused: i === 1, mobs: lane, zzz: state === "resting" && i % 2 === 0,
+          // on duty in Localhost: Zed and Hux sit at the Review Desk; Quin and Pim at the campfire
+          desk: state === "resting" && i % 4 === 2,
         };
       }),
     ],
+    town: { lgtm: 206, duty: 9, shelf: "40/70" },
     fx: [
       { hero: 41, kind: "crit", at: "mob", text: "48.2k", born: 0, dx: 6 },
       { hero: 42, kind: "num", at: "mob", text: "21.7k", born: 0, dx: 4 },
       { hero: 42, kind: "num", at: "mob", text: "19.9k", born: -1, ox: 6, dx: 4 },
       { hero: 46, kind: "num", at: "mob", text: "×3 31k", born: 0, dx: 4 },
       { hero: 41, kind: "pillar", text: "LTS", color: RARITIES[4].color, born: 0, ox: 40 },
+      // a chest that took an LGTM (docs/TOWN.md §7.2): its coin float reads "+1.2k · LGTM"
+      { hero: 45, kind: "coin", text: "+1.2k · LGTM", color: "#C89B3C", born: 0, ox: 34, oy: 30, dx: 0, dy: -24 },
     ],
   },
 };
@@ -590,12 +605,13 @@ SPECS.squeeze = {
   heroes: Array.from({ length: 60 }, (_, i) => {
     switch (i % 4) {
       case 0: return throngHero(i, { state: "waiting", attacking: false, blockedFor: "5m", forks: i % 12 === 0 ? 2 : 0, forkBlocked: false });
-      case 1: return throngHero(i, { state: "resting", attacking: false, mobs: [], zzz: true, chest: { tier: "silver", count: 2, seals: "3.2" } });
+      case 1: return throngHero(i, { state: "resting", attacking: false, mobs: [], zzz: true, chest: { tier: "silver", count: 2, seals: "3.2" }, desk: i % 8 === 1 });
       case 2: return throngHero(i, { chest: { tier: "wooden", seals: "0.4" } });
       default: return throngHero(i);
     }
   }),
   fx: Array.from({ length: 12 }, (_, i) => ({ hero: 103 + i * 4, kind: "num", at: "mob", text: String(900 + i * 41), born: 0, dx: 4 })),
+  town: { lgtm: 412, duty: 15, shelf: "0/100" },
 };
 // A long day's herd (D§11.9.7 levels 15-16): 36 heroes on 4000 px, every one holding status at
 // once (blocked with chests waiting and a blocked sub-agent, crashed with a chest, resting by two
@@ -609,9 +625,11 @@ SPECS.swamped = {
       case 0: return throngHero(i, { state: "waiting", attacking: false, blockedFor: "12m", forks: 3 + (i % 8 === 0 ? 2 : 0), forkBlocked: true, chest: { tier: "gold", count: 2, seals: "6.1" } });
       case 1: return throngHero(i, { state: "waiting", attacking: false, blockedFor: "4m", forks: 3, forkBlocked: i % 3 === 0, chest: { tier: "silver", count: 3, seals: "3.2" } });
       case 2: return throngHero(i, { state: "crashed", attacking: false, reboot: 0.6, forks: 3, chest: { tier: "iron", seals: "1.0" } });
-      default: return throngHero(i, { state: "resting", attacking: false, mobs: [], zzz: true, fresh: "1h 05m", chest: { tier: "wooden", count: 2, seals: "0.4" } });
+      default: return throngHero(i, { state: "resting", attacking: false, mobs: [], zzz: true, fresh: "1h 05m", chest: { tier: "wooden", count: 2, seals: "0.4" }, desk: i % 8 === 3 });
     }
   }),
+  // the Localhost chip at the coarsest levels: its "LGTM ×n" folds into the label (docs/TOWN.md §7.2)
+  town: { lgtm: 212, duty: 9, shelf: "3/100" },
   fx: [
     ...Array.from({ length: 8 }, (_, i) => ({ hero: 103 + i * 4, kind: "num", at: "mob", text: String(700 + i * 23), born: 0, dx: 4 })),
     { hero: 105, kind: "unblocked", text: "Unblocked", born: 0 },
@@ -624,6 +642,8 @@ SPECS["all-idle"] = {
   heroes: SPECS.midgame.heroes.map((h) => ({
     ...h, state: h.id === 3 || h.id === 2 ? "shipped" : "resting", attacking: false, forks: 0, mobs: [], zzz: h.id % 2 === 0, fresh: h.id === 2 ? "1h 10m" : h.fresh,
     hp: 1, chest: h.id === 3 ? { tier: "gold", seals: "6.1" } : h.id === 2 ? { tier: "iron", seals: "1.0" } : null,
+    // Kip and Pax are on duty in Localhost: at the Review Desk (docs/TOWN.md §7.2)
+    desk: h.id === 1 || h.id === 6,
   })),
   fx: [],
 };
@@ -654,7 +674,7 @@ SPECS.promoted = {
   ],
   fx: [{ hero: 73, kind: "num", at: "mob", text: "612", born: 0, dx: 4 }],
 };
-SPECS.compact = { ...SPECS.midgame, height: 64 };
+SPECS.compact = { ...SPECS.midgame, height: 64, town: { lgtm: 68, duty: 2, shelf: "12/20" } };
 SPECS.tall = { ...SPECS.midgame, height: 320 };
 
 const EMPTY = {

@@ -682,6 +682,69 @@ test("herd upgrades: Buy runs buy {building}; an unaffordable one does nothing",
   assert.ok(late.m.text().includes("MAX"));
 });
 
+test("herd Localhost tab (docs/TOWN.md §7.5): the town's lines on top, the Review Desk first in a scrolling grid, its Buy runs buy {building:'review_desk'}; the town off draws the Upgrades tab as before", async () => {
+  const vm = H.scenarios.upgrades;
+  const { m, host } = await mount("herd", "upgrades");
+  assertClean(m, "herd/upgrades");
+  const methodsOf = (node, name) => node.methods.filter((x) => x[0] === name).map((x) => x[1]);
+  const town = vm.upgrades.town;
+  for (const t of [town.header, town.shelf.label, town.shelf.text, town.titles.text]) assert.ok(m.text().includes(t), t);
+  assert.ok(m.node("hd-town"), "the town block");
+  assert.ok(methodsOf(m.node("hd-upgrades"), "overflow_y_scroll").length, "the building grid scrolls under it");
+  // the Review Desk card first, then the six buildings
+  const cards = m.findAll((n) => /^hd-b:/.test(String(n.id))).map((n) => n.id);
+  assert.deepEqual(cards, ["hd-b:review_desk", ...vm.upgrades.buildings.map((b) => `hd-${b.key}`)]);
+  click(m, "hd-buy-b:review_desk");
+  assert.deepEqual(host.commands, [["buy", { building: "review_desk" }]]);
+  // the titles line is cut at its end, the whole list (who approved each) in its tooltip
+  assert.equal(methodsOf(m.node("hd-town-titles"), "tooltip").at(-1)[0], town.titles.tooltip);
+  // before the desk opens: no shelf row, no titles
+  const closed = await mount("herd", "upgradesClosed");
+  assert.equal(closed.m.node("hd-town-lgtm"), null);
+  assert.equal(closed.m.node("hd-town-titles"), null);
+  assert.ok(closed.m.text().includes("Opens Localhost"));
+  // the town off (tools/pacing-sim.mjs --no-town): the Upgrades tab exactly as before, no scroll
+  const off = await mount("herd", "upgradesNoTown");
+  assert.equal(off.m.node("hd-town"), null);
+  assert.equal(off.m.node("hd-upgrades"), null);
+  assert.equal(off.m.node("hd-b:review_desk"), null);
+  assert.ok(off.m.text().includes("Upgrades"));
+});
+
+test("sheet Career: the Job line (docs/TOWN.md §7.6), read-only: station, job title and job XP, why on duty; an Intern's says when it gets one", async () => {
+  const { m } = await mount("sheet", "career");
+  assertClean(m, "sheet/career");
+  const methodsOf = (node, name) => node.methods.filter((x) => x[0] === name).map((x) => x[1]);
+  const job = S.scenarios.career.career.job;
+  const card = m.node("sh-job");
+  assert.ok(card);
+  for (const t of [job.title, job.line, job.status]) assert.ok(m.text().includes(t), t);
+  assert.equal(methodsOf(card, "tooltip").at(-1)[0], job.tooltip);
+  // read-only in round 1: nothing in the card takes a click
+  const clickable = m.findAll((n) => (n.handlers?.on_click ?? []).length > 0 && String(n.id ?? "").startsWith("sh-job"));
+  assert.deepEqual(clickable, []);
+  const pip = await mount("sheet", "provisional");
+  assert.ok(pip.m.text().includes("Gets a job at Lv 10 (Junior)"));
+  assert.equal(pip.m.node("sh-job-rank"), null, "no rank before a job");
+});
+
+test("sheet header (docs/TOWN.md §7.4): an on-duty hero's line keeps the agent's word and its own task; the job is only the line's tooltip", async () => {
+  const base = S.scenarios.career;
+  const subTip = "At the Review Desk · Committer reviewer · last LGTM “Bump deps” (Fizz)";
+  const header = { ...base.header, sub: "pr-review-eng-1 · Claude Code · resting", quest: "Fix flaky auth test", subTip };
+  const { m } = await mount("sheet", "career", { host: { vm: { ...base, header } } });
+  assertClean(m, "sheet/career on duty");
+  const line = m.node("sh-sub");
+  assert.ok(line, "the header's status line");
+  assert.equal(tipOf(m, "sh-sub"), subTip);
+  const text = m.findAll((n) => n.type === "text" && n.text.startsWith("pr-review-eng-1"))[0]?.text;
+  assert.equal(text, "pr-review-eng-1 · Claude Code · resting · “Fix flaky auth test”");
+  assert.ok(!/Review Desk/.test(text));
+  // no job (a fighter, an Intern, the town closed): no tooltip on the line
+  const plain = await mount("sheet", "career");
+  assert.equal(tipOf(plain.m, "sh-sub"), null);
+});
+
 test("herd stash: tiles select the card; equip on the best hero; Keepsakes can't be deprecated", async () => {
   const { m, host } = await mount("herd", "stash", { ui: {} });
   click(m, "hd-tile-it:921");
@@ -982,7 +1045,7 @@ test("round 4 (P2): a tab's tooltip names its key, and what its badge counts (\"
   assert.equal(tipOf(s.m, "sh-tab-skills"), "Skills · 1 skill point to spend · key 2");
   assert.equal(tipOf(s.m, "sh-tab-journal"), "Journal · key 5");
   const h = await mount("herd", "roster");
-  assert.equal(tipOf(h.m, "hd-tab-upgrades"), "Upgrades · key 1");
+  assert.equal(tipOf(h.m, "hd-tab-upgrades"), "Localhost · key 1"); // the Upgrades tab is Localhost (docs/TOWN.md §7.5)
   assert.equal(tipOf(h.m, "hd-tab-digest"), "Digest · 4 new since you last looked · key 6");
   assert.equal(tipOf(h.m, "hd-tab-settings"), "Settings · key 7");
   for (const m of [s.m, h.m]) {
@@ -993,7 +1056,7 @@ test("round 4 (P2): a tab's tooltip names its key, and what its badge counts (\"
 test("round 4 (P1): the sheet's contractor banner says when it is hired (its tooltip the whole story); the tag too", async () => {
   const { m } = await mount("sheet", "contractor");
   const vm = S.scenarios.contractor;
-  assert.ok(m.text().includes("Contractor: hired tomorrow at 04:00 · not saved until then"));
+  assert.ok(m.text().includes("Contractor: hired tomorrow at 04:00 · not on the roster until then"));
   assert.equal(tipOf(m, "sh-note"), vm.note.tooltip);
   assert.equal(tipOf(m, "sh-tag"), vm.header.tagTip);
   assertClean(m, "contractor");

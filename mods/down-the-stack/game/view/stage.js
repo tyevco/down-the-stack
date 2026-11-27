@@ -52,7 +52,9 @@ import { heroMapId, findHero } from "../combat.js";
 import { estimate as bossEstimate, canChallenge } from "../boss.js";
 // One Termling look and one D§2.9 "why" line for every role: the chrome views own these helpers
 // (the sidebar, nameplate and sheet draw the same hero with the same title bar and tooltip).
-import { termlingColors as colorsFor, programIconOf as iconOf, whyLine, taskLabel, tellingTitle, hireLine } from "./chrome.js";
+import { termlingColors as colorsFor, programIconOf as iconOf, whyLine, taskLabel, tellingTitle, hireLine, townLine, townTip, dutyNote, vendorLine } from "./chrome.js";
+// Localhost (docs/TOWN.md §7.2): the chip's town line and tooltip
+import * as TW from "../town.js";
 
 // ---------------------------------------------------------------------------------------------
 // Constants
@@ -411,7 +413,7 @@ function build(world, memo, wm, W, H) {
     tick, width: W, height: H, calm, nums, stillness, empty: null,
     headerNote: headerNote(world, memo), herdBanner: herdBanner(rt),
     rooms, heroes, mobs, chests, boss, fx, signs,
-    overflow: L.chip ? overflowVM(L) : null,
+    overflow: L.chip ? overflowVM(L, ctx) : null,
   };
 }
 
@@ -601,11 +603,20 @@ const CAMP_LINES = 12;
 const CAMP_RANK = (e) => (e.state === "waiting" ? 0 : e.hero.pend && e.hero.pend.length ? 1 : WORKING_STATES[e.state] ? 2 : 3);
 const CAMP_GROUP = ["waiting", "with a chest", "working", "resting"];
 
-function overflowVM(L) {
+/**
+ * The camp chip (D§11.3.4), the Localhost chip once the Review Desk is open (TOWN.md §7.2): the
+ * same box, "+N" and dots; `town` {text: "LGTM ×206" (today's LGTMs, the ground line), label:
+ * "+25 · LGTM ×206" (the line folded into the label at the coarse detail levels, so the chip never
+ * grows)} draws its props as Localhost's (desks and the campfire) instead of tents; null before
+ * the desk opens (the chip as it always was). The tooltip keeps its 12 heroes (each on duty one
+ * says "· at the Review Desk" after its own word) and adds the town's lines: who is on duty and
+ * the shelf, the last LGTM's title, `vendor/`'s Contractors and the next hire.
+ */
+function overflowVM(L, ctx) {
   // most relevant first (stable within a rank: the strip's own order); the dots follow it too, so
   // the renderer's first ten carry a waiting hero's amber
   const list = L.folded.map((e, i) => ({ e, i, rank: CAMP_RANK(e) })).sort((a, b) => a.rank - b.rank || a.i - b.i);
-  const line = ({ e, rank }) => `${e.hero.name} · Lv ${e.hero.L} · ${(WORD[e.state] || "resting").toLowerCase()}${rank === 1 ? " · chest waiting" : ""}`;
+  const line = ({ e, rank }) => `${e.hero.name} · Lv ${e.hero.L} · ${(WORD[e.state] || "resting").toLowerCase()}${rank === 1 ? " · chest waiting" : ""}${e.state === "resting" || e.state === "shipped" ? dutyNote(townData(ctx, e)) : ""}`;
   const lines = list.slice(0, CAMP_LINES).map(line);
   const rest = list.slice(CAMP_LINES);
   if (rest.length) {
@@ -614,10 +625,22 @@ function overflowVM(L) {
     const parts = n.map((k, r) => (k ? `${k} ${CAMP_GROUP[r]}` : "")).filter(Boolean);
     lines.push(`…and ${rest.length} more${parts.length ? ` (${parts.join(", ")})` : ""}`);
   }
+  const info = ctx && TW.townOn() ? TW.townInfo(ctx.world) : null;
+  const chip = info && info.chip ? info.chip : null;
+  if (chip) {
+    // "Localhost: 12 on duty (Review Desk 12) · LGTM 40/70", the last approved title, vendor/
+    if (info.tips[0]) lines.push(info.tips[0]);
+    const n = info.today.lgtm;
+    const up = info.uptime.step ? `${info.uptime.label} uptime` : "uptime booting";
+    lines.push(`${info.titles.length ? `Last LGTM: ${info.titles[0].text} · ` : ""}${fmtNum(n)} LGTM${n === 1 ? "" : "s"} today${info.today.pct != null ? ` (${info.today.pct}% of chests)` : ""} · ${up}`);
+    const vendor = vendorLine(ctx.world);
+    if (vendor) lines.push(vendor);
+  }
   return {
     key: "overflow", x: r1(L.chip.x), w: r1(L.chip.w), count: list.length,
     dots: list.map(({ e }) => DOT[e.state] || COL.idle),
     tooltip: `At camp (${list.length}):\n${lines.join("\n")}`,
+    town: chip ? { text: chip.text, label: `+${list.length} · ${chip.text}` } : null,
   };
 }
 
@@ -667,7 +690,9 @@ function slotContents(ctx, e, s, L, out) {
   }
 
   const vm = heroVM(ctx, e, { x: hx, scale, slot: { x: r1(sx), w: r1(w) }, plateMax: w - 12, forklings: fkVMs, extra, inArena: false });
-  if (st === "resting") vm.campfire = { x: r1(sx + 0.08 * w), y: GROUND };
+  // a resting hero on duty in Localhost sits at its station's prop instead of the campfire, in the
+  // same spot (TOWN.md §7.2: Interns and heroes not on duty keep the campfire; no slot moves)
+  if (st === "resting") vm.campfire = { x: r1(sx + 0.08 * w), y: GROUND, station: stationOf(ctx, e) };
   if (review && st !== "waiting") vm.tag = { text: "REVIEW", color: COL.hp };
   let lanePos = w < 180 ? [0.58, 0.84] : [0.52, 0.70, 0.88];
   // the front lane stays clear of a hero that stepped right for its chest (a large mob's half
@@ -869,6 +894,18 @@ function reviewEndVM(ctx, e, career) {
   return { key: `${f.key}:end`, kind: "postmortem", text: pm.title, sub: pm.sub, age };
 }
 
+/** The hero's Localhost data (town.heroTown), once per build; null with the town off. */
+function townData(ctx, e) {
+  if (e.town === undefined) e.town = townLine(ctx.world, e.hero, e.live);
+  return e.town;
+}
+
+/** The prop a resting hero sits at: its station on duty ("review_desk"), else "campfire". */
+function stationOf(ctx, e) {
+  const t = townData(ctx, e);
+  return t && t.onDuty && t.station ? t.station : "campfire";
+}
+
 function heroTooltip(ctx, e, career, inArena) {
   const { hero, live, state: st } = e;
   const { tick, state } = ctx;
@@ -886,6 +923,9 @@ function heroTooltip(ctx, e, career, inArena) {
   // bare program, shell or path title
   const quest = live.task ? taskLabel(live) : "";
   lines.push(`${WORD[st] || "Resting"} ${fmtDuration(since)}${quest ? ` · ${quest}` : ""}`);
+  // Localhost (TOWN.md §7.2): "At the Review Desk · Committer reviewer · last LGTM “Bump deps” (Fizz)"
+  const job = inArena ? "" : townTip(townData(ctx, e));
+  if (job) lines.push(job);
   const why = whyText(live.why, hero.L);
   if (why) lines.push(why);
   if ((hero.fe || 0) >= 1) lines.push(`Fresh Eyes ${fmtDuration(Math.floor(hero.fe) * 60)} banked (×${T.freshEyes.xpMult} kill XP while questing)`);
@@ -1574,6 +1614,17 @@ function buildFx(ctx, fxs, heroPos, mobPos, chestPos, boss) {
           if (hp) { dx = hp.x - x; dy = hp.head + 20 - y; } else { dy = -20; }
           color = kind === "coin" ? COL.coin : hexOr((RARITIES[f.rar] || RARITIES[0]).color, COL.cream);
           text = "";
+          // a chest that took an LGTM (TOWN.md §7.2): its coin float reads "+1.2k · LGTM", on the
+          // same one element (no new glyph a chest), rising from the chest as a status float so it
+          // can be read; every other coin stays a coin that flies to its hero
+          if (kind === "coin" && f.lgtm > 0 && f.value > 0 && f.mobUid == null) {
+            text = `+${fmtNum(f.value)} · LGTM`;
+            // its pill starts at the chest's left edge (clear of the hero's face: a chest stands ≥ 34
+            // px right of its hero) just above the chest, and rises
+            const left = from ? src.x - 14 : hp.x + 22;
+            x = left + (text.length * COIN_TEXT * 0.6 + 8) / 2;
+            y = GROUND - 30; dx = 0; dy = -24;
+          }
           break;
         }
         case "skill":
@@ -1618,10 +1669,11 @@ function buildFx(ctx, fxs, heroPos, mobPos, chestPos, boss) {
       }
     }
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    if (TEXT_SIZE[kind]) {
+    const ts = kind === "coin" ? (text ? COIN_TEXT : 0) : TEXT_SIZE[kind];
+    if (ts) {
       // short stages: the renderer lifts the scene by (H − 200), so floats keep below its header band
       const minY = 28 + Math.max(0, 200 - ctx.H);
-      y = dodge(boxes, kind, text, x, Math.max(y, minY), age, f.roomId === "arena" ? 1 : -1, minY);
+      y = dodge(boxes, kind, text, x, Math.max(y, minY), age, f.roomId === "arena" ? 1 : -1, minY, ts);
     }
     const vm = {
       key: f.key, kind, x: r1(x), y: r1(y), text, color, age,
@@ -1637,15 +1689,16 @@ function buildFx(ctx, fxs, heroPos, mobPos, chestPos, boss) {
 }
 
 const ARENA_NUM_Y = 74;
-// Font size of each text float as ui/stage.js draws it (mono: a glyph is 0.6 em wide).
+// Font size of each text float as ui/stage.js draws it (mono: a glyph is 0.6 em wide); a coin is
+// a text float only with its LGTM text (COIN_TEXT).
 const TEXT_SIZE = { num: 11, crit: 13, heal: 11, miss: 11, inv: 11, abs: 11, incoming: 9, skill: 10, unblocked: 11, ship: 11 };
+const COIN_TEXT = 10;
 
 /**
  * Moves a text float (centred at x, y) up (dir -1) or down (dir 1) a row at a time until its pill
  * clears every float of the same age placed before it, at most 4 rows; records its box.
  */
-function dodge(boxes, kind, text, x, y, age, dir, minY) {
-  const size = TEXT_SIZE[kind];
+function dodge(boxes, kind, text, x, y, age, dir, minY, size = TEXT_SIZE[kind]) {
   const w = String(text).length * size * 0.6 + 8 + (kind === "crit" ? 22 : 0);
   const h = size + 5;
   const hit = (yy) => boxes.some((b) => b.age === age && Math.abs(b.x - x) < (b.w + w) / 2 + 2 && Math.abs(b.y - yy) < (b.h + h) / 2 + 1);

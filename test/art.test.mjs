@@ -22,11 +22,11 @@ const read = (rel) => fs.readFileSync(path.join(MOD, rel), "utf8");
 
 const MOB_PX = { S: 28, M: 40, L: 56 };
 const UI_ICONS = ["split-right", "split-down", "zoom", "unzoom", "close", "sheet", "herd", "calm", "gold", "snippet",
-  "chest", "boss", "star", "fork", "gear", "skills", "stats", "career", "journal", "lock"];
+  "chest", "boss", "star", "fork", "gear", "skills", "stats", "career", "journal", "lock", "desk"];
 const SLOTS = ["weapon", "hat", "hoodie", "mug", "boots", "sticker"];
 const FX = { "campfire": [24, 24], "bubble": [18, 20], "crate": [24, 16], "coin": [6, 6], "loot": [10, 10], "poof": [24, 24],
   "starburst": [20, 20], "door": [24, 40], "portal": [32, 48], "banner": [12, 18], "stamp-fixed": [80, 28], "mug": [12, 12],
-  "stink": [16, 12], "ribbon": [40, 10], "tent": [16, 14] };
+  "stink": [16, 12], "ribbon": [40, 10], "tent": [16, 14], "desk": [24, 20] };
 
 /** Map<relPath, [w, h] | {max: [w, h]}> of every required asset. */
 function expected() {
@@ -165,6 +165,8 @@ test("the intrinsic scale k gives each image() family headroom for its largest d
     else if (rel.startsWith("art/mob/")) assert.equal(k, 2, rel);
     else if (rel.startsWith("art/gear/acc-")) assert.equal(k, 2, rel);
     else if (rel === "art/fx/campfire.svg") assert.equal(k, 2, rel);
+    // Localhost's desk: the Localhost tab's Review Desk card draws it at 26 of 24 (docs/TOWN.md §7.5)
+    else if (rel === "art/fx/desk.svg") assert.equal(k, 2, rel);
     else if (rel === "art/fx/mug.svg") assert.equal(k, 3, rel);
     // the FIXED stamp slams in from 2× its size (ui/stage.js: 160×56 at age 0, then a 300 ms
     // width/height transition to 80×28 while it fades in); the role matrix never shows that frame

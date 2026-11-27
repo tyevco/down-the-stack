@@ -410,6 +410,12 @@ function rueCareer() {
       name: "The Octopus Merge", zone: "Merge Marshes · Lv 45", status: "Sprint 18 / 45",
       estimate: { text: "Risky 0.61×", color: C.hp }, challenge: null, fighting: false,
     },
+    // Localhost's Job line (docs/TOWN.md §7.6, round 1 read-only)
+    job: {
+      title: "Job · Review Desk", line: "Committer reviewer · 112 / 300", frac: 0.06,
+      status: "On duty: resting (seen work today) · made 112 LGTMs · last “Bump deps” (Fizz)", onDuty: true,
+      tooltip: "Job XP is what Rue made at the Review Desk: 1 per LGTM, shared among the heroes on duty. Committer: output ×1.4; Maintainer at 300 job XP. It works there while its agent rests, on days you saw its work, and always fights while its agent works.",
+    },
     identity: { name: "Rue Two-Spaces", hint: "Renaming is free. Badges unlock extra epithets." },
     retire: action("retire", "Retire", "retire", { heroId: RUE }, { tone: "danger", confirm: "Retire Rue for good?", tooltip: "Rue joins the Hall of Fame (+0.5% herd XP). Its gear goes to vendor/." }),
     rebind: null,
@@ -620,6 +626,11 @@ function junoCareer() {
       zones: c.map.zones.map((z) => ({ ...z, maps: z.maps.map((m) => ({ ...m, args: { heroId: JUNO, mapId: m.args.mapId }, on: false, enabled: true })) })),
     },
     boss: null,
+    job: {
+      title: "Job · Review Desk", line: "Contributor reviewer · 61 / 100", frac: 0.48, onDuty: false,
+      status: "Back on duty after you see its next chest",
+      tooltip: "Job XP is what Juno made at the Review Desk: 1 per LGTM, shared among the heroes on duty. Contributor: output ×1.2; Committer at 100 job XP. It works there while its agent rests, on days you saw its work, and always fights while its agent works.",
+    },
     identity: { name: "Juno of the Green Build", hint: "Renaming is free. Badges unlock extra epithets." },
     retire: action("retire", "Retire", "retire", { heroId: JUNO }, { tone: "danger", confirm: "Retire Juno for good?", tooltip: "Juno joins the Hall of Fame (+0.5% herd XP). Its gear goes to vendor/." }),
     rebind: {
@@ -674,6 +685,7 @@ function pipCareer() {
       challenge: action("retreat:boss:1", "Retreat", "retreat", {}, { tone: "danger", confirm: "Retreat? (a Postmortem)", tooltip: "End the fight as a Postmortem: Wounds and Lessons are kept" }),
       fighting: true,
     },
+    job: { title: "Job", line: null, frac: 0, onDuty: false, status: "Gets a job at Lv 10 (Junior)", tooltip: "Gets a job at Lv 10 (Junior)" },
     identity: { name: "Pip the Unmerged", hint: "Renaming is free. Badges unlock extra epithets." },
     retire: action("retire", "Retire", "retire", { heroId: PIP }, { enabled: false, tooltip: "Retiring opens at Lv 30" }),
     rebind: null,
@@ -725,11 +737,11 @@ export const scenarios = {
    * joins the roster, its tooltip the whole story; the tag explains itself.
    */
   contractor: { ...base(WREN, "gear", { ...nibHeader, name: "Wren Monorepo-Raised", level: "Lv 6", tag: "contractor",
-    tagTip: "Contractor: Hired at the next 04:00 game day · 2 ahead in line (today: 0 of 6 hires left). When hired it keeps its name, level, XP and class, and its kit becomes saved Alpha gear.",
+    tagTip: "Contractor: Hired at the next 04:00 game day · 2 ahead in line (today: 0 of 6 hires left). When hired it keeps its name, level, XP and class, and its kit becomes saved Alpha gear. Until then the herd remembers its name, level, XP, class and place in line across restarts, and for 7 game days while its agent is away (not its kit or chests).",
     sub: "ref-client · Claude Code · fighting 1-2 Whitespace Fields", quest: null, focus: { pane: "p33", address: "t33" } }, {
     note: {
-      text: "Contractor: hired tomorrow at 04:00 · not saved until then; its kills and chests still pay the herd", color: C.idle,
-      tooltip: "Hired at the next 04:00 game day · 2 ahead in line (today: 0 of 6 hires left). When hired it keeps its name, level, XP and class, and its kit becomes saved Alpha gear. Contractors don't get equity.",
+      text: "Contractor: hired tomorrow at 04:00 · not on the roster until then; its kills and chests still pay the herd", color: C.idle,
+      tooltip: "Hired at the next 04:00 game day · 2 ahead in line (today: 0 of 6 hires left). When hired it keeps its name, level, XP and class, and its kit becomes saved Alpha gear. Until then the herd remembers its name, level, XP, class and place in line across restarts, and for 7 game days while its agent is away (not its kit or chests). Contractors don't get equity.",
     },
   }), gear: nibGear() },
   /** An off-duty (benched) hero: Career with Rebind, no Focus button. */

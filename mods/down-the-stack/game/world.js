@@ -26,6 +26,7 @@ import * as A from "./agents.js";
 import * as H from "./herd.js";
 import * as AP from "./autopilot.js";
 import * as C from "./combat.js";
+import * as TW from "./town.js";
 
 const DAY_MS = 86400000;
 const RESYNC_MS = 3600000; //     a clock that jumps back more than 1 h resyncs (no accrual for the gap)
@@ -75,13 +76,20 @@ export function createWorld({ nowMs = 0, seed = 1 } = {}) {
  * @returns {{world, warning:null|string}}
  */
 export function loadWorld(text, { nowMs = 0 } = {}) {
-  const { state, warning, readOnly } = decodeState(text);
+  const { state, warning, readOnly, townDay } = decodeState(text);
   const world = { state, rt: newRt(nowMs, state.herd.tick) };
   world.rt.readOnly = !!readOnly;
+  // Localhost (docs/TOWN.md §8): a save an older build moved on by game days gets the town's turn
+  TW.loadDay(world, townDay);
   // the world time the save was written at: the time until the first reconcile (the app closed) is
   // not counted in a hero's off-duty grace (agents.inOffDutyGrace, round 4b)
   world.rt.loadedLastMs = Number.isFinite(state.herd.lastMs) ? state.herd.lastMs : null;
   repairLoaded(state);
+  // Contractor records (round 5): new Contractors are numbered after them, and the loaded ones hold
+  // their hires for a reconnect window (agents.reconnectOpen) while herdr lists their terminals
+  const recs = Array.isArray(state.herd.contractors) ? state.herd.contractors : [];
+  for (const r of recs) if (r.seq > world.rt.contractorSeq) world.rt.contractorSeq = r.seq;
+  world.rt.recWait = new Set(readOnly ? [] : recs.map((r) => r.seq));
   return { world, warning: warning || null };
 }
 
@@ -91,9 +99,10 @@ export function loadWorld(text, { nowMs = 0 } = {}) {
 //   character as normSeat now does, so its hero still matches the space; a title also loses the
 //   space before it (questName's trimEnd).
 // - Contractor ids in the paused boss fight, the journal, review Wounds / Lessons Learned and the
-//   chest inbox: Contractors are never saved and are numbered afresh (-1, -2, ...) after a load, so
-//   a saved negative id would seat an unrelated Contractor (a journal line keeps its stored name,
-//   and hero id 0).
+//   chest inbox: a Contractor's session-keyed state does not outlive the session (round 5: its slim
+//   record keeps its number, but a new Contractor or one whose record has gone could take an id
+//   seen in an older save), so a saved negative id would seat an unrelated Contractor (a journal
+//   line keeps its stored name, and hero id 0).
 function repairLoaded(state) {
   const mend = (v) => {
     if (typeof v !== "string") return v;
@@ -126,6 +135,8 @@ function repairLoaded(state) {
     for (const key of Object.keys(m)) if (key[0] === "r" && Number(key.slice(key.indexOf(".") + 1)) < 0) delete m[key];
   }
   for (const e of Array.isArray(state.herd.inbox) ? state.herd.inbox : []) if (Array.isArray(e) && e[0] < 0) e[0] = 0;
+  // a Contractor record's seat is mended like a hero's (round 5)
+  for (const r of Array.isArray(state.herd.contractors) ? state.herd.contractors : []) if (typeof r.seat === "string") r.seat = wellFormed(r.seat, "");
 }
 
 /**
@@ -141,13 +152,21 @@ function repairLoaded(state) {
  * (D§10.7). Nothing is counted twice: the call that settles the gap clears the hold, and every
  * later save writes herd.lastMs as it is. Every other saved time is stored relative to lastMs
  * (save.js) and decodes to the same absolute time.
+ *
+ * Round 5: the save also holds every live Contractor's slim record, beside the records of those
+ * whose agent is away (agents.contractorRecords; nothing on a read-only world beyond what it
+ * loaded). world.state itself keeps only the latter (herd.contractors).
  */
 export function serialize(world) {
   const { state, rt } = world;
+  if (!state.herd) return encodeState(state);
   const hold = rt && rt.offlineHold;
-  if (!hold || !(hold.dtMs > 0) || !state.herd) return encodeState(state);
-  const herd = Object.assign({}, state.herd, { lastMs: (state.herd.lastMs || 0) - hold.dtMs });
-  return encodeState(Object.assign({}, state, { herd }));
+  let herd = state.herd;
+  // the live Contractors' records with those whose agent is away (round 5, agents.contractorRecords)
+  const recs = rt ? A.contractorRecords(world) : null;
+  if (recs && recs !== state.herd.contractors) herd = Object.assign({}, herd, { contractors: recs });
+  if (hold && hold.dtMs > 0) herd = Object.assign({}, herd, { lastMs: (state.herd.lastMs || 0) - hold.dtMs });
+  return encodeState(herd === state.herd ? state : Object.assign({}, state, { herd }));
 }
 
 /** Local day number with the 04:00 reset (D§2.9): days since 1970 at 04:00 local time. */
@@ -505,7 +524,13 @@ export function tick(world, snap) {
 
   if (!rt.readOnly && !behind) {
     const day = localDay(now, s.tzOffsetMin);
-    if (day > (herd.day || 0)) herd.day = day; // the Daily Shift resets lazily per hero (agents.shiftToday)
+    if (day > (herd.day || 0)) {
+      const was = herd.day || 0;
+      herd.day = day; // the Daily Shift resets lazily per hero (agents.shiftToday)
+      // Localhost's game-day turn (docs/TOWN.md §5.2): the demand check reads the day that ended,
+      // today's counters start afresh; before reconcile, so this morning's chests count for today
+      if (was > 0) guard(world, "townDay", () => TW.dayTurn(world));
+    }
     // the herd's first day (herd.herdAgeDays); a save from before herd.born counts from its oldest hero
     if (!(herd.born > 0)) herd.born = (herd.day || day) - H.herdAgeDays(state) + 1;
     herd.lastMs = offline || steps >= T.maxCatchUpTicks ? now : herd.lastMs + steps * T.tickMs;
@@ -658,6 +683,8 @@ function stepOnce(world, snap, ev) {
     if (!rt.live.has(hero.id)) continue;
     if (live.state === "shipped" || live.state === "resting") guard(world, "restTick", () => C.restTick(world, hero, live));
   }
+  // Localhost (docs/TOWN.md §3.2): heroes on duty make LGTMs, after rest and the off-duty loop
+  guard(world, "stepTown", () => TW.stepTown(world));
 
   // herd trackers
   trackPairs(world);
@@ -824,6 +851,9 @@ function applyOffline(world, dtMs, ev) {
     A.accrueFreshEyes(world, hero, minutes);
     guard(world, "expireChests", () => A.expireChests(world, hero, ev));
   }
+  // Localhost (docs/TOWN.md §6.5): the town's on-duty time of the gap into the shelf, bounded by
+  // the duty rule and the shelf (never a burst: the shelf is spent one chest at a time)
+  guard(world, "settleTown", () => TW.settleOffline(world, dtMs));
   const api = AP.bossApi(world);
   if (typeof api.suspendFight === "function") {
     for (const f of rt.fights.slice()) guard(world, "suspendFight", () => api.suspendFight(world, f, ev));
@@ -1120,6 +1150,11 @@ const COMMANDS = {
 
   buy(world, a, now, ev) {
     const b = a.building;
+    // Localhost's Review Desk (docs/TOWN.md §5.2): its level lives in herd.town, not herd.bld
+    if (b === "review_desk") {
+      const r = TW.buyDesk(world, ev);
+      return r.ok ? { ok: true, msg: `Review Desk ${r.level} (-${fmtNum(r.cost)} gold)` } : fail(r.error);
+    }
     const i = typeof b === "string" ? BUILDING_IDX[b] : Number(b);
     if (!(Number.isInteger(i) && BUILDINGS[i])) return fail("Unknown building");
     const r = H.buy(world.state, i);

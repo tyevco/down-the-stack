@@ -250,14 +250,17 @@ export function winReview(hero, idx) {
 /**
  * Ranks an auto-learning hero of class `cls` would have at level L (point by point, level by
  * level, reviews won at 30 / 60 when `reviews`). Used for Contractors and as a test oracle.
+ * reviews may also be a hero's [Senior, Staff] review flags (round 5: a Contractor record keeps
+ * them): each one counts from its level only when set.
  */
 export function autoRanks(cls, L, reviews = true) {
+  const won = Array.isArray(reviews) ? [!!reviews[0], !!reviews[1]] : [!!reviews, !!reviews];
   const h = { cls: typeof cls === "number" ? cls : CLASS_IDX[cls], L: 1, rev: [0, 0], sp: new Array(N_SKILLS).fill(0), spFree: 0, autoLearn: true };
   for (let lv = 2; lv <= L; lv++) {
     h.L = lv;
     h.spFree++;
-    if (reviews && lv === CAREERS[2].from) winReview(h, 0);
-    if (reviews && lv === CAREERS[3].from) winReview(h, 1);
+    if (won[0] && lv === CAREERS[2].from) winReview(h, 0);
+    if (won[1] && lv === CAREERS[3].from) winReview(h, 1);
     autoLearn(h);
   }
   return h.sp;
@@ -875,7 +878,7 @@ export function grantXP(state, hero, amount, ev) {
       emitNote(ev, `Promoted: ${after.title}`);
       emitJournal(ev, "promo", hero.id, after.title, hero.L);
       // opt-in notification (D§11.15 "Hero reached Principal"): roster heroes only (a Contractor
-      // is never saved)
+      // is not on the roster)
       if (after.tier === CAREERS.length - 1 && hero.id > 0 && ev && typeof ev.milestone === "function") {
         ev.milestone("principal", { title: `${hero.name || "A hero"} reached Principal`, body: `${after.title}, Lv ${hero.L}: promotion packet approved.` });
       }

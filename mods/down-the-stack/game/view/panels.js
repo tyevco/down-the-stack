@@ -45,7 +45,7 @@
 import {
   TUNING as T, CLASSES, CAREERS, ZONES, MOBS, BOSSES, REVIEWS, RARITIES, AFFIXES, LTS_PROPS,
   KEEPSAKES, BUILDINGS, BUILDING_IDX, BUG_TRACKER, BACKLOG, PALETTE, SLOTS, CLASS_COLORS, ITEM_BASES, MAP_BY_ID,
-  SKILL_BY_ID, TROPHY,
+  SKILL_BY_ID, TROPHY, TOWN,
 } from "../data.js";
 import { fmtNum, fmtDuration, itemTier, reqLevel, polishMax, deprecateYield, buildingCost, freshEyesCap, gold as goldOf, autoOn } from "../formulas.js";
 import {
@@ -60,7 +60,9 @@ import * as Herd from "../herd.js";
 import { bossApi } from "../autopilot.js";
 import { heroCtx } from "../combat.js";
 import { fnv1a32 } from "../rng.js";
-import { statusWord, programIconOf, termlingColors, faceOf, xpFracOf, feFracOf, whyLine, taskLabel, tellingTitle, gapPart, gapText, needYou, needYouText } from "./chrome.js";
+import { statusWord, programIconOf, termlingColors, faceOf, xpFracOf, feFracOf, whyLine, taskLabel, tellingTitle, gapPart, gapText, needYou, needYouText, townOf, townLine, townTip, dutyNote, vendorLine } from "./chrome.js";
+// Localhost, the town (docs/TOWN.md round 1): read through the namespace, as agents.hireOutlook is
+import * as TW from "../town.js";
 
 // ---------------------------------------------------------------------------------------------
 // Constants
@@ -76,6 +78,8 @@ const HERD_TABS = [
   ["upgrades", "Upgrades"], ["stash", "Stash"], ["tracker", "Tracker"], ["bosses", "Bosses"], ["roster", "Roster"],
   ["digest", "Digest"], ["settings", "Settings"],
 ];
+// Localhost's Uptime steps (docs/TOWN.md §5.3): label and cosmetic unlock of each nine
+const TOWN_UPTIME = (TOWN && TOWN.uptime) || [];
 const SLOT_LABEL = { weapon: "Weapon", hat: "Hat", hoodie: "Hoodie", mug: "Mug", boots: "Boots", sticker: "Sticker" };
 const WEAPON_NAME = { stick: "Training Stick", blade: "Blades", knives: "Patch Knives", pipe: "Pipes", manpage: "Manpages", duck: "Ducks" };
 const STASH_ROWS = { sheet: 32, herd: 48 }; // sheet rows cost ~7 elements (8 while picking), herd tiles ~4
@@ -750,7 +754,7 @@ function cardVM(world, idx, found, o) {
   // refuses lock / polish / reroll on it ("No such item"), so the buttons only explain.
   const kit = !(item.uid > 0);
   if (kit) {
-    const why = "A contractor's kit is not saved: it leaves with the contractor";
+    const why = "A contractor's kit is the reference kit for its level, not saved gear (it becomes saved gear when the contractor is hired)";
     actions.push(disabled(`lock:${item.uid}`, "Lock", "lock", { uid: item.uid, locked: true }, why));
     actions.push(disabled(`polish:${item.uid}`, "Polish", "polish", { uid: item.uid }, why));
   } else {
@@ -978,7 +982,11 @@ function activityOf(world, idx, hero, live) {
       return `supervising ${n} ${plural(n, "Forkling")}`;
     }
     case "shipped": return hero.pend && hero.pend.length ? "shipped · chest waiting" : "shipped";
-    case "resting": return "resting at the campfire";
+    // on duty in Localhost (TOWN.md §7.4): the agent's own word alone, as the sheet's header line
+    // quotes the agent's last task right after it ("resting · “Fix flaky auth test”"): "at the
+    // Review Desk" there would read as the agent reviewing its own task. The job is in the line's
+    // tooltip (headerVM's subTip) and the Career tab's Job card.
+    case "resting": return dutyNote(townLine(world, hero, live)) ? "resting" : "resting at the campfire";
     default: {
       const where = mapLabel(world, live.mapId, live);
       return where ? `fighting ${where}` : "questing";
@@ -1063,7 +1071,7 @@ function hireOf(world, hero, clock) {
   if (!hero || !hero.contractor || typeof Agents.hireOutlook !== "function") return null;
   const o = Agents.hireOutlook(world, hero);
   if (!o) return null;
-  const keeps = "When hired it keeps its name, level, XP and class, and its kit becomes saved Alpha gear.";
+  const keeps = `When hired it keeps its name, level, XP and class, and its kit becomes saved Alpha gear. Until then the herd remembers its name, level, XP, class and place in line across restarts, and for ${T.roster.contractorKeepDays} game days while its agent is away (not its kit or chests).`;
   const at = Number.isFinite(o.atMs) ? o.atMs : null;
   let long, short, color;
   switch (o.when) {
@@ -1079,6 +1087,14 @@ function hireOf(world, hero, clock) {
       const min = at != null ? Math.max(1, Math.ceil((at - clock.now) / 60000)) : null;
       long = min != null ? `hired in about ${min} min` : "hired when a roster slot frees";
       short = min != null ? `Hired in ~${min} min` : "Hired when a slot frees";
+      color = COL.idle;
+      break;
+    }
+    case "reconnect": {
+      // round 5: right after a load, hires wait a moment for the contractors of the last session
+      const sec = at != null ? Math.max(1, Math.ceil((at - clock.now) / 1000)) : null;
+      long = sec != null ? `hired in about ${sec} s` : "hired in a moment";
+      short = sec != null ? `Hired in ~${sec} s` : "Hired soon";
       color = COL.idle;
       break;
     }
@@ -1101,6 +1117,8 @@ function headerVM(world, idx, hero, live, st, clock) {
   const prog = programName(programKey, live && live.program);
   const where = live ? activityOf(world, idx, hero, live) : `last seen ${fmtWhen(num(hero.seenAt, clock.now), clock)}`;
   const sub = [space || "no space", prog, where].join(" · ");
+  // the hero's job (TOWN.md §7.4: tooltips and secondary text only, never right before the quest)
+  const subTip = townTip(townLine(world, hero, live || null)) || null;
   // the label the party and pane header use (chrome.taskLabel): never a bare program or shell title,
   // and never a quoted repeat of the space the line already names (a tab named after its space)
   let quest = live ? taskLabel(live) || null : null;
@@ -1122,7 +1140,7 @@ function headerVM(world, idx, hero, live, st, clock) {
     tagTab = "career";
   }
   return {
-    name: str(hero.name, "Termling"), level: `Lv ${hero.L}`, title: career.title, tag, tagTip, tagTab, sub, quest,
+    name: str(hero.name, "Termling"), level: `Lv ${hero.L}`, title: career.title, tag, tagTip, tagTab, sub, subTip, quest,
     status: live ? statusWord(live.status) : "off",
     hp: { frac: r2(clamp01(hp / maxHp)), text: `${fmtInt(hp)} / ${fmtInt(maxHp)}` },
     xp: {
@@ -1142,10 +1160,10 @@ function noteVM(world, idx, hero, live, clock) {
   if (hero.contractor) {
     // owner decision (round 4): the banner says when this Contractor joins the roster
     const hire = hireOf(world, hero, clock);
-    if (!hire) return { text: "Contractor: not saved · its kills and chests still pay the herd · Contractors don't get equity.", color: COL.idle, tooltip: null };
+    if (!hire) return { text: "Contractor: not on the roster · its kills and chests still pay the herd · Contractors don't get equity.", color: COL.idle, tooltip: null };
     const pays = "its kills and chests still pay the herd";
     return {
-      text: hire.when === "never" ? `Contractor: ${hire.long} · ${pays}` : `Contractor: ${hire.long} · not saved until then; ${pays}`,
+      text: hire.when === "never" ? `Contractor: ${hire.long} · ${pays}` : `Contractor: ${hire.long} · not on the roster until then; ${pays}`,
       // D§3.4's line stays with the whole story (the banner itself needs the room)
       color: hire.when === "soon" ? COL.working : COL.idle, tooltip: `${hire.tooltip} Contractors don't get equity.`,
     };
@@ -1757,6 +1775,36 @@ function rebindVM(world, idx, hero) {
   };
 }
 
+/**
+ * The Career tab's Job line (docs/TOWN.md §7.6; round 1 read-only: no override chips yet), or null
+ * with the town off: {title "Job · Review Desk", line "Contributor reviewer · 61 / 100" (null for
+ * an Intern or a Contractor), frac toward the next rank, status (why it is or is not on duty:
+ * "On duty: resting (seen work today) · made 61 LGTMs · last “Bump deps” (Fizz)"), tooltip, onDuty}.
+ */
+function jobVM(world, hero, live, clock) {
+  const t = townOf(world, hero, live || null);
+  if (!t) return null;
+  const rankAt = T.town.rankAt;
+  const from = rankAt[t.rank] || 0;
+  const frac = t.nextAt != null ? clamp01((t.jobXp - from) / Math.max(1, t.nextAt - from)) : 1;
+  const holds = t.state !== "intern" && t.state !== "contractor";
+  let status = str(t.status);
+  if (t.state === "contractor") {
+    const h = hireOf(world, hero, clock);
+    status = `Contractors don't hold jobs${h && h.long ? ` (${h.long})` : ""}`;
+  }
+  const next = t.nextAt != null ? `${TOWN.ranks[t.rank + 1] ? TOWN.ranks[t.rank + 1].name : "next rank"} at ${fmtInt(t.nextAt)} job XP` : "the top rank";
+  // "Maintainer reviewer · 412 / 1,000": whole numbers, as the rank ladder names them (TOWN.md §4),
+  // never "1.0k"
+  const line = `${t.title} · ${fmtInt(t.jobXp)}${t.nextAt != null ? ` / ${fmtInt(t.nextAt)}` : ""}`;
+  return {
+    title: holds ? `Job · ${t.jobName}` : "Job", line: holds ? line : null, frac: holds ? frac : 0, status, onDuty: !!t.onDuty,
+    tooltip: holds
+      ? `Job XP is what ${firstName(hero)} made at the ${t.jobName}: 1 per LGTM, shared among the heroes on duty. ${t.rankName}: output ×${(1 + T.town.rankRate * t.rank).toFixed(1)}; ${next}. It works there while its agent rests, on days you saw its work, and always fights while its agent works.`
+      : status,
+  };
+}
+
 function careerVM(world, idx, hero, live, clock) {
   const roster = inRoster(world, hero);
   const tier = careerOf(hero).tier;
@@ -1781,8 +1829,8 @@ function careerVM(world, idx, hero, live, clock) {
   }
   return {
     ladder, signature: signatureVM(hero), classes: classesVM(world, hero), map: mapVM(world, hero, live),
-    boss: careerBossVM(world, idx, hero, live),
-    identity: { name: str(hero.name), canRename: !!roster, hint: roster ? "Renaming is free (1–32 characters)." : "Contractors are not saved: a new name would not stick." },
+    boss: careerBossVM(world, idx, hero, live), job: jobVM(world, hero, live, clock),
+    identity: { name: str(hero.name), canRename: !!roster, hint: roster ? "Renaming is free (1–32 characters)." : "A contractor keeps the name it came with: rename it once it joins the roster." },
     retire, rebind: rebindVM(world, idx, hero),
   };
 }
@@ -2079,6 +2127,72 @@ function upgradesVM(world) {
     buildings,
     note: `Autopilot buys the cheapest upgrade when gold ≥ ${T.buildingAutoBuyAt}× its cost and keeps a ${Math.round(T.goldReserve * 100)}% reserve (Auto buildings: ${auto ? "on" : "off"}).`,
     trophies: tr > 0 ? `Trophies: ${pctI(TROPHY.dmg * tr)} damage and max HP for every hero` : null,
+    town: localhostVM(world),
+  };
+}
+
+/**
+ * The Localhost tab's town (docs/TOWN.md §7.5, round 1: the Review Desk alone), or null with the
+ * town off (the tab is then Upgrades, as before): {header, headerTip, shelf, titles, desk, hint}.
+ *   header  "99% uptime · 12 on duty (Review Desk 12) · vendor/: 2 contractors · next hired 04:00"
+ *   shelf   the LGTM row: {label "LGTMs 40 / 70", frac, text "+10% XP and gold on chests you open ·
+ *           today 206 of 340 (61%)", tooltip}; null before the desk opens
+ *   titles  {text "Last approved: “Bump deps” (Fizz) · …", tooltip: the five, newest first, with
+ *           who approved each}; null with none (runtime only: after a restart the line starts empty)
+ *   desk    the Review Desk's BuildingVM (level, cost, buy {building:"review_desk"}), drawn as the
+ *           first card of the building grid (across both columns); the six D§10.2 buildings stay
+ *           in `buildings`
+ *   hint    what the town is, in a line ("Nothing here needs you")
+ */
+function localhostVM(world) {
+  if (typeof TW.townInfo !== "function" || !TW.townOn()) return null;
+  const state = world.state;
+  const info = TW.townInfo(world);
+  const up = info.uptime;
+  const upText = up.step ? `${up.label} uptime` : "uptime booting";
+  // (the next nine only: its cosmetic unlock, TOWN.md §5.3, is drawn from round 3 on, so round 1
+  // promises nothing the player would not see)
+  const nextUp = up.next != null && TOWN_UPTIME[up.step] ? ` · ${TOWN_UPTIME[up.step].label} at ${fmtInt(up.next)}` : "";
+  const headerTip = `Uptime ${up.step ? up.label : "booting"}: ${fmtInt(up.s)} served (LGTMs spent on chests)${nextUp}. Cosmetic: it pays nothing.`;
+  const vendor = vendorLine(world);
+  const header = (info.open ? [upText, `${info.onDuty} on duty (Review Desk ${info.onDuty})`, info.maintainer ? `maintainer ${firstName(info.maintainer)}` : null, vendor]
+    : ["closed: opens with the Review Desk's first level", vendor]).filter(Boolean).join(" · ");
+  const today = info.today;
+  const shelf = info.open ? {
+    label: `LGTMs ${info.shelf.n} / ${info.shelf.cap}`, frac: info.shelf.cap > 0 ? clamp01(info.shelf.exact / info.shelf.cap) : 0,
+    text: `+${info.bonusPct}% XP and gold on chests you open · today ${fmtInt(today.lgtm)}${today.chests ? ` of ${fmtInt(today.chests)} (${today.pct}%)` : ""}`,
+    tooltip: `${info.shelf.n} of ${info.shelf.cap} LGTMs on the shelf (10 per Review Desk level). Heroes of Lv ${T.town.minLevel}+ on duty make about 1 an hour each (more with rank) while their agents rest, on days you saw their work; each chest you open with full value takes one. A full shelf makes nothing.`,
+  } : null;
+  const titles = info.titles.length ? {
+    text: `Last approved: ${info.titles.map((e) => TW.titleText(e)).join(" · ")}`,
+    tooltip: `Last approved, newest first:\n${info.titles.map((e) => e.text).join("\n")}`,
+  } : null;
+  return {
+    header, headerTip, shelf, titles, desk: deskVM(world, info),
+    hint: `Heroes of Lv ${T.town.minLevel}+ work here while their agents rest, on days you saw their work. Nothing here needs you.`,
+  };
+}
+
+/** The Review Desk as a building card (BuildingVM) for the Localhost tab (TOWN.md §5.2, §7.5). */
+function deskVM(world, info) {
+  const gold = num(world.state.herd.gold);
+  const level = info.level;
+  const maxed = level >= info.max;
+  const staff = info.staff;
+  // (the card's lines are short: at 640 px its text column holds about 17 characters a line)
+  const effect = level < 1 ? "Opens Localhost" : `Shelf ${info.shelf.cap} · ${staff} ${plural(staff, "reviewer")}`;
+  let next = null;
+  if (!maxed) next = level < 1 ? `Auto at ${goldText(T.town.desk.autoAt * info.cost)}` : `Next: shelf ${(level + 1) * T.town.shelfPerLevel}${info.want ? " (wanted)" : ""}`;
+  let buy = null;
+  if (!maxed && info.cost != null) {
+    const ok = gold >= info.cost && !world.rt.readOnly;
+    const tip = world.rt.readOnly ? "This save is read-only" : ok ? `Level ${level + 1} for ${goldText(info.cost)}` : `Needs ${goldText(info.cost)} (the herd has ${fmtNum(gold)})`;
+    buy = action("buy:review_desk", "Buy", "buy", { building: "review_desk" }, { cost: goldText(info.cost), enabled: ok, tone: ok ? "primary" : null, tooltip: tip });
+  }
+  return {
+    key: "b:review_desk", id: "review_desk", name: "Review Desk", icon: { path: "fx/desk.svg", mask: false },
+    level, max: info.max, levelText: `${level} / ${info.max}`, effect, next, maxed, buy,
+    tooltip: `Heroes of Lv ${T.town.minLevel}+ make LGTMs here while their agents rest, on days you saw their work. Each chest you open with full value takes one: +${info.bonusPct}% XP and gold.${info.maintainer ? ` Maintainer: ${info.maintainer.name} (${info.maintainer.title}).` : ""} ${level < 1 ? `Autopilot opens it once a Lv ${T.town.minLevel}+ hero's chest was seen and the herd has ${goldText(T.town.desk.autoAt * info.cost)}.` : `Autopilot buys the next level only when the shelf filled up and still ran dry the same game day${info.want ? " (it did: wanted now)" : ""}, with 3× its price in gold.`}`,
   };
 }
 
@@ -2409,6 +2523,9 @@ function rosterRow(world, idx, hero, live, clock) {
     retire,
     space: null,
     hire: h ? { text: h.short, tooltip: h.tooltip, color: h.color } : null,
+    // Localhost (TOWN.md §7.5): no column and no status word, the row's tooltip says it
+    // ("At the Review Desk · Committer reviewer", "Off duty · at the Review Desk (Committer reviewer)")
+    job: townTip(townLine(world, hero, live || null)) || null,
   };
 }
 
@@ -2450,17 +2567,27 @@ function rosterVM(world, idx, clock) {
   const line = [];
   for (const [hero] of idx.pairs) if (hero.contractor) line.push(hero);
   let waiting = "";
+  // round 5: Contractors whose agent is away are kept as records (agents.contractorRecords) and come
+  // back with their seat's next terminal
+  const away = Array.isArray(state.herd.contractors) ? state.herd.contractors.length : 0;
   if (line.length) {
     let next = null;
     if (typeof Agents.hireOutlook === "function") {
+      // the first in line (round 5: right after a load, a record whose agent is not listed yet
+      // can stand before every live one)
+      let best = null;
       for (const c of line) {
         const o = Agents.hireOutlook(world, c);
-        if (o && o.position === 0) { next = hireOf(world, c, clock); break; }
+        if (o && (!best || o.position < best.o.position)) best = { c, o };
+        if (o && o.position === 0) break;
       }
+      if (best) next = hireOf(world, best.c, clock);
     }
     // a read-only save hires nobody: "the next never hired here" would not read
     const tail = !next ? "" : next.when === "never" ? ", none hired here: this save is read-only" : `, the next ${next.long}`;
-    waiting = ` · ${line.length} ${plural(line.length, "contractor")}${tail}`;
+    waiting = ` · ${line.length} ${plural(line.length, "contractor")}${tail}${away ? `, ${away} off duty` : ""}`;
+  } else if (away) {
+    waiting = ` · ${away} ${plural(away, "contractor")} off duty`;
   }
   return {
     count: `${state.heroes.length} / ${T.roster.max} heroes · ${hired} hired today (${T.roster.newPerDay} a day)${waiting}`,
@@ -2538,6 +2665,9 @@ function digestVM(world, clock) {
     return line(keyOf("u", x), text, `half value, no Seals · ${whenOrEarlier(x.at, clock)}`, COL.idle);
   });
   const badges = d.badges.slice().reverse().map((x) => line(keyOf("bd", x), `Badge: ${str(x.text)}`, whenOrEarlier(x.at, clock), COL.xp));
+  // Localhost (TOWN.md §7.7): one card when the town has something to tell (herd.digest().town),
+  // never counted in the badge or the Herd dot
+  const town = townLines(d.town);
   const chests = [];
   for (const h of state.heroes) {
     const p = pendingSummary(h);
@@ -2560,6 +2690,7 @@ function digestVM(world, clock) {
   add("bosses", "Bosses", "ui/boss.svg", bosses);
   add("shipped", "Shipped", "ui/chest.svg", shipped);
   add("badges", "Badges", "ui/star.svg", badges);
+  add("town", "Localhost", "ui/desk.svg", town);
   add("chests", "Chests waiting", "ui/chest.svg", chests);
   const dot = Herd.digestDot(world);
   const empty = sections.length === 0;
@@ -2576,6 +2707,37 @@ function digestVM(world, clock) {
     unseen,
     seen: unseen > 0 ? action("digest:seen", "Seen", "lossesSeen", {}, { tooltip: `${unseen} Unreviewed ${plural(unseen, "chest")} seen` }) : null,
   };
+}
+
+/**
+ * The Digest's Localhost card (TOWN.md §7.7) from herd.digest().town ({lgtm, runbooks, ranks,
+ * uptime, was}): "259 chests LGTM'd (+10% XP and gold)" with the Uptime as its sub ("99% uptime,
+ * was 90%"), then the rank-ups ("Kip and 1 more reached Committer · Ori reached Contributor"); []
+ * when the town has nothing to tell. Only what the town made: no rank-up ever reaches a note.
+ */
+function townLines(town) {
+  if (!town || typeof town !== "object") return [];
+  const out = [];
+  const lgtm = num(town.lgtm);
+  const rb = num(town.runbooks);
+  const up = town.uptime && town.uptime.step ? `${town.uptime.label} uptime${town.was && town.was.step && town.was.step !== town.uptime.step ? `, was ${town.was.label}` : ""}` : null;
+  const made = [];
+  if (lgtm) made.push(`${fmtInt(lgtm)} ${plural(lgtm, "chest")} LGTM'd (+${Math.round(num(T.town.lgtmBonus) * 100)}% XP and gold)`);
+  if (rb) made.push(`${rb} ${plural(rb, "runbook")} used`);
+  if (made.length) out.push({ key: "tw:made", text: made.join(" · "), sub: up, color: COL.xp, tint: false, action: null });
+  const groups = [];
+  for (const r of Array.isArray(town.ranks) ? town.ranks : []) {
+    const g = groups.find((x) => x.rank === r.rank);
+    if (g) g.n++;
+    else groups.push({ rank: num(r.rank), rankName: str(r.rankName), first: firstName(r), n: 1 });
+  }
+  groups.sort((a, b) => b.rank - a.rank);
+  if (groups.length) {
+    const text = groups.map((g) => `${g.first}${g.n > 1 ? ` and ${g.n - 1} more` : ""} reached ${g.rankName}`).join(" · ");
+    out.push({ key: "tw:ranks", text, sub: made.length ? null : up, color: COL.xp, tint: false, action: null });
+  }
+  if (!out.length && up) out.push({ key: "tw:up", text: up, sub: null, color: COL.xp, tint: false, action: null });
+  return out;
 }
 
 function digestBadge(world) {
@@ -2702,7 +2864,8 @@ function buildHerd(world, tab, f, clock) {
   const idx = indexOf(world);
   const badge = digestBadge(world);
   const vm = {
-    tab, tabs: HERD_TABS.map(([id, label]) => ({ id, label, badge: id === "digest" ? badge : null, tip: id === "digest" ? digestTip(badge) : null })),
+    // the first tab is Localhost's (TOWN.md §7.5: the Upgrades tab renamed; still key 1)
+    tab, tabs: HERD_TABS.map(([id, label]) => ({ id, label: id === "upgrades" && TW.townOn() ? "Localhost" : label, badge: id === "digest" ? badge : null, tip: id === "digest" ? digestTip(badge) : null })),
     calm: !!(world.state.herd.cfg && world.state.herd.cfg.calm), header: herdHeader(world, idx),
     save: null, upgrades: null, stash: null, tracker: null, bosses: null, roster: null, digest: null, settings: null,
   };

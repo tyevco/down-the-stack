@@ -154,6 +154,9 @@ export function defaultHerd({ nowMs = 0, seed = 1 } = {}) {
     // world.js: opt-in notifications (D§11.15): [local day, raised that day, last sequence number]
     // and the milestones raised but not yet taken by the host
     notified: [0, 0, 0], milestones: [],
+    // agents.js (round 5): slim Contractor records whose agent is away (agents.contractorRecords;
+    // world.serialize adds the live Contractors' records when it writes the save)
+    contractors: [],
   };
 }
 
@@ -566,6 +569,82 @@ const logCodec = {
   def: () => [],
 };
 
+// Contractor records (round 5, agents.contractorRecords): a Contractor kept slim, so it comes back
+// as itself after a restart (D§3.4). Readable {seq, seat, L, xp, cls, prov, rev, since, day, tag,
+// sig?, name?, ...}; written as one row each:
+//   [seq, seat, L, xp, k, since, tag, day?, extras?]
+// seq: the Contractor's number (its id is -seq; its default name, hoodie and hat follow from it);
+// seat through the string table (strRef); xp to the whole point; k = class | provisional << 3 |
+// Senior review << 4 | Staff review << 5; since in minutes relative to lastMs (its place in the
+// hiring line; a tie goes to the lower number, which came first); tag: agents.tagOf of its
+// terminal's address (5 characters at most); day: the game day it was last seen,
+// relative to the top-level day (left out when 0 and nothing follows); extras {sg: the signature
+// window as sigCodec writes it (only an Intern's or a provisional class needs one), n: a name that
+// differs from the default, other readable fields as they are}. A row that does not read (no
+// number, no seat) is dropped; an unknown class falls back as a hero's does.
+const CT_KEYS = ["seq", "seat", "L", "xp", "cls", "prov", "rev", "since", "day", "tag", "sig", "name"];
+const contractorsCodec = {
+  enc(v, ctx) {
+    const base = (ctx && ctx.base) || 0;
+    const day = (ctx && ctx.day) || 0;
+    return (Array.isArray(v) ? v : []).filter(isObj).map((r) => {
+      const seat = typeof r.seat === "string" && ctx && ctx.strIdx && ctx.strIdx.has(r.seat) ? ctx.strIdx.get(r.seat) : strOr(r.seat, "");
+      const rev = Array.isArray(r.rev) ? r.rev : [0, 0];
+      const k = (Math.max(0, Math.min(7, Math.round(numOr(r.cls, 0))))) | (r.prov ? 8 : 0) | (rev[0] ? 16 : 0) | (rev[1] ? 32 : 0);
+      const row = [
+        q(numOr(r.seq, 0)), seat, q(Math.round(numOr(r.L, 1))), Math.max(0, Math.floor(numOr(r.xp, 0))), k,
+        Math.round((numOr(r.since, base) - base) / 60000), r.tag == null ? "" : String(r.tag),
+      ];
+      const x = {};
+      let any = false;
+      if (r.sig) { x.sg = sigCodec.enc(r.sig); any = true; }
+      if (typeof r.name === "string") { x.n = r.name; any = true; }
+      for (const key of Object.keys(r)) {
+        if (CT_KEYS.includes(key) || key[0] === "_" || r[key] === undefined || typeof r[key] === "function") continue;
+        x[key] = qDeep(r[key]);
+        any = true;
+      }
+      const dd = q(Math.round(numOr(r.day, day) - day));
+      if (dd || any) row.push(dd);
+      if (any) row.push(x);
+      return row;
+    });
+  },
+  dec(c, ctx) {
+    const base = (ctx && ctx.base) || 0;
+    const day = (ctx && ctx.day) || 0;
+    const out = [];
+    const seen = new Set();
+    for (const row of Array.isArray(c) ? c : []) {
+      if (!Array.isArray(row) || row.length < 7) continue;
+      const seq = numOr(row[0], 0);
+      const seat = decText(row[1], ctx);
+      if (!(Number.isInteger(seq) && seq >= 1) || seen.has(seq) || typeof seat !== "string" || !seat) continue;
+      seen.add(seq);
+      const L = Math.max(1, Math.min(T.levelCap, Math.round(numOr(row[2], 1))));
+      const k = Math.max(0, Math.round(numOr(row[4], 0)));
+      let cls = k & 7;
+      if (!CLASSES[cls]) {
+        if (ctx) ctx.fallbacks++;
+        cls = L >= 10 ? 3 : 0; // as a hero's unknown class (clsCodec)
+      }
+      const r = {
+        seq, seat, L, xp: Math.max(0, numOr(row[3], 0)), cls, prov: k & 8 ? 1 : 0, rev: [k & 16 ? 1 : 0, k & 32 ? 1 : 0],
+        since: base + numOr(row[5], 0) * 60000, day: day + numOr(row[7], 0), tag: typeof row[6] === "string" ? row[6] : "",
+      };
+      const x = isObj(row[8]) ? row[8] : null;
+      if (x) {
+        if (x.sg !== undefined) r.sig = sigCodec.dec(x.sg);
+        if (typeof x.n === "string") r.name = x.n;
+        for (const key of Object.keys(x)) if (key !== "sg" && key !== "n" && !(key in r)) r[key] = x[key];
+      }
+      out.push(r);
+    }
+    return out;
+  },
+  def: () => [],
+};
+
 const HERD_FIELDS = [
   ["name", "name", C.str("The Herd")],
   ["gold", "gold", C.num(0)],
@@ -598,6 +677,7 @@ const HERD_FIELDS = [
   ["ducks", "dk", C.num(0)],
   ["notified", "nf", C.ints(3)],
   ["milestones", "ms", C.json(() => [])],
+  ["contractors", "ct", contractorsCodec],
 ];
 // lastMs, tick and day live at the top level of the file (D§13.2).
 const HERD_TOP = ["lastMs", "tick", "day"];
@@ -891,10 +971,12 @@ export function encodeState(state) {
   for (const h of heroes) for (const p of Array.isArray(h.pend) ? h.pend : []) if (isObj(p) && p.title != null) use(String(p.title));
   const log = Array.isArray(herd.log) ? herd.log : [];
   if (logRowsOk(log)) for (const e of log) { use(e[1]); use(e[3]); use(e[5]); }
+  // Contractor records' seats (round 5): usually a seat a saved hero has too
+  for (const r of Array.isArray(herd.contractors) ? herd.contractors : []) if (isObj(r)) use(r.seat);
   const table = [];
   const strIdx = new Map();
   for (const [str, n] of counts) if (n > 1) { strIdx.set(str, table.length); table.push(str); }
-  const ctx = { strIdx, base: top.lastMs };
+  const ctx = { strIdx, base: top.lastMs, day: top.day };
   top.herd = encFields(herdSrc, HERD_FIELDS, ctx);
   if (inbox) top.herd.ib = inbox;
   top.heroes = heroes.map((h) => encFields(h, HERO_FIELDS, Object.assign({}, ctx, { workSec: heroWorkSec(h.st) })));
@@ -957,7 +1039,7 @@ export function decodeState(text, opts = {}) {
   }
   if (numOr(obj.gen, GEN) > GEN) warnings.push(`Save uses newer content (gen ${obj.gen}); unknown ids were replaced`);
 
-  const ctx = { fallbacks: 0, table: Array.isArray(obj.str) ? obj.str : [], base: numOr(obj.lastMs, 0) };
+  const ctx = { fallbacks: 0, table: Array.isArray(obj.str) ? obj.str : [], base: numOr(obj.lastMs, 0), day: numOr(obj.day, 0) };
   const herd = decFields(obj.herd, HERD_FIELDS, ctx);
   delete herd.ib; // (an extras key only if a save put "ib" under herd.x)
   const inbox = expandInbox(obj.herd.ib, ctx);

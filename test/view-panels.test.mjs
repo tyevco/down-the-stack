@@ -1288,9 +1288,10 @@ test("rules: the item-score cache keeps only live heroes (Contractor churn does 
   let now = NOW;
   const hired = [];
   for (let i = 1; i <= 12; i++) {
-    // an agent past today's roster becomes a Contractor (a fresh negative id each time); its gear
+    // an agent past today's roster becomes a Contractor (a fresh negative id each time: each in a
+    // space of its own, so none comes back as the one before it from its record, round 5); its gear
     // sheet prices items; then it leaves
-    const ag = { ...snapshot.agents[0], address: `tc${i}`, pane: `p_tc${i}`, seq: 700 + i, focused: false };
+    const ag = { ...snapshot.agents[0], address: `tc${i}`, pane: `p_tc${i}`, seq: 700 + i, focused: false, space: `s_tc${i}`, space_name: `churn-${i}` };
     now += 1000;
     W.tick(world, { ...snapshot, nowMs: now, agents: [...snapshot.agents, ag] });
     const id = world.rt.bind.get(`tc${i}`);
@@ -1688,9 +1689,11 @@ test("rules (round 4, P1): a Contractor's banner, tag and roster row say when it
   const first = cs.reduce((a, b) => (a.since <= b.since ? a : b));
   // the day's six hires are spent: the next 04:00 game day reopens hiring (tomorrow, NOW being 09:30 UTC)
   const sheet = V.sheetView(world, { heroId: first.id, tab: "gear", filter: FILTER });
-  assert.match(sheet.note.text, /^Contractor: hired tomorrow at 04:00 · not saved until then; its kills and chests still pay the herd$/);
+  assert.match(sheet.note.text, /^Contractor: hired tomorrow at 04:00 · not on the roster until then; its kills and chests still pay the herd$/);
   assert.match(sheet.note.tooltip, /^Hired at the next 04:00 game day/);
-  assert.match(sheet.note.tooltip, /keeps its name, level, XP and class, and its kit becomes saved Alpha gear\. Contractors don't get equity\.$/);
+  assert.match(sheet.note.tooltip, /keeps its name, level, XP and class, and its kit becomes saved Alpha gear\. /);
+  // round 5: a Contractor is kept as a slim record until it is hired
+  assert.match(sheet.note.tooltip, /Until then the herd remembers its name, level, XP, class and place in line across restarts, and for 7 game days while its agent is away \(not its kit or chests\)\. Contractors don't get equity\.$/);
   assert.match(sheet.header.tagTip, /^Contractor: Hired at the next 04:00 game day/);
   const roster = V.herdView(world, { tab: "roster", filter: FILTER }).roster;
   assert.match(roster.count, / · 2 contractors, the next hired tomorrow at 04:00$/);
@@ -1733,7 +1736,7 @@ test("rules (round 4b): a Contractor waiting on a hero's off-duty grace is told 
   assert.equal(o.when, "grace", JSON.stringify(o));
   assert.equal(o.atMs, world.rt.nowMs + 10 * 60000);
   const sheet = V.sheetView(world, { heroId: c.id, tab: "gear", filter: FILTER });
-  assert.match(sheet.note.text, /^Contractor: hired in about 10 min · not saved until then; /);
+  assert.match(sheet.note.text, /^Contractor: hired in about 10 min · not on the roster until then; /);
   assert.match(sheet.note.tooltip, /^Hired in about 10 min, once a hero below Lv 10 has been off duty for 15 min \(unless its agent comes back\)/);
   const roster = V.herdView(world, { tab: "roster", filter: FILTER }).roster;
   assert.equal(roster.groups.flatMap((g) => g.rows).find((r) => r.heroId === c.id).hire.text, "Hired in ~10 min");

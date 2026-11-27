@@ -461,13 +461,14 @@ describe("every save this branch has written loads (SAVE_VERSION stays 1)", () =
   // (990aa93 the first save.js; 4f9a1a0 = 4082db1's save.js; 2d2583c before the string table held
   // pending-chest titles and journal strings; a4ea9ab the D§11.15 settings, the build the owner ran
   // in herdr; c041909 round 3: the collapse countdown, "unrev" journal lines; d1ffb4f round 4: the
-  // journal's name column, Contractors promoted at the 04:00 turn), demo worlds of the time, one
-  // with shared titles.
+  // journal's name column, Contractors promoted at the 04:00 turn; r5 round 5's slim Contractor
+  // records, written by this branch's engine before that round was committed), demo worlds of the
+  // time, one with shared titles.
   const DIR = new URL("./fixtures/saves/", import.meta.url);
   const files = fs.readdirSync(DIR).filter((f) => f.endsWith(".json")).sort();
 
   test("the fixtures cover every format", () => {
-    assert.deepEqual(files.map((f) => f.split("-")[0]).filter((c, i, a) => a.indexOf(c) === i), ["2d2583c", "4082db1", "4f9a1a0", "990aa93", "a4ea9ab", "c041909", "d1ffb4f"]);
+    assert.deepEqual(files.map((f) => f.split("-")[0]).filter((c, i, a) => a.indexOf(c) === i), ["2d2583c", "4082db1", "4f9a1a0", "990aa93", "a4ea9ab", "c041909", "d1ffb4f", "r5"]);
   });
 
   for (const f of files) {

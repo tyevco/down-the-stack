@@ -44,7 +44,7 @@ export const TUNING = {
   onboarding: { xp: 0.5, levelsBehind: 10 }, crowdingAt: 12,
   // offDutyGraceMin (round 4b): a hero off duty for less than this (world time, from its seenAt) is
   // never let go to make room for a hire or a Contractor's promotion: a restarted agent gets it back
-  roster: { max: 30, newPerDay: 6, contractorLevelsBelowMedian: 5, offDutyGraceMin: 15 },
+  roster: { max: 30, newPerDay: 6, contractorLevelsBelowMedian: 5, offDutyGraceMin: 15, contractorKeepDays: 7, reconnectSec: 60 },
   forkling: { pctOfMain: 0.12, counted: 3 }, flap: { changes: 6, windowSec: 60, suppressSec: 300 },
   boss: {
     partyHpPerExtra: 0.75, swingEvery: 2, timer: 180, enrageAt: 0.8, enrageDmg: 0.5, warRoomTicks: 6,

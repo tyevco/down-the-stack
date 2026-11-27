@@ -116,6 +116,62 @@ change that keeps a promise already made. Each says what to change to decide oth
    stay apart. The stage's room headers name maps, not spaces, and the sheet's header names one
    space, so neither changes. D§11.14.
 
+### Round 5
+
+1. **Contractors across a restart: a slim record** (owner decision; was open since round 4). A
+   Contractor is kept as a slim record in the save (`herd.ct`, about 35 bytes with a seat a saved
+   hero shares, 60 with a seat of its own like "ceo-assistant-res-2/claude"): its number (its id,
+   which gives its default name, hoodie and hat), seat, level, XP, class (with its provisional flag
+   and reviews; the signature window too while the class can still change, an Intern's or a
+   provisional one, 3 bytes a task), its place in the hiring line and the game day it was last seen,
+   and a 5-character tag of its terminal's address. After a restart or a hot reload a new terminal
+   of its seat with no saved hero to take is that Contractor again (its own terminal first, by the
+   tag; herdr's core keeps terminals while the app is closed), so herdr closed across 04:00 hires a
+   waiting Contractor at its level. For a short reconnect window after a load (60 s,
+   `T.roster.reconnectSec`) a record whose terminal is not listed yet keeps its hire and its place in
+   line, so a newcomer listed first takes only the hires left beyond it. A record not claimed for 7
+   game days is dropped (`T.roster.contractorKeepDays`); the records are capped at the roster's
+   size (30), live Contractors first, the oldest unclaimed going first. A read-only world neither
+   claims nor writes one. SAVE_VERSION stays 1: an older build drops the records (its Contractors
+   come back new, as before). D§3.2, D§3.4, D§13.2.
+
+Decided by default with it (the smallest change that keeps the promise; each says what to change
+to decide otherwise):
+
+2. **A Contractor whose terminal ends keeps its record too**, not only one live at a save: closing
+   its pane then quitting the app, or restarting its agent in a new pane, brings it back as itself
+   with its seat's next terminal (the record's 7 game days apply). Otherwise: write records for live
+   Contractors only (`agents.goOffDuty` keepRecord).
+3. **A saved hero of the seat comes first**: a new terminal takes a free saved hero of its seat
+   (D§3.2) before a Contractor record, even when it is that Contractor's own terminal; the record
+   waits. A terminal of the seat listed a few snapshots before the Contractor's own takes the record
+   by seat, as a free saved hero is taken today (round 4b's own-first rule holds within one listing).
+   So when herdr lists a seat's two terminals in different snapshots after a start, the two can swap:
+   the Contractor's terminal, listed first, takes the seat's saved hero (its own terminal not listed
+   yet), and the hero's terminal then takes the Contractor's record (in the review's random restarts
+   listed over three snapshots, 37 of 300 had such a swap; none when every terminal is listed at
+   once). Before round 5 the same terminal took the saved hero too and the hero's agent came back as
+   a new Contractor. Otherwise: a terminal's own record (by tag) before a free saved hero of its seat
+   (`reconcile` step 1a skips a terminal whose own record is there, and 1a' claims it).
+4. **What a record does not keep**: its kit (rebuilt as the reference kit for its level and class),
+   its skills (re-spent by the auto-learn rule), XP below the whole point, Daily Shift, Fresh Eyes,
+   HP, cooldowns and pending chests. The chests keep round 4's behaviour: while its agent plays they
+   wait for "seen" and pay the herd; when its terminal ends they open Unreviewed for the herd at once;
+   chests still waiting when the app closes are not kept. Session-keyed state (journal ids, review
+   Wounds and Lessons, inbox finder, fight seats) is dropped on load as before; its journal lines
+   keep its name.
+5. **A newcomer held back by the window** plays as a Contractor (at the herd's median level minus
+   five) and is promoted keeping that level when a hire is left for it, as any agent that arrives
+   while the day's hires are taken. Otherwise: hold the newcomer unbound until the window ends.
+6. **Rebind lets the Contractor go**: moving a Contractor's agent onto a benched hero keeps no record
+   of it (the person chose the saved hero). Otherwise: keepRecord in `agents.rebind`.
+7. **Told**: a Contractor's sheet banner reads "… · not on the roster until then; …" (was "not
+   saved until then"), its tooltip adds that the herd remembers its name, level, XP, class and place
+   in line across restarts and for 7 game days while its agent is away (not its kit or chests);
+   right after a load, one behind a held record reads "Hired in about 40 s, unless a contractor from
+   before the restart comes back first"; the Roster's count line ends "· 1 contractor off duty" for
+   records waiting for their agent. D§11.13, D§11.14.
+
 ### Earlier rounds
 
 - Round 3: the palette's sheet and calm-mode entries were dropped (decision 4 above keeps it so).
@@ -141,13 +197,9 @@ Each item says what the game does now; nothing changes until the owner decides.
 - **A herd-first kill's Keepsake.** It is named in the boss toast while "Herd-first boss kill" is
   on, so the kill spends one of the day's three toasts; it raises its own "LTS or Keepsake drop"
   toast only while the boss kind is off. D§11.15.
-- **Contractors in a paused fight.** Contractors are never saved, so a restart or hot reload drops
-  them from a paused or running boss fight; they rejoin by questing in the fight's zone.
-- **Contractors across a restart** (round 4; the owner has been asked). Contractors are never
-  saved. After a restart or hot reload the hiring line re-forms in snapshot order, so
-  "longest-running first" is lost, and closing herdr across 04:00 makes a waiting Contractor come
-  back as a new terminal: it is hired fresh at Lv 1 if hires remain, without its level or kit.
-  Saving Contractors would fix both (a save format change). D§3.4.
+- **Contractors in a paused fight.** A Contractor's slim record (round 5) does not keep its seat in
+  a fight, so a restart or hot reload drops it from a paused or running boss fight; it rejoins by
+  questing in the fight's zone.
 - **A restart in a new pane** (round 4b). The off-duty grace (Round 4b, 1) protects a restarted
   agent's hero for 15 minutes. A relaunch in the same pane (the agent exits inside herdr's shell,
   or a new terminal in a pane that survived) takes its own hero back; closing the pane and opening

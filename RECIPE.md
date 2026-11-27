@@ -87,9 +87,12 @@ something.
   seen fill the Sprint meter that summons the zone boss.
 - **idle**: the hero rests at a campfire with face `-_-`, and shows `z` after 10 minutes.
 - **New agents**: up to 6 new heroes a game day (it turns at 04:00 local), the first day too. A
-  7th new agent plays as a **Contractor**, not saved; its tooltips and Roster row say when it will
-  be hired ("(contractor)" shows where no hire line does), and it becomes a saved hero, keeping its
-  level, kit and look (hoodie and hat colours), at the next 04:00 or when a roster slot frees. On
+  7th new agent plays as a **Contractor**, not on the roster; its tooltips and Roster row say when it
+  will be hired ("(contractor)" shows where no hire line does), and it becomes a saved hero, keeping
+  its level, kit and look (hoodie and hat colours), at the next 04:00 or when a roster slot frees.
+  Until then the save keeps it as a slim record (its name, level, XP, class and place in line, not
+  its kit or chests): closing herdr, even across 04:00, or restarting its agent brings it back as
+  itself with its space's next terminal, for up to 7 game days without its agent. On
   a full roster a hero below Lv 10 makes room only after 15 minutes off duty, so restarting an
   agent (its pane's terminal ends, a new one starts) keeps its hero: the new terminal takes back
   the hero whose terminal ended in that pane.
@@ -244,11 +247,14 @@ something.
   `layout.show` / `layout.hide` on the block found by content, whoever hid it. A stage shown or
   hidden with it is the person's: the collapse drops its note, calls off a running countdown, and
   never shows a stage hidden that way.
-- **Contractors are never saved** (only promoted heroes are). After a restart the hiring line
-  re-forms in snapshot order, and a Contractor waiting across a restart at 04:00 comes back as a
-  new terminal. A promoted Contractor gets a roster id, so anything drawn from the id (the
-  hoodie colour) is stored with the hero (`look`), and its hat keeps its colour through its new
-  item uid.
+- **Contractors are saved slim** (round 5; before it they were never saved, and one waiting across
+  a restart at 04:00 came back as a new terminal, hired at Lv 1). Each is a record of about 35–60
+  bytes: its number (its id is minus it, and its default name, hoodie and hat follow from that), seat,
+  level, XP, class, place in line, the game day last seen and a tag of its terminal's address
+  (herdr's core keeps terminals while the app is closed). For a minute after a load a record whose
+  terminal is not listed yet keeps its hire, so a newcomer listed first cannot take it. A promoted
+  Contractor gets a roster id, so anything drawn from the id (the hoodie colour) is stored with the
+  hero (`look`), and its hat keeps its colour through its new item uid.
 - **A copy's first frame has no size**: herdr reports `on_size_change` only after laying a frame
   out (gpui-shell's size observer runs in prepaint), so plan the first frame for an unknown width
   (the nameplate draws no bars until it is measured).
@@ -305,7 +311,8 @@ something.
   and whole in its tooltip.
 - The seventh new agent of a game day is a Contractor whose tooltip says when it is hired; after
   04:00 it is a saved hero with the same name, level and colours, and the six hires of that
-  moment show as one header note.
+  moment show as one header note. Closing herdr before 04:00 and opening it after brings the
+  Contractor back at its level and hires it then.
 - On a full roster, restarting a low-level hero's agent in its pane keeps that hero while
   Contractors wait.
 - In the Herd panel's Roster at 640 px, two spaces that share a start ("ceo-assistant-res-2",

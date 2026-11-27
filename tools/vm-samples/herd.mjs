@@ -268,7 +268,7 @@ function rr(id, o) {
   };
 }
 
-const HIRE_KEEPS = "When hired it keeps its name, level, XP and class, and its kit becomes saved Alpha gear.";
+const HIRE_KEEPS = "When hired it keeps its name, level, XP and class, and its kit becomes saved Alpha gear. Until then the herd remembers its name, level, XP, class and place in line across restarts, and for 7 game days while its agent is away (not its kit or chests).";
 
 function roster(empty = false) {
   if (empty) {

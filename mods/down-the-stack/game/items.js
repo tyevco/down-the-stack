@@ -522,7 +522,7 @@ export function autoEquip(state, hero, item, ctx) {
 /**
  * Offers a new drop: the finder first, then every roster hero who can use it (when auto-equip
  * is on); otherwise it goes to the stash (with auto-deprecate). A finder that is not in the roster
- * (a Contractor, never saved) is not offered gear.
+ * (a Contractor: not a roster hero, its kit is the reference kit) is not offered gear.
  * @param ctx a stats ctx, or a function hero -> ctx
  * @returns {{heroId:number|null, replaced:object|null, kept:boolean, deprecated:object|null}}
  */

@@ -5,7 +5,9 @@
 //
 // Runtime state lives in world.rt (never saved): rt.bind address -> heroId, rt.live heroId -> Live,
 // rt.contractors address -> Hero (Contractors have negative ids). Everything that must survive a
-// restart is on the saved Hero (pending chests, shift, Fresh Eyes, cooldowns, signature).
+// restart is on the saved Hero (pending chests, shift, Fresh Eyes, cooldowns, signature). A
+// Contractor survives one as a slim record (round 5): herd.contractors holds the records of
+// Contractors whose agent is away, and world.serialize adds the live ones (contractorRecords).
 //
 // Timing conventions (all in ticks of herd.tick == rt.tick, one per simulated second):
 //   hero.cd.unblockedUntil / unblockedCdUntil are absolute ticks that are pushed forward on every
@@ -20,9 +22,9 @@ import {
   chestTierOf, shiftSealMult, shiftKillMult, shiftBand, chestGold, chestXP, mobXP, gap as gapMult,
   crowding as crowdingMult, partyXp, iRef, itemTier, polishMax, autoOn, cutText, shortName,
 } from "./formulas.js";
-import { newHero, stats, grantXP, recordTask, autoRanks, careerOf, lookOf } from "./heroes.js";
+import { newHero, stats, grantXP, recordTask, autoRanks, careerOf, lookOf, heroName } from "./heroes.js";
 import { rollChest, baseIdFor, stashAdd, repairItem, newItem, hatToneOf, skipUidsToTone } from "./items.js";
-import { seedOf } from "./rng.js";
+import { seedOf, fnv1a32 } from "./rng.js";
 import {
   addGold, addSeals, herdXpBonus, freshEyesCapMin, onboardingBonus, awardBadge, logDrop, journal as herdJournal,
   unseenLosses,
@@ -213,6 +215,7 @@ function ensureRt(rt) {
   if (!rt.orphans) rt.orphans = new Map();
   if (!rt.offPane) rt.offPane = new Map(); // heroId -> the pane its terminal ended in (this session)
   if (rt.contractorSeq == null) rt.contractorSeq = 0;
+  if (!rt.recWait) rt.recWait = new Set(); // round 5: seqs of the loaded records not claimed yet
   if (rt.tick == null) rt.tick = 0;
 }
 
@@ -394,34 +397,44 @@ const HAT_SLOT = SLOTS.indexOf("hat");
 const KIT_AFFIX = { weapon: "memo", hat: "typed", hoodie: "robust", mug: "typed", boots: "idem", sticker: "memo" };
 
 /**
- * A Contractor (D§3.4): never saved, Level = max(1, median roster level - 5), reference kit at that
- * level (all Alpha, polish about L/10), class from the agent's signature if known, else Shellmancer
- * (Interns below Lv 10, where no class exists yet). Built on a scratch herd so the saved counters
- * (hero ids, item uids, the herd RNG) are untouched; ids are negative.
+ * A Contractor (D§3.4): not on the roster, Level = max(1, median roster level - 5), reference kit
+ * at that level (all Alpha, polish about L/10), class from the agent's signature if known, else
+ * Shellmancer (Interns below Lv 10, where no class exists yet). Built on a scratch herd so the
+ * saved counters (hero ids, item uids, the herd RNG) are untouched; ids are negative.
+ * rec (round 5): a Contractor record this terminal claimed: the same Contractor again, from its
+ * number (id -seq, so its default name, hoodie and hat), level, XP, class, reviews, signature and
+ * place in the hiring line; its skills are re-spent by the auto-learn rule and its kit is the
+ * reference kit for its level and class.
  */
-export function makeContractor(world, a, seat, nowMs) {
+export function makeContractor(world, a, seat, nowMs, rec = null) {
   const { state, rt } = world;
   ensureRt(rt);
-  const L = Math.max(1, Math.round(median(state.heroes.map((h) => h.L))) - T.roster.contractorLevelsBelowMedian);
+  const L = rec ? rec.L : Math.max(1, Math.round(median(state.heroes.map((h) => h.L))) - T.roster.contractorLevelsBelowMedian);
   const scratch = { herd: { nextHeroId: 1, nextUid: 1, rng: seedOf(`${a.address}#contractor`), day: state.herd.day }, heroes: [] };
-  rt.contractorSeq++;
+  const seq = rec ? rec.seq : ++rt.contractorSeq;
+  if (seq > rt.contractorSeq) rt.contractorSeq = seq;
   // an ordinal no roster hero uses, so the default name is the Contractor's own
-  const h = newHero(scratch, { seat, sid: a.space || null, ord: 1000 + rt.contractorSeq, nowMs });
-  h.id = -rt.contractorSeq;
+  const h = newHero(scratch, { seat, sid: a.space || null, ord: 1000 + seq, nowMs });
+  h.id = -seq;
   h.contractor = true;
-  h.since = nowMs; // its place in the hiring line (promoteContractors: longest-running first)
+  h.since = rec ? rec.since : nowMs; // its place in the hiring line (promoteContractors: longest-running first)
   h.L = L;
-  h.cls = L >= 10 ? CLASS_IDX.shellmancer : 0;
-  h.prov = 0;
-  h.rev = [L >= 30 ? 1 : 0, L >= 60 ? 1 : 0];
-  h.sp = autoRanks(h.cls, L, true);
+  h.cls = rec ? rec.cls : L >= 10 ? CLASS_IDX.shellmancer : 0;
+  h.prov = rec ? rec.prov : 0;
+  h.rev = rec ? [rec.rev[0] ? 1 : 0, rec.rev[1] ? 1 : 0] : [L >= 30 ? 1 : 0, L >= 60 ? 1 : 0];
+  h.sp = autoRanks(h.cls, L, h.rev);
   h.spFree = 0;
   h.autoLearn = true;
+  if (rec) {
+    h.xp = rec.xp;
+    if (typeof rec.name === "string" && rec.name) h.name = rec.name;
+    if (rec.sig) h.sig = Object.assign(h.sig, rec.sig);
+  }
   const i = iRef(L);
   const t = itemTier(i);
   const weaponType = CLASSES[h.cls].weapon;
   h.eq = SLOTS.map((slot, s) => ({
-    uid: -(rt.contractorSeq * 10 + s + 1),
+    uid: -(seq * 10 + s + 1),
     base: baseIdFor(slot, t, slot === "weapon" ? weaponType : slot),
     ilvl: i, rar: 1, pol: Math.min(polishMax(1), Math.round(L / 10)),
     aff: [[AFFIX_IDX[KIT_AFFIX[slot]], 50]], flags: 0, prop: -1,
@@ -522,6 +535,188 @@ function makeRoom(world, ev, spare) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Contractor records (owner decision, round 5: "save a slim Contractor record")
+// ---------------------------------------------------------------------------------------------
+//
+// A Contractor is kept as a slim record (save.js "ct", about 40-60 bytes): its number (seq: its id
+// is -seq, which gives its default name, hoodie and hat), seat, level, XP, class (with its
+// provisional flag and reviews; the signature window too while the class can still change: an
+// Intern's or a provisional one), its place in the hiring line (since), the game day it was last
+// seen and a short tag of its terminal's address. Not kept: its kit (the reference kit for its level
+// and class, rebuilt), its skills (re-spent by the auto-learn rule), Daily Shift, Fresh Eyes, HP and
+// pending chests (they open Unreviewed when its agent leaves, as before; a restart does not keep
+// them). world.serialize writes every live Contractor's record (contractorRecords); a Contractor
+// whose terminal ends leaves its record in herd.contractors (goOffDuty). A new terminal with no
+// saved hero to take claims a record of its seat (reconcile step 1a: by tag, the same terminal,
+// first; then by seat, highest level first) and is that Contractor again. A record not claimed for
+// T.roster.contractorKeepDays game days is dropped, and the records are capped at the roster's
+// size (T.roster.max, live Contractors first; the oldest unclaimed go first). After a load, the
+// loaded records hold their hires for T.roster.reconnectSec (reconnectOpen): herdr may list their
+// terminals a few snapshots late. A read-only world neither claims nor writes records.
+
+const KEEP_DAYS = () => Math.max(1, T.roster.contractorKeepDays || 7);
+const recordsOf = (state) => (Array.isArray(state.herd.contractors) ? state.herd.contractors : []);
+
+/**
+ * A terminal address as a record keeps it: the top 24 bits of its FNV-1a 32 hash in base 36 (at
+ * most 5 characters; it is only compared within one seat, where two terminals share it about once
+ * in 16 million).
+ */
+export function tagOf(address) {
+  return address == null ? "" : (fnv1a32(String(address)) >>> 8).toString(36);
+}
+
+/** A Contractor's record (save.js contractorsCodec) for its terminal at `address`. */
+function recordOf(world, c, address) {
+  const rev = c.rev || [0, 0];
+  const seq = -c.id;
+  const r = {
+    seq, seat: c.seat, L: c.L, xp: Math.max(0, Math.floor(c.xp || 0)), cls: c.cls || 0, prov: c.prov ? 1 : 0,
+    rev: [rev[0] ? 1 : 0, rev[1] ? 1 : 0], since: Number.isFinite(c.since) ? c.since : world.rt.nowMs || 0,
+    day: world.state.herd.day || 0, tag: tagOf(address),
+  };
+  // the signature window only while it can still change the class (D§4.2: an Intern's class at Lv 10,
+  // a provisional class's switches)
+  const sig = c.sig;
+  if ((!(c.cls > 0) || c.prov) && sig && ((sig.tm && sig.tm.length) || sig.n)) {
+    r.sig = {
+      tm: (sig.tm || []).slice(), tb: (sig.tb || []).slice(), ts: (sig.ts || []).slice(),
+      blocks: sig.blocks || 0, workMin: sig.workMin || 0, subTasks: sig.subTasks || 0, n: sig.n || 0,
+    };
+  }
+  if (typeof c.name === "string" && c.name !== heroName(c.seat, 1000 + seq)) r.name = c.name;
+  return r;
+}
+
+// The records kept of `list` with `live` live Contractors: none older than the keep, and at most the
+// roster's size in all; the oldest unclaimed (least recently seen, then the lowest number) go first.
+function recordsKept(world, list, live) {
+  const day = world.state.herd.day || 0;
+  const keep = list.filter((r) => day - (r.day || 0) < KEEP_DAYS());
+  const room = Math.max(0, T.roster.max - live);
+  if (keep.length <= room) return keep;
+  const newest = keep.slice().sort((x, y) => ((y.day || 0) - (x.day || 0)) || (y.seq - x.seq)).slice(0, room);
+  const kept = new Set(newest);
+  return keep.filter((r) => kept.has(r));
+}
+
+/** Drops expired records and keeps the cap (in herd.contractors); never on a read-only world. */
+function pruneRecords(world) {
+  const { state, rt } = world;
+  const list = recordsOf(state);
+  if (!list.length || rt.readOnly) return;
+  const kept = recordsKept(world, list, contractorLine(world).length);
+  if (kept.length !== list.length) state.herd.contractors = kept;
+}
+
+/**
+ * Every Contractor record the save holds (world.serialize): each live Contractor's, in hiring
+ * order, then the records of Contractors whose agent is away, expired ones dropped and the whole
+ * capped at T.roster.max. A read-only world returns herd.contractors as it was loaded.
+ */
+export function contractorRecords(world) {
+  const { state, rt } = world;
+  const pending = recordsOf(state);
+  if (!rt || rt.readOnly) return pending;
+  ensureRt(rt);
+  const live = contractorLine(world).slice(0, T.roster.max).map(([addr, c]) => recordOf(world, c, addr));
+  if (!live.length && !pending.length) return pending;
+  return live.concat(recordsKept(world, pending, live.length));
+}
+
+/** The record a Contractor leaves when its terminal ends (goOffDuty): claimable by its seat. */
+function keepRecord(world, c, address) {
+  const state = world.state;
+  if (!Array.isArray(state.herd.contractors)) state.herd.contractors = [];
+  const r = recordOf(world, c, address);
+  state.herd.contractors = state.herd.contractors.filter((x) => x.seq !== r.seq).concat([r]);
+  pruneRecords(world);
+}
+
+/** A record leaves the list once a terminal is that Contractor again. */
+function takeRecord(world, r) {
+  const state = world.state;
+  state.herd.contractors = recordsOf(state).filter((x) => x !== r);
+  if (world.rt.recWait) world.rt.recWait.delete(r.seq);
+}
+
+/**
+ * The record a new terminal claims (D§3.2 after its saved heroes, round 5): the one its own
+ * terminal left (same tag, same seat), else one of its seat: highest level, then the
+ * longest-running, then the lowest number. taken: records other terminals claimed.
+ */
+function recordFor(world, a, seat, taken, byTagOnly = false) {
+  const list = recordsOf(world.state);
+  if (!list.length) return null;
+  const tag = tagOf(a.address);
+  let best = null;
+  for (const r of list) {
+    if (r.seat !== seat || (taken && taken.has(r))) continue;
+    if (r.tag && r.tag === tag) return r;
+    if (byTagOnly) continue;
+    if (!best || r.L > best.L || (r.L === best.L && ((r.since || 0) < (best.since || 0) || ((r.since || 0) === (best.since || 0) && r.seq < best.seq)))) best = r;
+  }
+  return byTagOnly ? null : best;
+}
+
+/**
+ * True while a loaded world's records hold their hires (round 5): from the load until
+ * T.roster.reconnectSec after this world's first reconcile (rt.startMs; rt.loadedLastMs marks a
+ * loaded world, round 4b), while a loaded record is still unclaimed (rt.recWait).
+ */
+function reconnectOpen(world) {
+  const rt = world.rt;
+  if (!Number.isFinite(rt.loadedLastMs) || !rt.recWait || !rt.recWait.size) return false;
+  return rt.startMs == null || (rt.nowMs || 0) - rt.startMs < reconnectMs();
+}
+const reconnectMs = () => Math.max(0, (T.roster.reconnectSec || 0) * 1000);
+
+/**
+ * The records that hold a hire now: those the terminals of this snapshot claimed and have not
+ * bound yet (recs: address -> record, reconcile step 1a), and while reconnectOpen the loaded
+ * records still unclaimed. They stand in the hiring line by their place (since).
+ */
+function heldRecords(world, recs) {
+  const rt = world.rt;
+  const pending = recordsOf(world.state);
+  const out = [];
+  const claimed = new Set();
+  if (recs) {
+    for (const [addr, r] of recs) {
+      claimed.add(r);
+      if (!rt.bind.has(addr) && pending.includes(r)) out.push(r);
+    }
+  }
+  if (reconnectOpen(world)) for (const r of pending) if (rt.recWait.has(r.seq) && !claimed.has(r)) out.push(r);
+  return out;
+}
+
+const lineId = (e) => (e && e.contractor ? e.id : -e.seq);
+const byLine = (x, y) => ((x.since || 0) - (y.since || 0)) || (lineId(y) - lineId(x));
+
+/**
+ * Room for new roster heroes under D§3.4's rules: free slots plus the unbound heroes below Lv 10
+ * past their off-duty grace that makeRoom could let go (spare: never these).
+ */
+function roomCount(world, spare) {
+  const heroes = world.state.heroes;
+  let n = Math.max(0, T.roster.max - heroes.length);
+  for (const h of heroes) if (!isBound(world, h.id) && h.L < 10 && !(spare && spare.has(h.id)) && !inOffDutyGrace(world, h)) n++;
+  return n;
+}
+
+/**
+ * A hire for the one at the back of the line, `ahead` hires being held for those before it (round
+ * 5): a hire left beyond them and room beyond them (makeRoom then frees a slot if it must). With
+ * none held this is D§3.4's rule as before.
+ */
+function hireFor(world, ev, spare, ahead) {
+  const state = world.state;
+  if (!ahead) return hiredToday(state) < T.roster.newPerDay && makeRoom(world, ev, spare);
+  return hiredToday(state) + ahead < T.roster.newPerDay && roomCount(world, spare) > ahead && makeRoom(world, ev, spare);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Contractor promotion (owner decision, round 4: "promote only")
 // ---------------------------------------------------------------------------------------------
 
@@ -543,15 +738,34 @@ function contractorLine(world) {
  * a roster slot freeing (a retire: world.js also calls it at once; a hero let go, or a hero below
  * Lv 10 going off duty while the roster is full, once its off-duty grace has run out). A read-only
  * world never hires. spare (optional Set of hero ids): heroes never let go this time; reconcile
- * passes the heroes its new terminals are taking back (step 1a).
+ * passes the heroes its new terminals are taking back (step 1a). recs (round 5, optional Map
+ * address -> record): the records the terminals of this snapshot claimed, which hold their hires
+ * like the loaded records still within their reconnect window (heldRecords).
  * @returns {number} Contractors promoted
  */
-export function promoteContractors(world, ev, spare) {
+export function promoteContractors(world, ev, spare, recs) {
   const { state, rt } = world;
   ensureRt(rt);
   if (!rt.contractors.size || rt.readOnly) return 0;
   let n = 0;
-  for (const [addr, c] of contractorLine(world)) {
+  // round 5: records that hold a hire stand in the line by their place; one ahead of a Contractor
+  // keeps its hire (and its room) for its own agent, so those behind take only what is left
+  const held = heldRecords(world, recs);
+  const line = contractorLine(world);
+  if (held.length) {
+    const byC = new Map(line.map(([addr, c]) => [c, addr]));
+    const order = line.map((e) => e[1]).concat(held).sort(byLine);
+    let ahead = 0;
+    for (const e of order) {
+      if (hiredToday(state) + ahead >= T.roster.newPerDay) break;
+      if (!e.contractor) { ahead++; continue; }
+      if (!hireFor(world, ev, spare, ahead)) break;
+      promote(world, byC.get(e), e, ev);
+      n++;
+    }
+    return n;
+  }
+  for (const [addr, c] of line) {
     if (hiredToday(state) >= T.roster.newPerDay) break;
     if (!makeRoom(world, ev, spare)) break;
     promote(world, addr, c, ev);
@@ -649,9 +863,13 @@ function promote(world, address, c, ev) {
  * round 4b, and make room only when it runs out) and the moment: "soon" (at the next reconcile),
  * "grace" (when a hero's off-duty grace runs out at atMs, unless its agent comes back for it),
  * "day" (the 04:00 game day turn at atMs; days = which turn, 1 = the next), "slot" (when a roster
- * slot frees), "never" (a read-only save). text: one sentence for a tooltip or the sheet.
+ * slot frees), "never" (a read-only save), "reconnect" (round 5: right after a load, hired when the
+ * reconnect window ends at atMs unless the `held` Contractors ahead of it, whose records were
+ * loaded, come back first). The line counts those held records by their place. text: one sentence
+ * for a tooltip or the sheet.
  * @returns {null|{when:string, position:number, ahead:number, hiresLeft:number, perDay:number,
- *   room:number, graced:number, atMs:number|null, days:number, text:string}} null for a roster hero
+ *   room:number, graced:number, held:number, atMs:number|null, days:number, text:string}} null for
+ *   a roster hero
  */
 export function hireOutlook(world, heroOrId) {
   const { state, rt } = world;
@@ -660,7 +878,8 @@ export function hireOutlook(world, heroOrId) {
   const R = T.roster;
   // the line and the room are the same for every Contractor of a render (the party, the stage and
   // the sheet ask for each of up to ~30): computed once per tick and roster shape
-  const key = `${rt.tick}|${rt.nowMs}|${rt.contractors ? rt.contractors.size : 0}|${rt.contractorSeq}|${state.heroes.length}|${rt.live ? rt.live.size : 0}|${hiredToday(state)}`;
+  const held = heldRecords(world, null);
+  const key = `${rt.tick}|${rt.nowMs}|${rt.contractors ? rt.contractors.size : 0}|${rt.contractorSeq}|${state.heroes.length}|${rt.live ? rt.live.size : 0}|${hiredToday(state)}|${held.length}|${recordsOf(state).length}`;
   let c = rt._hireLine;
   if (!c || c.key !== key) {
     let r = Math.max(0, R.max - state.heroes.length);
@@ -672,22 +891,34 @@ export function hireOutlook(world, heroOrId) {
       else r++;
     }
     ends.sort((x, y) => x - y);
-    c = rt._hireLine = { key, line: contractorLine(world).map((e) => e[1]), room: r, ends };
+    let line = contractorLine(world).map((e) => e[1]);
+    if (held.length) line = line.concat(held).sort(byLine);
+    c = rt._hireLine = { key, line, held: new Set(held), room: r, ends, reconnectEnds: held.length && rt.startMs != null ? rt.startMs + reconnectMs() : null };
   }
   let position = c.line.indexOf(hero);
   if (position < 0) position = c.line.length;
+  let heldAhead = 0;
+  for (let k = 0; k < position; k++) if (c.held.has(c.line[k])) heldAhead++;
   const hiresLeft = Math.max(0, R.newPerDay - hiredToday(state));
   const roomNow = c.room;
   const room = roomNow + c.ends.length;
   const left = `today: ${hiresLeft} of ${R.newPerDay} hires left`;
   const ahead = position ? ` · ${position} ahead in line` : "";
-  const out = { when: "slot", position, ahead: position, hiresLeft, perDay: R.newPerDay, room, graced: c.ends.length, atMs: null, days: 0, text: "" };
+  const out = { when: "slot", position, ahead: position, hiresLeft, perDay: R.newPerDay, room, graced: c.ends.length, held: heldAhead, atMs: null, days: 0, text: "" };
   if (rt.readOnly) {
     out.when = "never";
     out.text = "Not hired: this save is read-only";
   } else if (position < Math.min(hiresLeft, roomNow)) {
     out.when = "soon";
     out.text = `Joins the roster in a moment (${left})`;
+  } else if (heldAhead && position - heldAhead < Math.min(hiresLeft, roomNow)) {
+    // round 5: hires held for Contractors whose records were loaded, while their agents may still
+    // be listed (reconnectOpen); hired when the window ends unless they come back first
+    out.when = "reconnect";
+    out.atMs = c.reconnectEnds;
+    const sec = out.atMs != null ? Math.max(1, Math.ceil((out.atMs - (rt.nowMs || 0)) / 1000)) : Math.ceil(reconnectMs() / 1000);
+    const who = heldAhead === 1 ? "a contractor from before the restart comes" : `${heldAhead} contractors from before the restart come`;
+    out.text = `Hired in about ${sec} s, unless ${who} back first${ahead} (${left})`;
   } else if (position < Math.min(hiresLeft, room)) {
     out.when = "grace";
     out.atMs = c.ends[position - roomNow];
@@ -773,14 +1004,30 @@ function savedHeroFor(world, a, seat, taken) {
 }
 
 /**
+ * Room for a new hero for a newcomer (D§3.2 step 3, D§3.4): a hire and room left. The newcomer
+ * stands behind every live Contractor (round 5: one back from its record earlier in this very
+ * listing is promoted only in reconcile step 2b, after every terminal has bound) and behind the
+ * records that hold a hire (heldRecords: claimed by this snapshot's terminals, or loaded and within
+ * their reconnect window), and takes only a hire and room left beyond theirs. With no Contractor
+ * and no record this is the rule as before; with live Contractors left after step 1b it gives the
+ * same answer as before (1b stopped for want of a hire or of room).
+ */
+function newHireRoom(world, ev, spare, recs) {
+  return hireFor(world, ev, spare, heldRecords(world, recs).length + contractorLine(world).length);
+}
+
+/**
  * Binds a new terminal to a hero (D§3.2): fast rebind by saved address, then a free hero of the
- * seat, else a new hero (roster < 30 and < 6 created today; a full roster first frees the
- * least-recently-seen unbound hero below Lv 10 past its off-duty grace), else a Contractor.
+ * seat, then a Contractor record of the seat (round 5: the same Contractor again), else a new hero
+ * (roster < 30 and < 6 created today; a full roster first frees the least-recently-seen unbound
+ * hero below Lv 10 past its off-duty grace), else a Contractor. A new hero is hired only with a
+ * hire and room left beyond the Contractors and records that hold one (round 5, heldRecords).
  * claims (reconcile step 1a): address -> {hero, fast} the terminals of this snapshot take back;
- * spare: those heroes' ids, which no other terminal takes and no hire lets go.
+ * spare: those heroes' ids, which no other terminal takes and no hire lets go; recs: address ->
+ * record the terminals of this snapshot claim.
  * @returns {number} the hero id
  */
-function bindAgent(world, a, snap, ev, claims, spare) {
+function bindAgent(world, a, snap, ev, claims, spare, recs) {
   const { state, rt } = world;
   const now = snap.nowMs;
   const seat = agentSeat(a);
@@ -789,9 +1036,15 @@ function bindAgent(world, a, snap, ev, claims, spare) {
   const found = own || savedHeroFor(world, a, seat, spare);
   let hero = found ? found.hero : null;
   const fast = !!(found && found.fast);
+  // round 5: no saved hero to take: a Contractor record of the seat (claimed in step 1a, else now)
+  let rec = null;
+  if (!hero && !rt.readOnly) {
+    const mine = recs && recs.get(a.address);
+    rec = mine && recordsOf(state).includes(mine) ? mine : recordFor(world, a, seat, recs ? new Set(recs.values()) : null);
+  }
   // a read-only world (a save from a newer version, never written back) binds for display only:
   // no hires (a new agent plays as an unsaved Contractor), no chests, no XP (world.tick runs no steps)
-  if (!hero && !rt.readOnly && hiredToday(state) < T.roster.newPerDay && makeRoom(world, ev, spare)) {
+  if (!hero && !rec && !rt.readOnly && newHireRoom(world, ev, spare, recs)) {
     hero = newHero(state, { seat, sid: a.space || null, ord: lowestFreeOrd(state, seat), nowMs: now });
     state.heroes.push(hero);
     noteHire(state);
@@ -800,7 +1053,14 @@ function bindAgent(world, a, snap, ev, claims, spare) {
   }
   let contractor = false;
   if (!hero) {
-    hero = makeContractor(world, a, seat, now);
+    hero = makeContractor(world, a, seat, now, rec);
+    if (rec) {
+      takeRecord(world, rec);
+      // its XP share and autopilot signature start afresh (world.contractorXp, autopilot)
+      if (rt.cxp) rt.cxp.delete(hero.id);
+      if (rt.apSig) rt.apSig.delete(hero.id);
+      rt._restored = (rt._restored || 0) + 1;
+    }
     rt.contractors.set(a.address, hero);
     contractor = true;
   }
@@ -864,7 +1124,8 @@ function workingSince(snap, a) {
 /**
  * Takes a hero off duty (terminal gone, D§2.2): an open task of >= 1.5 minutes closes into a
  * pending chest (closing a terminal is not acknowledgment); HP fraction is kept. Contractors
- * vanish; their pending chests open Unreviewed for the herd at once (nobody can claim them later).
+ * leave the stage; their pending chests open Unreviewed for the herd at once (nobody can claim them
+ * later), and each is kept as a slim record (round 5, keepRecord) for its seat's next terminal.
  */
 function goOffDuty(world, address, heroId, ev) {
   const { rt } = world;
@@ -884,7 +1145,11 @@ function goOffDuty(world, address, heroId, ev) {
   hero.seenAt = rt.nowMs;
   if (live && live.pane && !hero.contractor && rt.offPane) rt.offPane.set(heroId, live.pane);
   if (hero.contractor) {
-    if (!rt.readOnly) openChests(world, hero, { reason: "unreviewed", all: true, noXp: true }, ev);
+    if (!rt.readOnly) {
+      openChests(world, hero, { reason: "unreviewed", all: true, noXp: true }, ev);
+      // round 5: it is kept as a record its seat's next terminal claims (contractorKeepDays)
+      keepRecord(world, hero, address);
+    }
     rt.contractors.delete(address);
   }
 }
@@ -1126,6 +1391,8 @@ export function reconcile(world, snap, ev) {
   ensureRt(rt);
   const now = snap.nowMs ?? rt.nowMs;
   if (rt.startMs == null && Number.isFinite(now)) rt.startMs = now; // offDutySince: this world's first reconcile
+  rt._restored = 0;
+  pruneRecords(world); // round 5: records past their keep, or over the cap
   const tops = [];
   const subs = [];
   const seenAddr = new Set();
@@ -1181,14 +1448,32 @@ export function reconcile(world, snap, ev) {
     const h = pickFreeHero(world, a, agentSeat(a), spare);
     if (h) claim(a, { hero: h, fast: false });
   }
+  // 1a'. round 5: a new terminal with no saved hero to take claims a Contractor record of its seat:
+  //      first every terminal the record of its own terminal (by tag), then the others a record of
+  //      their seat, in snapshot order (recordFor). Until bound, these records hold their hires.
+  let recs = null;
+  if (!rt.readOnly && recordsOf(state).length) {
+    const taken = new Set();
+    for (const byTagOnly of [true, false]) {
+      for (const a of tops) {
+        if (rt.bind.has(a.address) || (claims && claims.has(a.address)) || (recs && recs.has(a.address))) continue;
+        const r = recordFor(world, a, agentSeat(a), taken, byTagOnly);
+        if (!r) continue;
+        if (!recs) recs = new Map();
+        recs.set(a.address, r);
+        taken.add(r);
+      }
+    }
+  }
 
   // 1b. Contractors still playing join the roster while hiring is open (the 04:00 game day turn,
   //     a slot that freed), before any newcomer below can take the day's hires. A hero claimed in
-  //     1a is never let go for it, nor one within its off-duty grace (inOffDutyGrace)
-  if (rt.contractors.size) promoteContractors(world, ev, spare);
+  //     1a is never let go for it, nor one within its off-duty grace (inOffDutyGrace); records
+  //     claimed in 1a', and loaded ones within their reconnect window, hold their place (round 5)
+  if (rt.contractors.size) promoteContractors(world, ev, spare, recs);
 
   // 2. top-level agents: bind, refresh, seq-gated status
-  processTops(world, tops, snap, ev, 0, claims, spare);
+  processTops(world, tops, snap, ev, 0, claims, spare, recs);
 
   // 3. sub-agents -> Forklings; homeless orphans play as top-level pseudo-agents
   const keepTop = subs.filter((s) => rt.orphans.has(s.address) && rt.bind.has(s.address));
@@ -1196,6 +1481,10 @@ export function reconcile(world, snap, ev) {
   const homeless = attachForklings(world, forkSubs, ev);
   const pseudo = keepTop.concat(homeless.filter((s) => hasProgram({ program: s.program })));
   if (pseudo.length) processTops(world, pseudo.map((s) => orphanAsAgent(world, s)), snap, ev, tops.length);
+
+  // 2b. round 5: a Contractor back from its record joins the roster at once while hiring is open
+  //     (in its place in the line: it was claimed in 1a' and bound in 2)
+  if (rt._restored && rt.contractors.size) promoteContractors(world, ev, spare);
 
   // 4. seen via focus (D§2.4 rule 2), seenAt, state
   const active = snap.windowActive !== false;
@@ -1209,13 +1498,13 @@ export function reconcile(world, snap, ev) {
   return state;
 }
 
-function processTops(world, tops, snap, ev, order0 = 0, claims = null, spare = null) {
+function processTops(world, tops, snap, ev, order0 = 0, claims = null, spare = null, recs = null) {
   const { state, rt } = world;
   for (let k = 0; k < tops.length; k++) {
     const a = tops[k];
     let id = rt.bind.get(a.address);
     const first = id == null;
-    if (first) id = bindAgent(world, a, snap, ev, claims, spare);
+    if (first) id = bindAgent(world, a, snap, ev, claims, spare, recs);
     const hero = heroById(world, id);
     const live = rt.live.get(id);
     if (!hero || !live) continue;

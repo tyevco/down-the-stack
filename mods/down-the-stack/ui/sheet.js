@@ -126,7 +126,7 @@
  * @property {SheetHeaderVM} header
  * @property {null|{text:string, color:string, tooltip?:string|null}} note   a line under the header
  *                              ("Off duty since 14:02 · its chests wait", "Contractor: hired tomorrow at
- *                              04:00 · not saved until then; …"); tooltip: the whole story (the line is cut)
+ *                              04:00 · not on the roster until then; …"); tooltip: the whole story (the line is cut)
  * @property {GearVM|null} gear       only the shown tab's part is filled; the others are null
  * @property {SkillsVM|null} skills
  * @property {StatsVM|null} stats

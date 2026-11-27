@@ -750,7 +750,7 @@ function cardVM(world, idx, found, o) {
   // refuses lock / polish / reroll on it ("No such item"), so the buttons only explain.
   const kit = !(item.uid > 0);
   if (kit) {
-    const why = "A contractor's kit is not saved: it leaves with the contractor";
+    const why = "A contractor's kit is the reference kit for its level, not saved gear (it becomes saved gear when the contractor is hired)";
     actions.push(disabled(`lock:${item.uid}`, "Lock", "lock", { uid: item.uid, locked: true }, why));
     actions.push(disabled(`polish:${item.uid}`, "Polish", "polish", { uid: item.uid }, why));
   } else {
@@ -1063,7 +1063,7 @@ function hireOf(world, hero, clock) {
   if (!hero || !hero.contractor || typeof Agents.hireOutlook !== "function") return null;
   const o = Agents.hireOutlook(world, hero);
   if (!o) return null;
-  const keeps = "When hired it keeps its name, level, XP and class, and its kit becomes saved Alpha gear.";
+  const keeps = `When hired it keeps its name, level, XP and class, and its kit becomes saved Alpha gear. Until then the herd remembers its name, level, XP, class and place in line across restarts, and for ${T.roster.contractorKeepDays} game days while its agent is away (not its kit or chests).`;
   const at = Number.isFinite(o.atMs) ? o.atMs : null;
   let long, short, color;
   switch (o.when) {
@@ -1079,6 +1079,14 @@ function hireOf(world, hero, clock) {
       const min = at != null ? Math.max(1, Math.ceil((at - clock.now) / 60000)) : null;
       long = min != null ? `hired in about ${min} min` : "hired when a roster slot frees";
       short = min != null ? `Hired in ~${min} min` : "Hired when a slot frees";
+      color = COL.idle;
+      break;
+    }
+    case "reconnect": {
+      // round 5: right after a load, hires wait a moment for the contractors of the last session
+      const sec = at != null ? Math.max(1, Math.ceil((at - clock.now) / 1000)) : null;
+      long = sec != null ? `hired in about ${sec} s` : "hired in a moment";
+      short = sec != null ? `Hired in ~${sec} s` : "Hired soon";
       color = COL.idle;
       break;
     }
@@ -1142,10 +1150,10 @@ function noteVM(world, idx, hero, live, clock) {
   if (hero.contractor) {
     // owner decision (round 4): the banner says when this Contractor joins the roster
     const hire = hireOf(world, hero, clock);
-    if (!hire) return { text: "Contractor: not saved · its kills and chests still pay the herd · Contractors don't get equity.", color: COL.idle, tooltip: null };
+    if (!hire) return { text: "Contractor: not on the roster · its kills and chests still pay the herd · Contractors don't get equity.", color: COL.idle, tooltip: null };
     const pays = "its kills and chests still pay the herd";
     return {
-      text: hire.when === "never" ? `Contractor: ${hire.long} · ${pays}` : `Contractor: ${hire.long} · not saved until then; ${pays}`,
+      text: hire.when === "never" ? `Contractor: ${hire.long} · ${pays}` : `Contractor: ${hire.long} · not on the roster until then; ${pays}`,
       // D§3.4's line stays with the whole story (the banner itself needs the room)
       color: hire.when === "soon" ? COL.working : COL.idle, tooltip: `${hire.tooltip} Contractors don't get equity.`,
     };
@@ -1782,7 +1790,7 @@ function careerVM(world, idx, hero, live, clock) {
   return {
     ladder, signature: signatureVM(hero), classes: classesVM(world, hero), map: mapVM(world, hero, live),
     boss: careerBossVM(world, idx, hero, live),
-    identity: { name: str(hero.name), canRename: !!roster, hint: roster ? "Renaming is free (1–32 characters)." : "Contractors are not saved: a new name would not stick." },
+    identity: { name: str(hero.name), canRename: !!roster, hint: roster ? "Renaming is free (1–32 characters)." : "A contractor keeps the name it came with: rename it once it joins the roster." },
     retire, rebind: rebindVM(world, idx, hero),
   };
 }
@@ -2450,17 +2458,27 @@ function rosterVM(world, idx, clock) {
   const line = [];
   for (const [hero] of idx.pairs) if (hero.contractor) line.push(hero);
   let waiting = "";
+  // round 5: Contractors whose agent is away are kept as records (agents.contractorRecords) and come
+  // back with their seat's next terminal
+  const away = Array.isArray(state.herd.contractors) ? state.herd.contractors.length : 0;
   if (line.length) {
     let next = null;
     if (typeof Agents.hireOutlook === "function") {
+      // the first in line (round 5: right after a load, a record whose agent is not listed yet
+      // can stand before every live one)
+      let best = null;
       for (const c of line) {
         const o = Agents.hireOutlook(world, c);
-        if (o && o.position === 0) { next = hireOf(world, c, clock); break; }
+        if (o && (!best || o.position < best.o.position)) best = { c, o };
+        if (o && o.position === 0) break;
       }
+      if (best) next = hireOf(world, best.c, clock);
     }
     // a read-only save hires nobody: "the next never hired here" would not read
     const tail = !next ? "" : next.when === "never" ? ", none hired here: this save is read-only" : `, the next ${next.long}`;
-    waiting = ` · ${line.length} ${plural(line.length, "contractor")}${tail}`;
+    waiting = ` · ${line.length} ${plural(line.length, "contractor")}${tail}${away ? `, ${away} off duty` : ""}`;
+  } else if (away) {
+    waiting = ` · ${away} ${plural(away, "contractor")} off duty`;
   }
   return {
     count: `${state.heroes.length} / ${T.roster.max} heroes · ${hired} hired today (${T.roster.newPerDay} a day)${waiting}`,

@@ -635,3 +635,160 @@ test("round 4c: an off-duty hero's 'chest opened Unreviewed' note shows its shor
   for (const room of vm.rooms) if (room !== last) assert.ok(num("left") >= room.x + room.w - 0.5, `clear of ${room.key}`);
   for (const m of [r.stage, r.party]) assert.deepEqual(m.errors, []);
 });
+
+// Round 5 (owner decision: "save a slim Contractor record"): the owner's window, 32 agents across
+// 25 spaces with 26 saved heroes; the day's six hires are used, so six agents play Contractors and
+// level. herdr is closed before 04:00 and opened after it (its core keeps the terminals: the same
+// addresses come back), herdr listing a newcomer and two Contractors first and the other four three
+// snapshots later. The Contractors come back as themselves and four are hired at their levels (the
+// roster's four free slots), longest-running first; the newcomer never takes one of their hires.
+// The owner's window before the close, shared by the round 5 tests: 26 saved heroes, the day's hires
+// used, the six other agents levelled as Contractors; herdr flushes and closes at about 03:41.
+async function contractorsClosedAcross0400() {
+  M.resetState();
+  const W = await import("../mods/down-the-stack/game/world.js");
+  const Hr = await import("../mods/down-the-stack/game/heroes.js");
+  const A = await import("../mods/down-the-stack/game/agents.js");
+  const d = new Date(Date.UTC(2026, 10, 24, 12, 0));
+  d.setHours(3, 40, 0, 0); // local time: twenty minutes before the game day turns
+  const start = d.getTime();
+  const tz = new Date(start).getTimezoneOffset();
+  const NAMES = [
+    "ceo-assistant-res-2", "ceo-assistant-writer", "ceo-assistant-search-eng", "ceo-assistant-billing-eng", "pr-review-eng-1",
+    "pr-review-eng-2", "pr-review-eng-3", "rnd-qa", "mobile-qa", "docs", "infra", "web-app", "api", "billing", "search",
+    "ml-eval", "data-pipe", "design-sys", "release", "security", "perf", "onboarding", "growth", "support", "ops",
+  ];
+  // agent i lives in space i mod 25 with M.agent's program (claude, codex, pi by turns)
+  const agentOf = (i) => M.agent(i, { space: `s${(i % 25) + 1}`, space_name: NAMES[i % 25], tab: `tab${(i % 25) + 1}`, status: "working", focused: false });
+  const tab = M.sampleFixture(1).spaces[0].tabs[0];
+  const spaces = NAMES.map((name, k) => ({ ...M.sampleFixture(1).spaces[0], id: `s${k + 1}`, index: k + 1, name, active: k === 0, tabs: [{ ...tab, id: `tab${k + 1}`, panes: 2 }] }));
+  const fxOf = (list) => ({
+    ...M.sampleFixture(0), agents: list, panes: list.map((a) => M.paneFor(a)), terminals: list.map((a) => M.terminalFor(a)), spaces, focused: null,
+  });
+  const all = Array.from({ length: 32 }, (_, i) => agentOf(i));
+  // the save: 26 heroes, each on duty in its agent's terminal; the day's six hires used
+  const w0 = W.createWorld({ nowMs: start - 60000, seed: 9 });
+  w0.state.herd.day = W.localDay(start, tz);
+  w0.state.herd.hired = [w0.state.herd.day, 6];
+  for (let i = 0; i < 26; i++) {
+    const a = all[i];
+    const h = Hr.newHero(w0.state, { seat: A.seatKey(a.space_name, a.space, a.program.key, a.app), sid: a.space, ord: 0, nowMs: start - 60000 });
+    h.L = 12 + i;
+    h.addr = a.address;
+    w0.state.heroes.push(h);
+  }
+  M.memfs.write(SAVE, W.serialize(w0), { mkdirs: true });
+  const roles = [["stage", { role: "stage" }, 1600, 210], ["party", { role: "party" }, 268, 900]];
+  const r = await rig(roles, fxOf(all), start);
+  const world = () => r.host.world;
+  assert.equal(world().state.heroes.length, 26);
+  assert.equal(world().rt.live.size, 32, "every agent plays");
+  const cAddr = all.slice(26).map((a) => a.address); // t27 … t32
+  assert.ok(cAddr.every((x) => world().rt.contractors.has(x)), "the six past the day's hires play as Contractors");
+  // they level meanwhile; each its own level, XP and class
+  const was = new Map();
+  cAddr.forEach((addr, k) => {
+    const c = world().rt.contractors.get(addr);
+    Object.assign(c, { L: 20 + k * 3, xp: 1000 + k, cls: 1 + (k % 5) });
+    c.sp = Hr.autoRanks(c.cls, c.L, c.rev);
+  });
+  const rowOf = (rr, addr) => rr.host.view("party", { width: 268, nowMs: M.mockNow() }).groups.flatMap((g) => g.rows).find((x) => x.address === addr);
+  // herdr closes at about 03:41 (its last save), and opens at 04:10: a new game day
+  for (let i = 0; i < 9; i++) await M.tickAll(1000);
+  await M.tickAll(31000);
+  await r.host.flush();
+  for (const addr of cAddr) {
+    const c = world().rt.contractors.get(addr);
+    assert.ok(c.L >= 20, "levelled");
+    was.set(addr, { name: c.name, L: c.L, xp: Math.floor(c.xp), cls: c.cls, hoodie: rowOf(r, addr).colors.hoodie });
+  }
+  const disk = JSON.parse(M.memfs.readText(SAVE));
+  assert.equal(disk.herd.ct.length, 6, "the save holds the six Contractors' records");
+  for (const row of disk.herd.ct) assert.ok(JSON.stringify(row).length <= 62, `a slim record: ${JSON.stringify(row)}`);
+  for (const m of M.mounted()) await m.close();
+  const reopen = new Date(start);
+  reopen.setHours(4, 10, 0, 0);
+  return { A, all, agentOf, fxOf, roles, rowOf, cAddr, was, reopen };
+}
+
+test("round 5: 32 agents, herdr closed across 04:00 and opened again: the Contractors come back as themselves and are hired at their levels; a newcomer listed first takes none of their hires", async () => {
+  const { A, all, agentOf, fxOf, roles, rowOf, cAddr, was, reopen } = await contractorsClosedAcross0400();
+  // herdr lists a newcomer (an agent started while it was closed) and two Contractors first
+  const newcomer = agentOf(32); // t33, rnd-qa / pi: a seat with no hero and no record
+  M.setFixture(fxOf([newcomer, ...all.slice(0, 28)]));
+  const r2 = await rig(roles, undefined, reopen.getTime());
+  const world2 = () => r2.host.world;
+  const tip = (addr) => {
+    r2.party.render();
+    const name = rowOf(r2, addr)?.name;
+    return tips(r2.party).find((t) => name && t.includes(name) && /Hired|hired/.test(t)) ?? "";
+  };
+  assert.equal(world2().state.heroes.length, 28, "the two Contractors listed first are hired at once");
+  for (const addr of ["t27", "t28"]) {
+    const h = world2().state.heroes.find((x) => x.addr === addr);
+    const w = was.get(addr);
+    assert.ok(h && h.id > 0, `${addr} hired`);
+    assert.deepEqual([h.name, h.L, h.cls], [w.name, w.L, w.cls], `${addr}: the same Contractor, at its level`);
+    assert.ok(h.xp >= w.xp && h.xp < w.xp + 100, `${addr}: its XP (${h.xp} from ${w.xp})`);
+  }
+  assert.ok(world2().rt.contractors.has("t33"), "the newcomer waits as a Contractor: the four free hires are held");
+  assert.match(tip("t33"), /Hired in about \d+ s, unless 4 contractors from before the restart come back first · 4 ahead in line \(today: 4 of 6 hires left\)/);
+  // the other four are listed three snapshots later
+  for (let i = 0; i < 3; i++) await M.tickAll(1000);
+  M.setFixture(fxOf([newcomer, ...all]));
+  for (let i = 0; i < 3; i++) await M.tickAll(1000);
+  const S = world2().state;
+  assert.equal(S.heroes.length, 30, "the roster is full");
+  assert.equal(A.hiredToday(S), 4, "four hires, all to the Contractors");
+  for (const addr of cAddr) {
+    const w = was.get(addr);
+    const row = rowOf(r2, addr);
+    const hero = A.heroById(world2(), row.heroId);
+    assert.deepEqual([hero.name, hero.L, hero.cls], [w.name, w.L, w.cls], `${addr} is the same Contractor`);
+    assert.ok(hero.xp >= w.xp && hero.xp < w.xp + 100, `${addr}: its XP (${hero.xp} from ${w.xp})`);
+    assert.equal(row.colors.hoodie, w.hoodie, `${addr} keeps its hoodie`);
+    const hired = addr <= "t30";
+    assert.equal(hero.id > 0, hired, `${addr} ${hired ? "hired (longest-running first)" : "waits for a slot"}`);
+    if (hired) {
+      const line = S.herd.log.find((e) => e[1] === "hired" && e[2] === hero.id);
+      assert.equal(line?.[4], w.L, `${addr}: "Hired: ${w.name} (was a contractor)" at Lv ${w.L}`);
+    }
+  }
+  assert.ok(!S.herd.log.some((e) => e[1] === "hire" && e[0] >= reopen.getTime()), "no Lv 1 hire");
+  assert.match(tip("t31"), /Hired when a roster slot frees \(a retire, or a hero below Lv 10 off duty for 15 min\) \(today: 2 of 6 hires left\)/);
+  assert.match(tip("t33"), /Hired when a roster slot frees .* · 2 ahead in line/);
+  const roster = r2.host.view("herd", { tab: "roster", nowMs: M.mockNow() }).roster;
+  assert.match(roster.count, /^30 \/ 30 heroes · 4 hired today \(6 a day\) · 3 contractors, the next hired when a roster slot frees$/);
+  // the next save holds the three waiting Contractors' records, and nothing else
+  await M.tickAll(31000);
+  await r2.host.flush();
+  const disk2 = JSON.parse(M.memfs.readText(SAVE));
+  assert.equal(disk2.herd.ct.length, 3);
+  for (const m of [r2.stage, r2.party]) assert.deepEqual(m.errors, []);
+});
+
+// The usual app start: herdr lists every terminal in its first snapshot, here with the newcomer
+// last. Every record is claimed before the newcomer binds (none is held for it), so it must stand
+// behind the Contractors back from their records: they are hired at the reconcile's end (step 2b).
+test("round 5: herdr opened after 04:00 listing every terminal at once, a newcomer last: the four hires go to the Contractors at their levels, none to the newcomer", async () => {
+  const { A, all, agentOf, fxOf, roles, rowOf, cAddr, was, reopen } = await contractorsClosedAcross0400();
+  const newcomer = agentOf(32);
+  // herdr's order is by space: the six Contractors' terminals among the others, the newcomer last
+  const order = [...all.slice(26), ...all.slice(0, 26)].sort((x, y) => Number(x.space.slice(1)) - Number(y.space.slice(1)));
+  M.setFixture(fxOf([...order, newcomer]));
+  const r2 = await rig(roles, undefined, reopen.getTime());
+  const S = r2.host.world.state;
+  assert.equal(S.heroes.length, 30, "the roster is full");
+  assert.equal(A.hiredToday(S), 4, "four hires");
+  assert.ok(!S.herd.log.some((e) => e[1] === "hire" && e[0] >= reopen.getTime()), "no Lv 1 hire: the newcomer took none");
+  assert.ok(r2.host.world.rt.contractors.has("t33"), "the newcomer waits as a Contractor");
+  for (const addr of cAddr) {
+    const w = was.get(addr);
+    const row = rowOf(r2, addr);
+    const hero = A.heroById(r2.host.world, row.heroId);
+    assert.deepEqual([hero.name, hero.L, hero.cls], [w.name, w.L, w.cls], `${addr} is the same Contractor`);
+    assert.equal(row.colors.hoodie, w.hoodie, `${addr} keeps its hoodie`);
+    assert.equal(hero.id > 0, addr <= "t30", `${addr} ${addr <= "t30" ? "hired (longest-running first)" : "waits for a slot"}`);
+  }
+  for (const m of [r2.stage, r2.party]) assert.deepEqual(m.errors, []);
+});

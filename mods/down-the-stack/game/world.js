@@ -82,6 +82,11 @@ export function loadWorld(text, { nowMs = 0 } = {}) {
   // not counted in a hero's off-duty grace (agents.inOffDutyGrace, round 4b)
   world.rt.loadedLastMs = Number.isFinite(state.herd.lastMs) ? state.herd.lastMs : null;
   repairLoaded(state);
+  // Contractor records (round 5): new Contractors are numbered after them, and the loaded ones hold
+  // their hires for a reconnect window (agents.reconnectOpen) while herdr lists their terminals
+  const recs = Array.isArray(state.herd.contractors) ? state.herd.contractors : [];
+  for (const r of recs) if (r.seq > world.rt.contractorSeq) world.rt.contractorSeq = r.seq;
+  world.rt.recWait = new Set(readOnly ? [] : recs.map((r) => r.seq));
   return { world, warning: warning || null };
 }
 
@@ -91,9 +96,10 @@ export function loadWorld(text, { nowMs = 0 } = {}) {
 //   character as normSeat now does, so its hero still matches the space; a title also loses the
 //   space before it (questName's trimEnd).
 // - Contractor ids in the paused boss fight, the journal, review Wounds / Lessons Learned and the
-//   chest inbox: Contractors are never saved and are numbered afresh (-1, -2, ...) after a load, so
-//   a saved negative id would seat an unrelated Contractor (a journal line keeps its stored name,
-//   and hero id 0).
+//   chest inbox: a Contractor's session-keyed state does not outlive the session (round 5: its slim
+//   record keeps its number, but a new Contractor or one whose record has gone could take an id
+//   seen in an older save), so a saved negative id would seat an unrelated Contractor (a journal
+//   line keeps its stored name, and hero id 0).
 function repairLoaded(state) {
   const mend = (v) => {
     if (typeof v !== "string") return v;
@@ -126,6 +132,8 @@ function repairLoaded(state) {
     for (const key of Object.keys(m)) if (key[0] === "r" && Number(key.slice(key.indexOf(".") + 1)) < 0) delete m[key];
   }
   for (const e of Array.isArray(state.herd.inbox) ? state.herd.inbox : []) if (Array.isArray(e) && e[0] < 0) e[0] = 0;
+  // a Contractor record's seat is mended like a hero's (round 5)
+  for (const r of Array.isArray(state.herd.contractors) ? state.herd.contractors : []) if (typeof r.seat === "string") r.seat = wellFormed(r.seat, "");
 }
 
 /**
@@ -141,13 +149,21 @@ function repairLoaded(state) {
  * (D§10.7). Nothing is counted twice: the call that settles the gap clears the hold, and every
  * later save writes herd.lastMs as it is. Every other saved time is stored relative to lastMs
  * (save.js) and decodes to the same absolute time.
+ *
+ * Round 5: the save also holds every live Contractor's slim record, beside the records of those
+ * whose agent is away (agents.contractorRecords; nothing on a read-only world beyond what it
+ * loaded). world.state itself keeps only the latter (herd.contractors).
  */
 export function serialize(world) {
   const { state, rt } = world;
+  if (!state.herd) return encodeState(state);
   const hold = rt && rt.offlineHold;
-  if (!hold || !(hold.dtMs > 0) || !state.herd) return encodeState(state);
-  const herd = Object.assign({}, state.herd, { lastMs: (state.herd.lastMs || 0) - hold.dtMs });
-  return encodeState(Object.assign({}, state, { herd }));
+  let herd = state.herd;
+  // the live Contractors' records with those whose agent is away (round 5, agents.contractorRecords)
+  const recs = rt ? A.contractorRecords(world) : null;
+  if (recs && recs !== state.herd.contractors) herd = Object.assign({}, herd, { contractors: recs });
+  if (hold && hold.dtMs > 0) herd = Object.assign({}, herd, { lastMs: (state.herd.lastMs || 0) - hold.dtMs });
+  return encodeState(herd === state.herd ? state : Object.assign({}, state, { herd }));
 }
 
 /** Local day number with the 04:00 reset (D§2.9): days since 1970 at 04:00 local time. */

@@ -403,7 +403,7 @@ describe("only live play raises milestones (no burst of stale ones after catch-u
     assert.equal(b.world.state.herd.milestones.length, 1);
   });
 
-  test("a Contractor reaching Principal is not raised (it is never saved)", () => {
+  test("a Contractor reaching Principal is not raised (it is not on the roster)", () => {
     const w = liveWorld(["principal"]);
     w.rt.nowMs = T0;
     const c = { id: -1, name: "Contractor", L: 89, cls: 1, prov: 0, rev: [1, 1], xp: need(89) - 1e-6, sp: [0, 0, 0, 0, 0, 0, 0], spFree: 0, eq: [null, null, null, null, null, null] };

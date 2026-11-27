@@ -993,7 +993,7 @@ test("round 4 (P2): a tab's tooltip names its key, and what its badge counts (\"
 test("round 4 (P1): the sheet's contractor banner says when it is hired (its tooltip the whole story); the tag too", async () => {
   const { m } = await mount("sheet", "contractor");
   const vm = S.scenarios.contractor;
-  assert.ok(m.text().includes("Contractor: hired tomorrow at 04:00 · not saved until then"));
+  assert.ok(m.text().includes("Contractor: hired tomorrow at 04:00 · not on the roster until then"));
   assert.equal(tipOf(m, "sh-note"), vm.note.tooltip);
   assert.equal(tipOf(m, "sh-tag"), vm.header.tagTip);
   assertClean(m, "contractor");

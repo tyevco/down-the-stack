@@ -109,7 +109,8 @@ screen.
      reloads can leave the build right before it still loading) and asks it for its world with
      `handover(fileText, {unreadable})`. That host answers with its world as save text plus what the
      new build needs to decide (`continues`, `lastText`/`lastGood`/`ownTexts`, `ioBlocked`, `origin`,
-     the save cue and the collapse countdown), unless it is still loading, retired, checking or
+     the save cue and the collapse countdown; the text is `serialize(world)`, so the live
+     Contractors cross a reload as their slim records, round 5, §3.2), unless it is still loading, retired, checking or
      read-only. The new build then decides (`load()`):
      - **the old world goes on** (`loadedFrom: "reload"`, no rollback to the save) when the file
        is the one it continues, when the file cannot be read (the read error is carried over and
@@ -284,7 +285,8 @@ Herd  = { name, gold, snip, bld:[6], zone, quota:{[mapId]:kills}, meter, bank, s
           rarity 0..5*/, collapse, collapsed /*host: it hid the stage*/, idleAt /*host: when its
           collapse countdown started, saved as "idle" only while set*/, notify:{boss,lts,principal}},
           log:[[at, kind, heroId, text, value, name?]...≤60-120], unseenUnrev /*round 4*/,
-          nextUid, nextHeroId, rng, day, lastMs, tick }
+          nextUid, nextHeroId, rng, day, lastMs, tick,
+          contractors /*round 5*/ }
           // journal kinds: ship, unrev (chests opened Unreviewed: text the task, value the count),
           // level, promo, drop, boss, retire, hire, hired (round 4: "Hired: <name> (was a
           // contractor)", value its level), leave, class, map, deprecate, badge
@@ -295,8 +297,12 @@ Herd  = { name, gold, snip, bld:[6], zone, quota:{[mapId]:kills}, meter, bank, s
           // unseenUnrev (round 4): chests opened Unreviewed since the Digest was last viewed
           // (agents.openChests adds, lossesSeen / digestSeen clear); saved in herd.x by its name
           // fight.ids never hold Contractor ids (negative) after a load (world.js repairLoaded):
-          // Contractors are not saved and are numbered afresh, so they rejoin a resumed fight only
+          // a Contractor's slim record keeps no seat in a fight, so it rejoins a resumed fight only
           // by standing in its zone (boss.resumeFight)
+          // contractors (round 5): the slim records of Contractors whose agent is away, readable
+          // {seq, seat, L, xp, cls, prov, rev:[0|1,0|1], since, day, tag, sig?, name?} (agents.js
+          // "Contractor records"); world.serialize writes them with every live Contractor's record
+          // (agents.contractorRecords), saved under "ct" (below)
 
 world.state = { v, gen, herd: Herd, heroes: [Hero...] }
 
@@ -312,10 +318,16 @@ world.rt = {                // rebuilt from snapshots; never saved
   startMs,                  // round 4b: this world's first reconcile (agents offDutySince)
   loadedLastMs,             // round 4b: the loaded save's herd.lastMs (world.loadWorld): the time
                             // the app was closed does not count in a hero's off-duty grace
-  offPane                   // round 4b: Map<heroId, pane> the pane a hero's terminal ended in, this
+  offPane,                  // round 4b: Map<heroId, pane> the pane a hero's terminal ended in, this
                             // session only (pickFreeHero ranks that hero first for a terminal there)
+  contractorSeq,            // the last Contractor number given (id = -seq); round 5: loadWorld starts it
+                            // at the loaded records' highest, so a new Contractor never takes one's
+  recWait,                  // round 5: Set<seq> of the loaded records not claimed yet: they hold
+                            // their hires while the reconnect window is open (agents.reconnectOpen)
+  _restored                 // round 5: Contractors brought back from a record in this reconcile
 }                           // a Contractor (rt.contractors) also carries since: when it arrived, its
-                            // place in the hiring line (promoteContractors: longest-running first)
+                            // place in the hiring line (promoteContractors: longest-running first);
+                            // a record keeps it, so a Contractor back from one keeps its place
                             // Note = {key, text, color, bornTick, showTick, kind?, heroId?, name?,
                             //   promoted?, extra?, short?}: round 4b tags from ev.note(text, color,
                             //   tag) (world.js pushNote); extra: a tick's second and later hire
@@ -340,6 +352,37 @@ Fight = { kind:"boss"|"review", bossIdx|reviewId, heroIds, parts:[{key,label,hp,
 Fx    = { key:"fx:<tick>:<n>", bornTick, kind, heroId?, mobUid?, roomId?, text, value, rar?,
           x?, y? }              // kinds in section 6.3; engine emits, view.js positions
 ```
+
+**Contractor records (round 5, owner decision; D§3.4, D§13.2).** A Contractor is not a roster hero,
+but the save keeps it as a slim record so it comes back as itself after a restart or hot reload.
+`herd.contractors` holds the records of Contractors whose agent is away (one is left by
+`agents.goOffDuty` when a Contractor's terminal ends); `world.serialize` adds a record for every live
+Contractor (`agents.contractorRecords`: live ones first in hiring order, then the others; expired
+ones dropped; at most `T.roster.max` in all), so `world.state` alone is not the whole save while
+Contractors play. `save.js` writes them under `herd.ct`, one array row each:
+
+```
+[seq, seat, L, xp, k, since, tag, day?, extras?]
+ seq    the Contractor's number: its id is -seq, and its default name (heroes.heroName(seat, 1000 + seq)),
+        hoodie (heroes.lookOf) and hat (its kit's hat uid -(seq × 10 + 2), items.hatToneOf) follow from it
+ seat   agents.seatKey's "space@machine/program", through the str table when a hero or another
+        record shares it
+ L, xp  level; XP to the whole point
+ k      class | provisional << 3 | Senior review << 4 | Staff review << 5
+ since  minutes from lastMs: its place in the hiring line (a tie: the lower number came first)
+ tag    agents.tagOf(address): the top 24 bits of FNV-1a 32 of its terminal's address in base 36
+ day    the game day it was last seen, from the top-level day (left out when 0 and nothing follows)
+ extras {"sg": the signature window as hero.sig is written, only for an Intern or a provisional
+        class; "n": a name other than the default; any other readable field}
+```
+
+About 35 bytes with a seat in the `str` table, 58 with a 26-character seat inline, about 125 for an
+Intern with a full 20-task window. A row without a number or a seat is dropped on load; an unknown
+class falls back as a hero's does. The list is left out when empty, so a save without Contractors is
+byte-identical to before; an older build drops `ct` (its Contractors come back new). `loadWorld`
+starts `rt.contractorSeq` at the highest number and fills `rt.recWait`; `repairLoaded` mends a
+record's seat like a hero's and still clears negative ids elsewhere (journal, fight, Wounds,
+Lessons, inbox): a Contractor's session-keyed state does not outlive the session.
 
 Fields added during the build (all saved ones have defaults on load in `save.js`):
 `herd.born` (the herd's first local day; `herd.herdAgeDays`, the Campfire gate), `herd.inbox` (chest
@@ -446,7 +489,7 @@ export function seatKey(spaceName, spaceId, programKey, app, machine?) -> string
 export function machineOf(agent) -> string|null           // agent.machine, else the "<machine>/" prefix of its
                                                           // space id or address (herdr mirror.rs qualify)
 export function hiredToday(state) -> number               // hires this game day (D§3.4: 6)
-export function promoteContractors(world, ev, spare?) -> number   // round 4, D§3.4 as built: at every reconcile
+export function promoteContractors(world, ev, spare?, recs?) -> number   // round 4, D§3.4 as built: at every reconcile
                                                           // before new terminals bind, and on retire; longest-running
                                                           // live Contractor first while hires are left and makeRoom
                                                           // finds room (a free slot, else rosterVictim: the least-
@@ -456,23 +499,47 @@ export function promoteContractors(world, ev, spare?) -> number   // round 4, D�
                                                           // world. promote() keeps the Contractor's look (hero.look,
                                                           // its hat's tint through skipUidsToTone) and renames every
                                                           // id-keyed thing: combat.renameHero, boss.renameHero (or the
-                                                          // fight remap for a stubbed boss API), journal, inbox finder
+                                                          // fight remap for a stubbed boss API), journal, inbox finder.
+                                                          // recs (round 5): address -> record the snapshot's terminals
+                                                          // claimed; those, and loaded records within the reconnect
+                                                          // window, stand in the line by their place and hold a hire
+                                                          // and room each (heldRecords), so those behind them take only
+                                                          // what is left beyond them
+export function makeContractor(world, a, seat, nowMs, rec?) -> Hero   // D§3.4; rec (round 5): a record its terminal claimed:
+                                                          // the same Contractor (id -seq, level, XP, class, reviews,
+                                                          // signature, since), its kit and skills rebuilt
+export function contractorRecords(world) -> [record]      // round 5: what the save holds (world.serialize): every live
+                                                          // Contractor's record, then herd.contractors without expired
+                                                          // ones, capped at T.roster.max; a read-only world: as loaded
+export function tagOf(address) -> string                  // round 5: a record's terminal tag (base 36, at most 5 chars)
 export function inOffDutyGrace(world, hero) -> boolean    // round 4b: an unbound hero off duty for less than
                                                           // T.roster.offDutyGraceMin (15) of world time: from seenAt,
                                                           // moved on by the app-closed gap for a hero not seen since
                                                           // the load (rt.loadedLastMs → rt.startMs); never let go
 export function offDutyGraceEnds(world, hero) -> number   // round 4b: when that grace ends (ms), 0 when none is left
-export function hireOutlook(world, heroOrId) -> null|{when:"soon"|"grace"|"day"|"slot"|"never", position, ahead,
-       hiresLeft, perDay, room, graced, atMs, days, text} // when a Contractor is hired (views: chrome.hireLine,
+export function hireOutlook(world, heroOrId) -> null|{when:"soon"|"grace"|"day"|"slot"|"never"|"reconnect", position,
+       ahead, hiresLeft, perDay, room, graced, held, atMs, days, text} // when a Contractor is hired (views: chrome.hireLine,
                                                           // panels hireOf); cached per tick in rt._hireLine. Round 4b:
                                                           // room counts graced heroes too (graced of them); "grace":
                                                           // hired when a graced hero's grace ends at atMs (unless its
-                                                          // agent comes back); "soon" counts room free now only
-// reconcile's order (round 4b): 0. unbind ended terminals (goOffDuty: seenAt, rt.offPane); 1a. every
-// new terminal claims its saved hero: first each one's own hero by saved address (ownHeroFor), then
-// a free hero of its seat in snapshot order (pickFreeHero, ranking first the hero whose terminal
-// ended in that pane this session); 1b. promoteContractors(spare = the claimed heroes); 2. bind and
-// refresh top-level agents (a claim is taken; else D§3.2); 3. sub-agents; 4. seen, focus
+                                                          // agent comes back); "soon" counts room free now only. Round 5:
+                                                          // the line counts loaded records within the reconnect window
+                                                          // (held of them ahead); "reconnect": hired when the window ends
+                                                          // at atMs unless they come back first
+// reconcile's order (round 4b): 0. unbind ended terminals (goOffDuty: seenAt, rt.offPane; round 5: a
+// Contractor leaves its record); 1a. every new terminal claims its saved hero: first each one's own
+// hero by saved address (ownHeroFor), then a free hero of its seat in snapshot order (pickFreeHero,
+// ranking first the hero whose terminal ended in that pane this session); 1a'. round 5: every new
+// terminal still without one claims a Contractor record of its seat: first each one's own record
+// (by tag), then one of its seat in snapshot order (recordFor: highest level, the longest-running);
+// 1b. promoteContractors(spare = the claimed heroes, recs = the claimed records); 2. bind and
+// refresh top-level agents (a claim is taken; a record makes its Contractor again, makeContractor;
+// else D§3.2, a newcomer hired only with a hire and room left beyond the held records and live
+// Contractors); 2b. round 5: promoteContractors again when a record was taken (the Contractor
+// back from it is hired in this reconcile while hiring is open); 3. sub-agents; 4. seen, focus.
+// Round 5's reconnect window (reconnectOpen): from a load until T.roster.reconnectSec after
+// rt.startMs, while a loaded record (rt.recWait) is unclaimed; records are pruned (expired after
+// T.roster.contractorKeepDays game days, capped) at every reconcile
 
 // combat.js
 export function buildRooms(world) -> Room[]
@@ -516,10 +583,12 @@ export function loadWorld(text, {nowMs}) -> {world, warning:null|string}   // re
                                                           // half-emoji seats, chest titles and journal texts, and drops
                                                           // Contractor ids from the paused fight, review Wounds and
                                                           // Lessons (rv<i>.<negative>) and inbox finders (round 4b);
-                                                          // records rt.loadedLastMs
+                                                          // records rt.loadedLastMs; round 5: rt.contractorSeq from
+                                                          // the records, rt.recWait (none on a read-only world)
 export function serialize(world) -> string                // JSON with crc; a held offline gap (rt.offlineHold) is
                                                           // written as not yet seen (lastMs − the held gap), so a
-                                                          // restart or hot reload during the hold finds it again (§2.3)
+                                                          // restart or hot reload during the hold finds it again (§2.3);
+                                                          // round 5: with agents.contractorRecords as herd.contractors
 export function tick(world, snapshot) -> {advanced:boolean, ticks:int}   // D§2.11; uses snapshot.nowMs
 export function command(world, name, args, nowMs, tzOffsetMin?) -> {ok:boolean, error?:string, msg?:string}
 export function raiseMilestone(world, kind, {title, body}) -> boolean   // D§11.15, via ev.milestone
@@ -1264,11 +1333,25 @@ review, not pixel-exact. `flex_grow(n)` and `flex_shrink(n)` keep their number (
   hero off duty makes room only after 15 minutes (R2); a fresh pane header at 400 / 420 px draws
   no bars before its size arrives and its chip is whole in Chromium (U1); the six hires of the
   04:00 turn are one header note at the right end for 18 s (U3); a Contractor's open sheet
-  follows its promotion (U5); the "N need you" walk never repeats (U4).
+  follows its promotion (U5); the "N need you" walk never repeats (U4). Round 5 adds: 32 agents in
+  25 spaces with 26 saved heroes, herdr closed across 04:00 and opened again with a newcomer and two
+  Contractors listed first and four three snapshots later: every Contractor comes back as itself
+  (name, level, XP, class, hoodie), four are hired at their levels, longest-running first, and the
+  newcomer takes none of their hires; and herdr listing every terminal at once with the newcomer
+  last: the four hires still go to the Contractors at their levels.
+- contractor records (`test/contractors.test.mjs`, round 5): a restart across 04:00 promotes the
+  Contractor at its level with its name, class and look; a hot reload keeps its place in line and an
+  Intern's signature; two Contractors in one seat; a saved hero of the seat first; a newcomer listed
+  before the returning Contractor (also within one listing, and after it within one listing)
+  takes none of its hires; a record whose
+  agent never returns (the window, then 7 game days); expiry and the cap; a read-only world; bytes per
+  record; the `r5-contractors` fixture.
 - herdr gates: with `HERDR_SRC` missing, the tests that read herdr's source skip with one line each
   (`gates.mjs`); `STRICT_GATES=1 npm test` makes them fail. `test/fixtures/saves` also holds saves
   written by `a4ea9ab` (the build the owner ran), `c041909` and `d1ffb4f` (round 4b: journal names
-  and two promoted heroes; `save.test` checks every fixture's heroes keep their colours).
+  and two promoted heroes; `save.test` checks every fixture's heroes keep their colours), and
+  `r5-contractors` (round 5's Contractor records, written by this branch's engine before that round
+  was committed).
 - wall-clock bounds hold on a busy machine: the engine tests (`test/helpers/perf.mjs within()`)
   and the stage tests apply their strict bounds only with `PERF=1` (else 10×, and the measured time
   is always printed); the chrome and panels tests judge a render the mock flags by its best of 5,
@@ -1359,9 +1442,11 @@ Palette per zone from D§9.2; rarity colours D§8.2; reserved colours D§11.1.
 5. Mobs never flip direction while pacing (no mirroring in GPUI); all mobs face left.
 6. Reduced motion: herdr exposes no OS reduced-motion flag; Calm mode (D§11.15) covers it and
    additionally disables loops.
-7. D§3.4 Contractors are created in memory and never saved (as designed); Rebind is in the sheet.
+7. D§3.4 Contractors are created in memory, not on the roster (until round 5 never saved, as designed); Rebind is in the sheet.
    Round 4 (owner decision "promote only", docs/DECISIONS.md): a live Contractor is promoted to a
-   saved hero when hiring reopens (`agents.promoteContractors`, §3.4; D§3.4 as built).
+   saved hero when hiring reopens (`agents.promoteContractors`, §3.4; D§3.4 as built). Round 5
+   (owner decision): each Contractor is saved as a slim record (§3.2 "Contractor records") and comes
+   back as itself after a restart.
 8. The stage height setting maps to `layout.resize {id, px}` on the layout node whose content is
    this mod's stage (any id, as `host.js stageNode` finds it; disabled in a layout without one).
    Round 4: the Stage strip switch shows and hides that node (`host.stageStrip`, §4), whoever hid

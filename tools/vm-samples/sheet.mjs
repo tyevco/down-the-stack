@@ -725,11 +725,11 @@ export const scenarios = {
    * joins the roster, its tooltip the whole story; the tag explains itself.
    */
   contractor: { ...base(WREN, "gear", { ...nibHeader, name: "Wren Monorepo-Raised", level: "Lv 6", tag: "contractor",
-    tagTip: "Contractor: Hired at the next 04:00 game day · 2 ahead in line (today: 0 of 6 hires left). When hired it keeps its name, level, XP and class, and its kit becomes saved Alpha gear.",
+    tagTip: "Contractor: Hired at the next 04:00 game day · 2 ahead in line (today: 0 of 6 hires left). When hired it keeps its name, level, XP and class, and its kit becomes saved Alpha gear. Until then the herd remembers its name, level, XP, class and place in line across restarts, and for 7 game days while its agent is away (not its kit or chests).",
     sub: "ref-client · Claude Code · fighting 1-2 Whitespace Fields", quest: null, focus: { pane: "p33", address: "t33" } }, {
     note: {
-      text: "Contractor: hired tomorrow at 04:00 · not saved until then; its kills and chests still pay the herd", color: C.idle,
-      tooltip: "Hired at the next 04:00 game day · 2 ahead in line (today: 0 of 6 hires left). When hired it keeps its name, level, XP and class, and its kit becomes saved Alpha gear. Contractors don't get equity.",
+      text: "Contractor: hired tomorrow at 04:00 · not on the roster until then; its kills and chests still pay the herd", color: C.idle,
+      tooltip: "Hired at the next 04:00 game day · 2 ahead in line (today: 0 of 6 hires left). When hired it keeps its name, level, XP and class, and its kit becomes saved Alpha gear. Until then the herd remembers its name, level, XP, class and place in line across restarts, and for 7 game days while its agent is away (not its kit or chests). Contractors don't get equity.",
     },
   }), gear: nibGear() },
   /** An off-duty (benched) hero: Career with Rebind, no Focus button. */

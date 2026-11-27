@@ -18,7 +18,8 @@ const ICON = {
 const FACE = { working: ">_", blocked: "o_o", done: "^_^", idle: "-_-", off: "-_-" };
 const STRIPE = { working: C.working, blocked: C.blocked, done: C.done, idle: C.idle, off: C.idle };
 
-const TABS = [["upgrades", "Upgrades"], ["stash", "Stash"], ["tracker", "Tracker"], ["bosses", "Bosses"], ["roster", "Roster"], ["digest", "Digest"], ["settings", "Settings"]];
+// the first tab is Localhost (docs/TOWN.md §7.5: the Upgrades tab renamed, still key 1)
+const TABS = [["upgrades", "Localhost"], ["stash", "Stash"], ["tracker", "Tracker"], ["bosses", "Bosses"], ["roster", "Roster"], ["digest", "Digest"], ["settings", "Settings"]];
 
 function header(o = {}) {
   const sub = o.sub ?? "9 heroes · 2 working · 1 needs you";
@@ -64,7 +65,38 @@ const BLD = [
 
 const fmt = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 1 : 2).replace(/\.?0+$/, "")}M` : n >= 1e3 ? `${(n / 1e3).toFixed(n >= 1e5 ? 0 : 1).replace(/\.0$/, "")}k` : String(n));
 
-function upgrades(levels, gold, autoOn = true, trophies = 3) {
+/**
+ * Localhost on the first tab (docs/TOWN.md §7.5): the town's lines and the Review Desk card (drawn
+ * first in the building grid). desk: the Review Desk's level; open: its shelf, today and titles.
+ */
+function town(desk, gold, { titles = true } = {}) {
+  const cost = 1000 * 2 ** desk;
+  const ok = gold >= cost;
+  const open = desk >= 1;
+  return {
+    header: open ? "99% uptime · 12 on duty (Review Desk 12) · maintainer Kip · vendor/: 2 contractors · next hired 04:00"
+      : "closed: opens with the Review Desk's first level · vendor/: 2 contractors · next hired 04:00",
+    headerTip: "Uptime 99%: 1,118 served (LGTMs spent on chests) · 99.9% at 2,500. Cosmetic: it pays nothing.",
+    shelf: open ? {
+      label: `LGTMs 40 / ${10 * desk}`, frac: 40 / (10 * desk), text: "+10% XP and gold on chests you open · today 206 of 340 (61%)",
+      tooltip: `40 of ${10 * desk} LGTMs on the shelf (10 per Review Desk level). Heroes of Lv 10+ on duty make about 1 an hour each (more with rank) while their agents rest, on days you saw their work; each chest you open with full value takes one. A full shelf makes nothing.`,
+    } : null,
+    titles: open && titles ? {
+      text: "Last approved: “Bump deps” (Fizz) · “Fix flaky auth test” (Kip) · “Add retry to upload” (Ada) · “Tidy error messages” (Rue) · “Split the config loader” (Sol)",
+      tooltip: "Last approved, newest first:\n“Bump deps” (Fizz), by Rue\n“Fix flaky auth test” (Kip), by Rue\n“Add retry to upload” (Ada), by Kip\n“Tidy error messages” (Rue), by Kip\n“Split the config loader” (Sol), by Fen",
+    } : null,
+    desk: {
+      key: "b:review_desk", id: "review_desk", name: "Review Desk", icon: { path: "fx/desk.svg", mask: false },
+      level: desk, max: 10, levelText: `${desk} / 10`, effect: open ? `Shelf ${10 * desk} · 14 reviewers` : "Opens Localhost",
+      next: desk >= 10 ? null : open ? `Next: shelf ${10 * desk + 10}` : "Auto at 3.0k gold", maxed: desk >= 10,
+      buy: desk >= 10 ? null : action("buy:review_desk", "Buy", "buy", { building: "review_desk" }, { cost: `${fmt(cost)} gold`, enabled: ok, tone: ok ? "primary" : null, tooltip: ok ? `Level ${desk + 1} for ${fmt(cost)} gold` : `Needs ${fmt(cost)} gold (the herd has ${fmt(gold)})` }),
+      tooltip: "Heroes of Lv 10+ make LGTMs here while their agents rest, on days you saw their work. Each chest you open with full value takes one: +10% XP and gold.",
+    },
+    hint: "Heroes of Lv 10+ work here while their agents rest, on days you saw their work. Nothing here needs you.",
+  };
+}
+
+function upgrades(levels, gold, autoOn = true, trophies = 3, desk = 7) {
   return {
     buildings: BLD.map((b, i) => {
       const n = levels[i];
@@ -80,6 +112,8 @@ function upgrades(levels, gold, autoOn = true, trophies = 3) {
     }),
     note: `Autopilot buys the cheapest upgrade when gold ≥ 3× its cost and keeps a 20% reserve (Auto buildings: ${autoOn ? "on" : "off"}).`,
     trophies: `Trophies: +${trophies}% damage and max HP for every hero`,
+    // Localhost (docs/TOWN.md §7.5); null with the town off (the tab is then Upgrades, as before)
+    town: desk == null ? null : town(desk, gold),
   };
 }
 
@@ -265,6 +299,8 @@ function rr(id, o) {
     // space: set on rows of a space with one hero (their block has no header); hire: a Contractor's
     space: o.space ?? null,
     hire: o.hire ?? null,
+    // Localhost (docs/TOWN.md §7.5): the row's tooltip line, never a column or a status word
+    job: o.job ?? null,
   };
 }
 
@@ -295,10 +331,12 @@ function roster(empty = false) {
       ] },
       { key: "g:billing-service", name: "billing-service", inline: false, rows: [
         rr(14, { name: "Fen of Clean Diffs", level: 44, title: "Senior Hotfixer", where: "4-3 Octopus Delta", seen: "working 41m", icon: ICON.gemini }),
-        rr(15, { name: "Mira the Deterministic", level: 40, title: "Senior Shellmancer", status: "idle", where: "4-2 Stash Bog", seen: "resting 25m", icon: ICON.codex }),
+        rr(15, { name: "Mira the Deterministic", level: 40, title: "Senior Shellmancer", status: "idle", where: "4-2 Stash Bog", seen: "resting 25m", icon: ICON.codex,
+          job: "At the Review Desk · Committer reviewer · last LGTM “Bump deps” (Fizz)" }),
       ] },
       { key: "g:off", name: "Off duty", inline: false, rows: [
-        rr(7, { name: "Juno of the Green Build", level: 47, title: "Senior Rubberducker", status: "off", where: "off duty", seen: "seen Nov 21", retire: true }),
+        rr(7, { name: "Juno of the Green Build", level: 47, title: "Senior Rubberducker", status: "off", where: "off duty", seen: "seen Nov 21", retire: true,
+          job: "Off duty · at the Review Desk (Contributor reviewer)" }),
         rr(18, { name: "Ode to Tabs", level: 18, title: "Junior Forkbinder", status: "off", where: "off duty", seen: "seen 5d ago" }),
         rr(21, { name: "Nib the Linted", level: 3, title: "Intern", status: "off", where: "off duty", seen: "seen 2d ago" }),
         rr(22, { name: "Bram Two-Phase", level: 9, title: "Intern", status: "off", where: "off duty", seen: "seen 6d ago", icon: ICON.codex }),
@@ -341,6 +379,11 @@ function digest(empty = false) {
       { key: "bosses", title: "Bosses", icon: "ui/boss.svg", lines: [
         line("b:2", "The Catastrophic Backtracker: FIXED", "Kip, Rue, Mira · 118 ticks", C.working),
         line("b:3", "Postmortem: The Octopus Merge held at 31%", "Wounds 48 h · Lessons +20%", C.idle),
+      ] },
+      // Localhost (docs/TOWN.md §7.7): one card after the gains, before the chests waiting
+      { key: "town", title: "Localhost", icon: "ui/desk.svg", lines: [
+        line("tw:made", "259 chests LGTM'd (+10% XP and gold)", "99% uptime, was 90%", C.xp),
+        line("tw:ranks", "Kip and 1 more reached Committer · Ori reached Contributor", null, C.xp),
       ] },
       { key: "chests", title: "Chests waiting", icon: "ui/chest.svg", lines: [
         line("c:5", "Pip Tabs-Not-Spaces: Iron chest · 1.8 Seals", "“Add a dark theme toggle”", C.done,
@@ -430,7 +473,16 @@ export const scenarios = {
   /** Mid-game Localhost: some upgrades affordable, others not. */
   upgrades: midVm("upgrades"),
   /** Late game: big numbers, War Room maxed, autopilot buildings off, calm mode. */
-  upgradesLate: { ...base("upgrades", { header: lateHeader, digestBadge: null, calm: true }), upgrades: upgrades([10, 9, 10, 10, 8, 5], 48.6e6, false, 8) },
+  upgradesLate: { ...base("upgrades", { header: lateHeader, digestBadge: null, calm: true }), upgrades: upgrades([10, 9, 10, 10, 8, 5], 48.6e6, false, 8, 10) },
+  /** Localhost before the Review Desk's first level: no shelf yet, the desk card to buy. */
+  upgradesClosed: { ...midVm("upgrades"), upgrades: upgrades(MID_LEVELS, 212000, true, 3, 0) },
+  /** The town off (tools/pacing-sim.mjs --no-town): the tab is Upgrades, exactly as before Localhost. */
+  upgradesNoTown: (() => {
+    const vm = midVm("upgrades");
+    vm.tabs = vm.tabs.map((x) => (x.id === "upgrades" ? { ...x, label: "Upgrades" } : x));
+    vm.upgrades = upgrades(MID_LEVELS, 212000, true, 3, null);
+    return vm;
+  })(),
   /** vendor/ with a Release weapon selected (best on Kip). */
   stash: midVm("stash", { focus: 921 }),
   /** vendor/ filtered to hats, a Keepsake selected. */

@@ -30,6 +30,7 @@ import {
   unseenLosses,
 } from "./herd.js";
 import { chooseMap, mapLevels, offerDrop, bossApi } from "./autopilot.js";
+import { takeLgtm, markSeen as markTownSeen, renameHero as renameInTown } from "./town.js";
 import { heroCtx, addBuff, unblockedTicks, renameHero as renameInCombat } from "./combat.js";
 
 const S = T.seals;
@@ -814,6 +815,10 @@ function promote(world, address, c, ev) {
     if (live.tabName) c.lastTab = live.tabName;
   }
   c.seenAt = rt.nowMs;
+  // Localhost (docs/TOWN.md §2.4): a chest it opened as a Contractor today still counts for the
+  // duty rule; its seen-work day (st.tw, town.markSeen) comes along with st, and its job XP starts
+  // at 0 (a Contractor never holds a job)
+  if (c.st && Array.isArray(c.st.tw)) c.st.tw[0] = 0;
   state.heroes.push(c);
   noteHire(state);
   rt.contractors.delete(address);
@@ -832,6 +837,7 @@ function promote(world, address, c, ev) {
   if (rt.cxp) rt.cxp.delete(oldId);
   if (rt.apSig) rt.apSig.delete(oldId);
   renameInCombat(world, oldId, id);
+  renameInTown(world, oldId, id);
   const api = bossApi(world);
   if (typeof api.renameHero === "function") api.renameHero(world, oldId, id);
   else {
@@ -1714,8 +1720,11 @@ export function chestInfo(p) {
  * with opts.all) at half gold and XP, floor(raw/2) items and no Seals.
  * Gold: seals x 20 x gold(mapMid); XP: seals x 45 x mobXP(mapMid) x (1 + ΣXP%), no Fresh Eyes;
  * items: rawSeals (never reduced by the Daily Shift), offered to the roster (autopilot equip) then
- * the stash; Seals feed the Release Train and the Sprint meter.
- * @returns {{opened:number, seals:number, gold:number, xp:number, items:Array}}
+ * the stash; Seals feed the Release Train and the Sprint meter. Localhost (docs/TOWN.md §3.4): each
+ * chest opened with full value takes an LGTM when one is on the shelf (town.takeLgtm: +10% XP and
+ * gold; live.tally.lgtmXp, the coin effect's `lgtm` count, out.lgtm) and credits the hero's seen work
+ * for the town's duty rule (town.markSeen).
+ * @returns {{opened:number, seals:number, gold:number, xp:number, items:Array, lgtm?:number}}
  */
 export function openChests(world, hero, opts = {}, ev) {
   const { state, rt } = world;
@@ -1735,12 +1744,21 @@ export function openChests(world, hero, opts = {}, ev) {
   const st = stats(hero, statsCtx(world, hero));
   const xpPct = (st.xpPct || 0) + herdXpBonus(state) + onboardingBonus(state, hero);
   const roster = state.heroes.includes(hero);
+  let lgtms = 0;
   for (const p of open) {
     const raw = chestRaw(p);
     const sf = p.sealFactor ?? 1;
     const seals = unreviewed ? 0 : raw * sf;
-    const g = unreviewed ? 0.5 * chestGold(raw * sf, lv.mid) : chestGold(seals, lv.mid);
-    const xp = unreviewed ? 0.5 * chestXP(raw * sf, lv.mid, xpPct) : chestXP(seals, lv.mid, xpPct);
+    // a chest from an older save may carry a program or shell name, or its space's name, as its title
+    const told = unreviewed ? null : judgeCached(p.title, where, true) || null;
+    // Localhost (docs/TOWN.md §3.4): a chest opened with full value takes one LGTM from the shelf,
+    // if one is there, for +10% on its XP and gold (after ΣXP%, as the chest's own value; never its
+    // Seals, items or tier); roster heroes' and Contractors' chests alike, in the order they open
+    const lg = unreviewed ? 0 : takeLgtm(world, hero, told);
+    if (lg > 0) lgtms++;
+    const g = unreviewed ? 0.5 * chestGold(raw * sf, lv.mid) : chestGold(seals, lv.mid) * (1 + lg);
+    const xp0 = unreviewed ? 0.5 * chestXP(raw * sf, lv.mid, xpPct) : chestXP(seals, lv.mid, xpPct);
+    const xp = xp0 * (1 + lg);
     const items = rollChest(hero, { raw, mapTop: lv.top, classId: hero.cls, itemFind: st.itemFind, state, unreviewed });
     addGold(state, g);
     out.gold += g;
@@ -1748,11 +1766,16 @@ export function openChests(world, hero, opts = {}, ev) {
       addSeals(world, seals, ev);
       hero.st.seals = (hero.st.seals || 0) + seals;
       out.seals += seals;
+      // rule 3 of the town's duty (TOWN.md §2.1): seen work on this game day (d = 0)
+      markTownSeen(world, hero);
     }
     if (xp > 0 && (roster || hero.contractor) && !opts.noXp) {
       const r = grantXP(state, hero, xp, ev);
       if (r.levels > 0 && live) live.hp = live.maxHp;
-      if (live && live.tally) live.tally.chestXp = (live.tally.chestXp || 0) + xp;
+      if (live && live.tally) {
+        live.tally.chestXp = (live.tally.chestXp || 0) + xp0;
+        if (lg > 0) live.tally.lgtmXp = (live.tally.lgtmXp || 0) + (xp - xp0);
+      }
       out.xp += xp;
     }
     for (const it of items) {
@@ -1762,12 +1785,9 @@ export function openChests(world, hero, opts = {}, ev) {
       if (ev) ev.fx?.("loot", { heroId: hero.id, rar: it.rar, value: it.uid });
     }
     out.opened++;
-    if (!unreviewed) {
-      // a chest from an older save may carry a program or shell name, or its space's name, as its title
-      const title = judgeCached(p.title, where, true) || "Commit";
-      emitJournal(world, ev, "ship", hero.id, title, Math.round(seals * 10) / 10);
-    }
+    if (!unreviewed) emitJournal(world, ev, "ship", hero.id, told || "Commit", Math.round(seals * 10) / 10);
   }
+  if (lgtms) out.lgtm = lgtms;
   if (unreviewed && out.opened) {
     // one journal line for the batch, so the person learns where the chest went (the sheet's
     // journal and the Herd digest): its task when one chest opened, the count in the value
@@ -1788,7 +1808,8 @@ export function openChests(world, hero, opts = {}, ev) {
     }
   }
   if (ev) {
-    if (out.gold > 0) ev.fx?.("coin", { heroId: hero.id, value: Math.round(out.gold) });
+    // lgtm (TOWN.md §7.2): how many of these chests took an LGTM; the coin float reads "+1.2k · LGTM"
+    if (out.gold > 0) ev.fx?.("coin", lgtms ? { heroId: hero.id, value: Math.round(out.gold), lgtm: lgtms } : { heroId: hero.id, value: Math.round(out.gold) });
     ev.major?.();
   }
   if (!unreviewed && out.opened) awardBadge(world, "first_commit", ev);

@@ -63,7 +63,23 @@ export const TUNING = {
     rankGate: 1, respecSnippetsPerLevel: 5, careerChangeSnippetsPerLevel: 25, classFreeUntilLevel: 20,
     classLockTasks: 15
   },
-  fx: { numbersPerHero: 2, numbersPerRoom: 6, numbersPerStage: 12, bannerMaxMs: 3000 }
+  fx: { numbersPerHero: 2, numbersPerRoom: 6, numbersPerStage: 12, bannerMaxMs: 3000 },
+  // Localhost, the town (docs/TOWN.md §9; round 1 builds the Review Desk alone). on: false is the
+  // build before the town (tools/pacing-sim.mjs --no-town). minLevel / gateDays: the §2.1 duty rule
+  // (Lv 10, a chest seen with full value on this game day or the gateDays before); perHour: LGTMs a
+  // hero-hour on duty at rank 0, x (1 + rankRate x rank) with job XP over rankAt; shelfPerLevel: the
+  // LGTM shelf's cap per Review Desk level; lgtmBonus: chest XP and gold of a chest opened with full
+  // value while an LGTM is on the shelf (owner decision 13.4); desk: the Review Desk's price (base x
+  // mult^(level - 1)) and max level, autoAt its autopilot gold rule (gold >= 3 x the price);
+  // uptimeAt: Localhost's Uptime steps (LGTMs spent + runbookUptime x Runbooks spent). Round 2 and 3
+  // numbers (runbookCost, runbookShelf, runbookTicks, runbookUptime, viewQuietMin, viewCooldownMin)
+  // are kept here unused until their round.
+  town: { // balance: new (docs/TOWN.md §9, docs/BALANCE.md §14)
+    on: true, minLevel: 10, gateDays: 1, perHour: 1, rankAt: [0, 25, 100, 300, 1000], rankRate: 0.2,
+    shelfPerLevel: 10, lgtmBonus: 0.1, desk: { base: 1000, mult: 2, max: 10, autoAt: 3 },
+    uptimeAt: [100, 500, 2500, 12500, 62500], titlesKept: 5,
+    runbookCost: 8, runbookShelf: 3, runbookTicks: 10, runbookUptime: 10, viewQuietMin: 15, viewCooldownMin: 60
+  }
 };
 
 // Index = class id in saves (0 = intern).
@@ -1207,6 +1223,39 @@ export const MOB_GLYPHS = {
   warning_mite: "w", nitpick: "nit", holo_duck: null,
 };
 
+// Localhost, the town (docs/TOWN.md; numbers in TUNING.town). Original names: developer vocabulary
+// (docs/TOWN.md §10).
+// - stations: where an on-duty hero works (game/town.js stationOf). `post` is the sheet override's
+//   save code (TOWN.md §8 hero extras "post", round 2); `noun` the job title's noun. Round 1 builds
+//   the Review Desk alone: every on-duty hero is at it; the Docs Library is listed for round 2
+//   (`round: 2`) and never picked before then.
+// - ranks: the open-source rank ladder of job XP (TOWN.md §4; the thresholds are TUNING.town.rankAt).
+// - uptime: Localhost's Uptime steps in nines (TOWN.md §5.3; thresholds TUNING.town.uptimeAt),
+//   with the cosmetic unlock each step shows from round 3 on.
+/** Localhost stations, job ranks and Uptime steps (docs/TOWN.md §3, §4, §5.3). */
+export const TOWN = {
+  stations: [
+    { id: "campfire", name: "Campfire", post: 1, noun: null, product: null },
+    { id: "review_desk", name: "Review Desk", post: 2, noun: "reviewer", product: "lgtm" },
+    { id: "docs_library", name: "Docs Library", post: 3, noun: "writer", product: "runbook", round: 2 },
+  ],
+  ranks: [
+    { id: "drive_by", name: "Drive-by" },
+    { id: "contributor", name: "Contributor" },
+    { id: "committer", name: "Committer" },
+    { id: "maintainer", name: "Maintainer" },
+    { id: "core", name: "Core" },
+  ],
+  uptime: [
+    { label: "90%", unlock: "string lights over the stations" },
+    { label: "99%", unlock: "a neon localhost sign" },
+    { label: "99.9%", unlock: "a clock tower showing the uptime" },
+    { label: "99.99%", unlock: "lit windows in every station" },
+    { label: "99.999%", unlock: "the town banner" },
+  ],
+  booting: "booting",
+};
+
 // =============================================================================================
 // Derived structures and lookups
 // =============================================================================================
@@ -1317,3 +1366,4 @@ export const BOSS_IDX = indexOf(BOSSES);
 export const BUILDING_IDX = indexOf(BUILDINGS);
 export const BADGE_IDX = indexOf(BADGES);
 export const MAP_IDX = indexOf(MAPS);
+export const STATION_BY_ID = byId(TOWN.stations);

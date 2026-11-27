@@ -18,6 +18,23 @@
 // in --json mode too (its output carries each verdict and "bad"); 2 on an unknown argument.
 //
 //   node tools/pacing-sim.mjs --sweep [--seed N] [--json]
+//   node tools/pacing-sim.mjs [--no-town] [--seeds 1-4] [--persona big]
+//
+// Localhost, the town (docs/TOWN.md §6.3, docs/BALANCE.md §14) is part of the engine, so it runs by
+// default. Each persona then plays twice on the same seed, with the town and without it (the
+// baseline, TUNING.town.on = false), and prints a "Localhost:" line (its share of all XP, LGTM
+// coverage, the Review Desk, ranks, Uptime) with its gates; exit code 1 when a persona's town share
+// passes 3% of its XP, a milestone within ±15% of D§12.1 without the town leaves it with the town (or
+// one already off gets further off), or the mean of the Lv 20-100 milestones' hours moves more than
+// 6% earlier than without the town. --no-town is the build before the town: TUNING.town.on = false,
+// no baseline, no town lines (the same output as before the town apart from the wall-clock seconds).
+// --seeds 1-4 (or 1,2,3,4) runs several seeds and ends with a summary table (BALANCE.md §14).
+// --persona big: the owner model (docs/TOWN.md Appendix A: 32 agents in 25 spaces, herdr open
+// overnight, 7 days; informational, left out of "all"): who is on duty by hour, coverage by day, the
+// town share, the Review Desk and the save size with and without the town's fields; exit code 1
+// when the town share passes 4% or the town's own save bytes 0.8 KB. The sweep and the bot never
+// meet the town (no chest, no seen work: never on duty) and print the same with and without it; the
+// sweep's real autopilot gear is harvested without the town, so it is the same gear either way.
 //
 // The sustain sweep (D§4.3, D§5.5, D§5.6): every real map x class at on-level for one working hour,
 // with the complete D§5.2 reference kit (fullRefKit) and with real autopilot gear (the typical
@@ -45,9 +62,10 @@ import * as Dm from "../mods/down-the-stack/game/demo.js";
 import * as I from "../mods/down-the-stack/game/items.js";
 import * as AP from "../mods/down-the-stack/game/autopilot.js";
 import { stats as heroStats, computeStats } from "../mods/down-the-stack/game/heroes.js";
-import { mobXP, gap, refDPS, polishMax, itemTier } from "../mods/down-the-stack/game/formulas.js";
-import { TUNING as T, BOSSES, MAPS, MAP_BY_ID, SLOTS, BACKLOG, AFFIXES, AFFIX_IDX, CLASSES } from "../mods/down-the-stack/game/data.js";
+import { mobXP, gap, refDPS, polishMax, itemTier, fmtNum } from "../mods/down-the-stack/game/formulas.js";
+import { TUNING as T, BOSSES, MAPS, MAP_BY_ID, SLOTS, BACKLOG, AFFIXES, AFFIX_IDX, CLASSES, TOWN } from "../mods/down-the-stack/game/data.js";
 import * as H from "../test/helpers/engine.mjs";
+import * as TW from "../mods/down-the-stack/game/town.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const MIN = 60;
@@ -91,6 +109,7 @@ export const DESIGN = {
 export const BOT_DESIGN = { 1: 19, 7: 23, 30: 28, 90: 33, 365: 42 };
 
 const TOL = 0.15;
+const TOWN_RANKS = TOWN.ranks.map((r) => r.name);
 
 // ---------------------------------------------------------------------------------------------
 // One persona
@@ -129,18 +148,86 @@ function castFor(p, day, seqs) {
 }
 
 /**
+ * Runs fn with TUNING.town.on set to `town` (true / false; null or undefined: as it is), restoring
+ * it afterwards (the town reads it at call time, docs/TOWN.md §6.3 --no-town).
+ */
+export function withTown(town, fn) {
+  const prev = T.town.on;
+  if (town != null) T.town.on = !!town;
+  try {
+    return fn();
+  } finally {
+    T.town.on = prev;
+  }
+}
+
+/**
+ * The town's numbers over a run (docs/TOWN.md §6.2): XP by source from the engine's own tallies
+ * (live.tally: kills, chests, bosses, reviews and the LGTM bonus), chests opened with full value while
+ * the Review Desk was open (herd.town.t[2] by day). tick(world) after every world.tick; done(world)
+ * -> {share, xp, chests, lgtm, coverage, rd, rdGold, ranks, uptime, jobXp}.
+ */
+export function townTracker() {
+  const last = new WeakMap();
+  const xp = { kill: 0, chest: 0, boss: 0, review: 0, lgtm: 0 };
+  let chests = 0;
+  let prevT2 = 0;
+  return {
+    xp,
+    tick(w) {
+      for (const live of w.rt.live.values()) {
+        const t = live.tally;
+        if (!t) continue;
+        const cur = [t.xp || 0, t.chestXp || 0, t.bossXp || 0, t.reviewXp || 0, t.lgtmXp || 0];
+        const l = last.get(live) || [0, 0, 0, 0, 0];
+        xp.kill += cur[0] - l[0];
+        xp.chest += cur[1] - l[1];
+        xp.boss += cur[2] - l[2];
+        xp.review += cur[3] - l[3];
+        xp.lgtm += cur[4] - l[4];
+        last.set(live, cur);
+      }
+      const town = w.state.herd.town;
+      const t2 = town && Array.isArray(town.t) ? town.t[2] || 0 : 0;
+      chests += t2 >= prevT2 ? t2 - prevT2 : t2; // the 04:00 turn starts the day's count afresh
+      prevT2 = t2;
+    },
+    done(w) {
+      const all = xp.kill + xp.chest + xp.boss + xp.review + xp.lgtm;
+      const town = w.state.herd.town;
+      const lgtm = town && Array.isArray(town.u) ? town.u[0] || 0 : 0;
+      const rd = TW.deskLevel(w.state);
+      let rdGold = 0;
+      for (let n = 1; n <= rd; n++) rdGold += TW.deskCost(n);
+      const ranks = [0, 0, 0, 0, 0];
+      for (const h of w.state.heroes) if (h.L >= T.town.minLevel) ranks[TW.rankOf(TW.jobXpOf(h))]++;
+      return {
+        share: all > 0 ? xp.lgtm / all : 0, xp: Object.assign({}, xp), chests, lgtm, coverage: chests > 0 ? lgtm / chests : 0, rd, rdGold, ranks,
+        uptime: TW.uptime(w.state).label, jobXp: w.state.heroes.map((h) => Math.floor(TW.jobXpOf(h))),
+      };
+    },
+  };
+}
+
+/**
  * Plays a persona with the real engine. Returns {events: {L5: {day, hours}, B1: {...}, ...},
- * days, ticks, ms, final: {levels, zone, ...}}.
+ * days, ticks, ms, final: {levels, zone, ...}, town?}. town (when the town ran): townTracker's summary.
  * @param {object} p a PERSONAS entry (or {agents, hours, taskMin})
  * @param {{days?:number, seed?:number, reload?:boolean, until?:string[], log?:Function,
- *          onTick?:Function}} [opts] log(day, world, events) after each day; onTick(world, snap, res)
+ *          onTick?:Function, town?:boolean}} [opts] log(day, world, events) after each day;
+ *          onTick(world, snap, res); town: TUNING.town.on for this run (default: as it is)
  */
 export function simPersona(p, opts = {}) {
+  return withTown(opts.town, () => playPersona(p, opts));
+}
+
+function playPersona(p, opts) {
   const days = opts.days || p.days;
   const reload = opts.reload !== false;
   const until = opts.until || null;
   const t0 = performance.now();
   let world = W.createWorld({ nowMs: EPOCH + SESSION_START_H * HOUR * 1000 - 60000, seed: opts.seed || 1 });
+  const tw = T.town.on !== false ? townTracker() : null;
   const events = {};
   const seqs = [];
   let ticks = 0;
@@ -174,7 +261,7 @@ export function simPersona(p, opts = {}) {
     let now = start;
     while (now < end) {
       const to = Math.min(end, now + 5 * MIN * 1000);
-      now = Dm.runCast(world, cast, to, { onTick: (w, s, r) => { ticks += r.ticks; if (opts.onTick) opts.onTick(w, s, r); check(day); } });
+      now = Dm.runCast(world, cast, to, { onTick: (w, s, r) => { ticks += r.ticks; if (tw) tw.tick(w); if (opts.onTick) opts.onTick(w, s, r); check(day); } });
     }
     cast.agents.forEach((a, k) => { seqs[k] = a.seq + 1; });
     if (world.rt.errors.length) throw new Error(`engine errors on day ${day}: ${world.rt.errors.join("; ")}`);
@@ -182,7 +269,7 @@ export function simPersona(p, opts = {}) {
     if (until && until.every((k) => events[k])) break;
   }
   const heroes = world.state.heroes;
-  return {
+  const res = {
     events, days: Math.min(day, days), ticks, ms: Math.round(performance.now() - t0),
     final: {
       levels: heroes.map((h) => h.L), classes: heroes.map((h) => h.cls), zone: world.state.herd.zone, rel: world.state.herd.rel,
@@ -191,6 +278,8 @@ export function simPersona(p, opts = {}) {
     },
     world,
   };
+  if (tw) res.town = tw.done(world);
+  return res;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -202,6 +291,10 @@ export function simPersona(p, opts = {}) {
  * open). Returns {levels: {[day]: L}, ms}.
  */
 export function simBot(days, opts = {}) {
+  return withTown(opts.town, () => playBot(days, opts));
+}
+
+function playBot(days, opts) {
   const t0 = performance.now();
   const start = EPOCH + SESSION_START_H * HOUR * 1000;
   const world = W.createWorld({ nowMs: start - 1000, seed: opts.seed || 1 });
@@ -329,15 +422,16 @@ export function gearRecorder() {
 
 /**
  * Real autopilot gear by level (gearRecorder) from one persona (default: typical, three agents
- * sharing one stash, the D§12.1 "typical user") played to Lv 100 with every autopilot default on.
- * Cached per persona; about 20 s in V8.
+ * sharing one stash, the D§12.1 "typical user") played to Lv 100 with every autopilot default on,
+ * without the town (docs/TOWN.md §6.3: the sweep prints the same with and without it; the town
+ * changes when drops are rolled, not the gear's rules). Cached per persona; about 20 s in V8.
  * @returns {Array<{L:number, eq:Array, dps:number, ehp:number}>}
  */
 const GEAR = new Map();
 export function harvestGear(id = "typical") {
   if (GEAR.has(id)) return GEAR.get(id);
   const rec = gearRecorder();
-  simPersona(PERSONAS[id], { seed: 1, until: ["L100"], onTick: rec.onTick });
+  simPersona(PERSONAS[id], { seed: 1, until: ["L100"], onTick: rec.onTick, town: false });
   const out = rec.done();
   GEAR.set(id, out);
   return out;
@@ -466,6 +560,189 @@ function printSweep(rows) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The owner model (docs/TOWN.md Appendix A): --persona big
+// ---------------------------------------------------------------------------------------------
+
+/** The owner's 25 spaces and how many agents work in each (32 in all; screenshots 1 and 4). */
+export const OWNER_SPACES = [
+  ["ceo-assistant-res-2", 1], ["ceo-assistant-writer", 1], ["ceo-assistant-lead", 2], ["pr-review-eng-1", 1],
+  ["pr-review-eng-2", 1], ["pr-review-qa", 1], ["pr-review-lead", 1], ["rnd-qa", 2], ["rnd-eng-1", 1], ["rnd-eng-2", 1],
+  ["rnd-lead", 1], ["mobile-qa", 1], ["mobile-eng", 2], ["mobile-lead", 1], ["docs", 2], ["infra", 2], ["ref-client", 1],
+  ["gks", 1], ["claude-extended", 1], ["qa", 1], ["quiet-front", 1], ["ai-apps-vp", 1], ["ai-platform-vp", 1],
+  ["hitch-ops", 2], ["herdr-teams", 2],
+];
+
+/**
+ * The owner's herd (docs/TOWN.md Appendix A): 32 Claude agents in 25 spaces, herdr open for `days`
+ * days from 04:00 of day 1. Each agent starts between 08:00 and 09:30 and stops between 19:00 and
+ * 21:00 (the last `owls` work until about 02:00) in 15-45-minute tasks (owls up to 90 after 20:00),
+ * half with a 1-6-minute block; a done stretch of 3-30 minutes by day and 30-240 at night before the
+ * result is seen, then 1-8 minutes idle. The plans come from a fixed xorshift (seed 12345), so the
+ * run is deterministic. Returns {world, town (townTracker's summary), hourly (the last day: average
+ * heroes fighting / waiting / shipped / on duty / at the campfire and the shelf, by hour), days
+ * (coverage by game day: [{day, lgtm, chests, rd}]), ms}.
+ */
+export function simOwner(days = 7, opts = {}) {
+  return withTown(opts.town, () => playOwner(days, opts.owls ?? 6));
+}
+
+function playOwner(DAYS, OWLS) {
+  const t0 = performance.now();
+  let seed = 12345;
+  const rnd = () => { seed ^= seed << 13; seed >>>= 0; seed ^= seed >>> 17; seed ^= seed << 5; seed >>>= 0; return seed / 4294967296; };
+  const between = (a, b) => a + (b - a) * rnd();
+  const planFor = (owl) => {
+    const plan = [];
+    let t = 0;
+    const push = (st, sec) => { sec = Math.max(1, Math.round(sec)); plan.push([st, sec]); t += sec; };
+    for (let d = 0; d < DAYS; d++) {
+      const dayStart = d * 86400;
+      const on = dayStart + 8 * HOUR + between(0, 90 * MIN);
+      const off = dayStart + (owl ? 26 * HOUR : 19 * HOUR + between(0, 120 * MIN));
+      if (on > t) push("idle", on - t);
+      while (t < off) {
+        const work = between(15, owl && t > dayStart + 20 * HOUR ? 90 : 45) * MIN;
+        if (rnd() < 0.5) { push("working", work / 2); push("blocked", between(1, 6) * MIN); push("working", work / 2); } else push("working", work);
+        const night = t > dayStart + 20 * HOUR;
+        push("done", night ? between(30, 240) * MIN : between(3, 30) * MIN);
+        push("idle", between(1, 8) * MIN);
+      }
+    }
+    plan.push(["idle", Infinity]);
+    return plan;
+  };
+  const agents = [];
+  let k = 0;
+  for (const [name, n] of OWNER_SPACES) {
+    for (let j = 0; j < n; j++) {
+      k++;
+      agents.push(Dm.makeAgent({
+        address: `t${k}`, program: "claude", space: `spc_${name}`, spaceName: name, tab: `tab_${k}`, tabIndex: j,
+        tabName: name, pane: `p_t${k}`, plan: planFor(k > 32 - OWLS), loop: false, titleIdx: k * 3,
+      }));
+    }
+  }
+  const cast = Dm.makeCast(agents);
+  const start = EPOCH + 4 * HOUR * 1000; // 04:00 of day 1 (the game day turns)
+  const world = W.createWorld({ nowMs: start - 1000, seed: 7 });
+  Dm.advanceCast(cast, 4 * HOUR);
+  const tw = T.town.on !== false ? townTracker() : null;
+  const hourly = [];
+  for (let h = 0; h < 24; h++) hourly.push({ hour: h, n: 0, fighting: 0, waiting: 0, shipped: 0, onDuty: 0, campfire: 0, shelf: 0, cap: 0 });
+  const daysOut = [];
+  let prev = null;
+  const lastDay = EPOCH + (DAYS - 1) * DAY_MS;
+  Dm.runCast(world, cast, start + DAYS * DAY_MS - 4 * HOUR * 1000, {
+    onTick(w, snap, r) {
+      if (tw) tw.tick(w);
+      const town = w.state.herd.town;
+      const tt = town && Array.isArray(town.t) ? town.t : [0, 0, 0];
+      const day = w.state.herd.day;
+      if (prev && day !== prev.day) daysOut.push({ day: daysOut.length + 1, lgtm: prev.lgtm, chests: prev.chests, rd: prev.rd });
+      prev = { day, lgtm: tt[0] || 0, chests: tt[2] || 0, rd: TW.deskLevel(w.state) };
+      if (snap.nowMs < lastDay) return;
+      const b = hourly[Math.floor((snap.nowMs - lastDay) / (HOUR * 1000)) % 24];
+      const n = r.ticks || 1;
+      b.n += n;
+      b.shelf += n * TW.shelfOf(w.state);
+      b.cap += n * TW.shelfCap(w.state);
+      for (const h of w.state.heroes) {
+        const live = w.rt.live.get(h.id);
+        const st = live ? live.state : "off";
+        if (st === "questing" || st === "crashed" || st === "supervising") b.fighting += n;
+        else if (st === "waiting") b.waiting += n;
+        else {
+          if (st === "shipped") b.shipped += n;
+          if (TW.onDuty(w, h, live || null)) b.onDuty += n;
+          else b.campfire += n;
+        }
+      }
+    },
+  });
+  if (prev) daysOut.push({ day: daysOut.length + 1, lgtm: prev.lgtm, chests: prev.chests, rd: prev.rd, partial: true });
+  for (const b of hourly) for (const key of ["fighting", "waiting", "shipped", "onDuty", "campfire", "shelf", "cap"]) b[key] = b.n ? Math.round((10 * b[key]) / b.n) / 10 : 0;
+  if (world.rt.errors.length) throw new Error(`owner model: engine errors: ${world.rt.errors.join("; ")}`);
+  return { world, town: tw ? tw.done(world) : null, hourly, days: daysOut, ms: Math.round(performance.now() - t0), saves: townSaveBytes(world) };
+}
+
+/**
+ * The save with and without the town's own fields (docs/TOWN.md §8: herd.town with its day and the
+ * Digest's baseline, every hero's st.tw, a Hall of Fame entry's rank): {bytes, without, town} in
+ * UTF-8 bytes, both written from the same loaded copy of the world.
+ */
+export function townSaveBytes(world) {
+  const text = W.serialize(world);
+  const a = W.loadWorld(text, { nowMs: world.rt.nowMs }).world;
+  const withTown = W.serialize(a);
+  delete a.state.herd.town;
+  for (const h of a.state.heroes) if (h.st) delete h.st.tw;
+  for (const e of a.state.herd.fame || []) if (Array.isArray(e) && e.length > 4) e.length = 4;
+  const without = W.serialize(a);
+  const size = (t) => Buffer.byteLength(t, "utf8");
+  return { bytes: size(withTown), without: size(without), town: size(withTown) - size(without) };
+}
+
+/** --persona big's gates (docs/TOWN.md §6.3): the town's share of all XP and its own save bytes. */
+export const OWNER_GATES = { share: 0.04, townBytes: 0.8 * 1024 };
+
+// ---------------------------------------------------------------------------------------------
+// The town's gates (docs/TOWN.md §6.3)
+// ---------------------------------------------------------------------------------------------
+
+/** Town gates: the share of all XP (personas), the mean Lv 20-100 hours shift against --no-town. */
+export const TOWN_GATES = { share: 0.03, meanShift: -0.06 };
+const LEVEL_KEYS = ["L20", "L30", "L50", "L60", "L90", "L100"];
+
+/**
+ * The town's verdicts for one persona and seed: res (with the town) against base (the same seed
+ * without it). {share, shareOk, left: [milestones within ±15% without the town and off with it],
+ * worse: [milestones off either way, further off with the town], shift (mean of the Lv 20-100
+ * hours' relative change, null when none compare), shiftOk, bad (failed gates)}.
+ */
+export function townGates(id, res, base) {
+  const out = { share: res.town ? res.town.share : 0, shareOk: true, left: [], worse: [], shift: null, shiftOk: true, bad: 0 };
+  out.shareOk = out.share <= TOWN_GATES.share;
+  for (const k of ORDER) {
+    const d = DESIGN[id][k];
+    if (!d) continue;
+    const skip = (r) => !r.events[k] && r.days < d[0];
+    if (skip(res) || skip(base)) continue;
+    const c0 = compare(k, d, base.events[k]);
+    const c1 = compare(k, d, res.events[k]);
+    if (c0.ok && !c1.ok) out.left.push(k);
+    else if (!c0.ok && !c1.ok && Math.abs(c1.dev) > Math.abs(c0.dev)) out.worse.push(k);
+  }
+  let sum = 0;
+  let n = 0;
+  for (const k of LEVEL_KEYS) {
+    const a = base.events[k];
+    const b = res.events[k];
+    if (a && b && a.hours > 0) { sum += b.hours / a.hours - 1; n++; }
+  }
+  if (n) out.shift = sum / n;
+  out.shiftOk = out.shift == null || out.shift >= TOWN_GATES.meanShift;
+  out.bad = (out.shareOk ? 0 : 1) + out.left.length + out.worse.length + (out.shiftOk ? 0 : 1);
+  return out;
+}
+
+const pct = (x, d = 1) => `${(100 * x).toFixed(d)}%`;
+const signPct = (x) => `${x >= 0 ? "+" : "\u2212"}${Math.abs(100 * x).toFixed(1)}%`;
+
+/** The persona's "Localhost:" line (docs/TOWN.md §6.3). */
+export function townLine(t) {
+  const all = t.xp.kill + t.xp.chest + t.xp.boss + t.xp.review + t.xp.lgtm || 1;
+  const ranks = t.ranks.map((n, i) => (n && i > 0 ? `${TOWN_RANKS[i]} \u00D7${n}` : null)).filter(Boolean);
+  return `Localhost: ${pct(t.share, 2)} of XP (kills ${pct(t.xp.kill / all)} · chests ${pct(t.xp.chest / all)} · bosses and reviews ${pct((t.xp.boss + t.xp.review) / all)}) · LGTM coverage ${pct(t.coverage, 0)} (${t.lgtm} of ${t.chests} chests) · Review Desk ${t.rd} (${fmtNum(t.rdGold)} gold) · ranks ${ranks.length ? ranks.join(", ") : "none yet"} · Uptime ${t.uptime}`;
+}
+
+function gateLine(g) {
+  const ms = g.left.length || g.worse.length
+    ? `OFF: ${g.left.map((k) => `${k} leaves ±15%`).concat(g.worse.map((k) => `${k} further off`)).join(", ")}`
+    : "none leaves ±15% ok";
+  return `town gates: share ${pct(g.share, 2)} ≤ ${pct(TOWN_GATES.share, 0)} ${g.shareOk ? "ok" : "OFF"} · milestones ${ms} · Lv 20-100 hours ${g.shift == null ? "n/a" : signPct(g.shift)} vs --no-town (no more than ${pct(-TOWN_GATES.meanShift, 0)} earlier) ${g.shiftOk ? "ok" : "OFF"}`;
+}
+
+// ---------------------------------------------------------------------------------------------
 // The reference model (tools/reference-sim/pacing4.py)
 // ---------------------------------------------------------------------------------------------
 
@@ -520,10 +797,11 @@ function fmtH(h) {
   return h < 1.5 ? `${Math.round(h * 60)} min` : `${Math.round(h * 10) / 10} h`;
 }
 
-function table(id, res, ref) {
+function table(id, res, ref, base) {
   const design = DESIGN[id];
   const rows = [];
   let bad = 0;
+  const devText = (c) => (c && Number.isFinite(c.dev) ? `${c.dev >= 0 ? "+" : ""}${Math.round(c.dev * 100)}%${c.unit === "d" ? " d" : ""}` : "");
   for (const k of ORDER) {
     if (!design[k] && !res.events[k]) continue;
     const d = design[k];
@@ -531,14 +809,21 @@ function table(id, res, ref) {
     const r = ref && ref[id] ? ref[id][k] : null;
     const c = compare(k, d, g);
     if (c && !c.ok && !(c.missing && res.days < (d ? d[0] : 0))) bad++;
-    rows.push([
+    const row = [
       k.replace(/^L/, "Lv ").replace(/^B/, "Boss "),
       d ? `day ${d[0]}${d[1] != null ? ` (${fmtH(d[1])})` : ""}` : "",
       r ? `day ${r.day} (${fmtH(r.hours)})` : "",
       g ? `day ${g.day} (${fmtH(g.hours)})` : res.days < (d ? d[0] : Infinity) ? "(not simulated)" : "not reached",
-      c && Number.isFinite(c.dev) ? `${c.dev >= 0 ? "+" : ""}${Math.round(c.dev * 100)}%${c.unit === "d" ? " d" : ""}` : "",
+      devText(c),
       c ? (c.ok ? "ok" : c.missing && res.days < d[0] ? "" : "OFF") : "",
-    ]);
+    ];
+    if (base) {
+      // the town's baseline: the same seed without the town (docs/TOWN.md §6.3)
+      const b = base.events[k];
+      const cb = compare(k, d, b);
+      row.push(b ? `day ${b.day} (${fmtH(b.hours)})` : base.days < (d ? d[0] : Infinity) ? "(not simulated)" : "not reached", devText(cb));
+    }
+    rows.push(row);
   }
   return { rows, bad };
 }
@@ -557,10 +842,18 @@ function printTable(title, head, rows) {
 // ---------------------------------------------------------------------------------------------
 
 class UsageError extends Error {}
-const USAGE = "usage: node tools/pacing-sim.mjs [--persona casual|solo|typical|heavy|bot|all] [--days N] [--long] [--quick] [--json] [--no-ref] [--seed N] [--sweep]";
+const USAGE = "usage: node tools/pacing-sim.mjs [--persona casual|solo|typical|heavy|bot|all|big] [--days N] [--long] [--quick] [--json] [--no-ref] [--seed N] [--seeds 1-4] [--no-town] [--sweep]";
+
+function parseSeeds(v) {
+  const m = /^(\d+)-(\d+)$/.exec(String(v || ""));
+  const list = m ? [] : String(v || "").split(",").map(Number);
+  if (m) for (let n = Number(m[1]); n <= Number(m[2]); n++) list.push(n);
+  if (!list.length || list.some((n) => !Number.isInteger(n) || n < 1)) throw new UsageError("--seeds needs a range (1-4) or a list (1,2,3,4)");
+  return list;
+}
 
 function parseArgs(argv) {
-  const o = { persona: "all", days: null, long: false, quick: false, json: false, ref: true, seed: 1, sweep: false };
+  const o = { persona: "all", days: null, long: false, quick: false, json: false, ref: true, seed: 1, sweep: false, town: true, seeds: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--persona") o.persona = argv[++i];
@@ -570,54 +863,85 @@ function parseArgs(argv) {
     else if (a === "--json") o.json = true;
     else if (a === "--no-ref") o.ref = false;
     else if (a === "--seed") o.seed = Number(argv[++i]);
+    else if (a === "--seeds") o.seeds = parseSeeds(argv[++i]);
+    else if (a === "--no-town") o.town = false;
     else if (a === "--sweep") o.sweep = true;
     else throw new UsageError(`unknown argument ${a}`);
   }
-  if (o.persona !== "all" && o.persona !== "bot" && !Object.prototype.hasOwnProperty.call(PERSONAS, o.persona)) throw new UsageError(`unknown persona ${o.persona}`);
+  if (o.persona !== "all" && o.persona !== "bot" && o.persona !== "big" && !Object.prototype.hasOwnProperty.call(PERSONAS, o.persona)) throw new UsageError(`unknown persona ${o.persona}`);
   if (o.days != null && !(o.days > 0)) throw new UsageError("--days needs a positive number");
   if (!Number.isFinite(o.seed)) throw new UsageError("--seed needs a number");
   return o;
 }
 
-async function main() {
-  const o = parseArgs(process.argv.slice(2));
-  if (o.sweep) {
-    // every real map x class at on-level for a full hour, the D§5.2 reference kit and real
-    // autopilot gear (the typical persona's, harvestGear)
-    const rows = sweep({ kits: ["ref", "auto"], ticks: 3600, seed: o.seed });
-    if (o.json) console.log(JSON.stringify(rows, null, 1));
-    else printSweep(rows);
-    process.exitCode = sweepMisses(rows).length ? 1 : 0;
+// --persona big (docs/TOWN.md §6.3.6): the owner model, informational, with its two gates
+function runOwner(o) {
+  const days = o.days || 7;
+  const r = simOwner(days);
+  const t = r.town;
+  const g = t ? { share: t.share, shareOk: t.share <= OWNER_GATES.share, townBytes: r.saves.town, bytesOk: r.saves.town <= OWNER_GATES.townBytes } : null;
+  const bad = g ? (g.shareOk ? 0 : 1) + (g.bytesOk ? 0 : 1) : 0;
+  if (o.json) {
+    console.log(JSON.stringify({ owner: { days, ms: r.ms, town: t, hourly: r.hourly, coverage: r.days, saves: r.saves, gates: g, levels: r.world.state.heroes.map((h) => h.L) }, bad }, null, 1));
+    process.exitCode = bad ? 1 : 0;
     return;
   }
-  const ids = o.persona === "all" ? Object.keys(PERSONAS) : o.persona === "bot" ? [] : [o.persona];
-  for (const id of ids) if (!PERSONAS[id]) throw new Error(`unknown persona ${id}`);
-  const ref = o.ref ? referenceModel() : null;
-  if (o.ref && !ref && !o.json) console.log("(python3 not available: reference model column left empty)");
+  const heroes = r.world.state.heroes;
+  console.log(`\n== The owner model (docs/TOWN.md Appendix A): 32 agents in 25 spaces, herdr open — ${days} day(s) simulated in ${(r.ms / 1000).toFixed(1)} s`);
+  console.log(`   roster ${heroes.length} heroes, Lv ${Math.min(...heroes.map((h) => h.L))}-${Math.max(...heroes.map((h) => h.L))} · zone ${r.world.state.herd.zone} · buildings ${r.world.state.herd.bld.join(",")}`);
+  if (t) {
+    printTable(`   on duty by hour, day ${days} (averages over the hour)`, ["hour", "fighting", "waiting", "shipped", "on duty", "campfire", "LGTM shelf"],
+      r.hourly.map((b) => [`${String(b.hour).padStart(2, "0")}:00`, b.fighting, b.waiting, b.shipped, b.onDuty, b.campfire, `${b.shelf} / ${b.cap}`]));
+    console.log(`\n   coverage by game day: ${r.days.map((d) => `day ${d.day} ${d.lgtm}/${d.chests} (${d.chests ? Math.round((100 * d.lgtm) / d.chests) : 0}%, desk ${d.rd})${d.partial ? " so far" : ""}`).join(" · ")}`);
+    console.log(`   ${townLine(t)}`);
+  }
+  console.log(`   save ${r.saves.bytes} B, without the town's fields ${r.saves.without} B: the town's own ${r.saves.town} B`);
+  if (g) console.log(`   owner gates: town share ${pct(g.share, 2)} ≤ ${pct(OWNER_GATES.share, 0)} ${g.shareOk ? "ok" : "OFF"} · the town's save bytes ${g.townBytes} ≤ ${OWNER_GATES.townBytes} ${g.bytesOk ? "ok" : "OFF"}`);
+  process.exitCode = bad ? 1 : 0;
+}
+
+// One seed: every persona of `ids` (with the town: and its baseline without it), then the bot.
+function runSeed(o, seed, ids, ref, summary) {
   const out = { personas: {}, bot: null };
   let bad = 0;
+  const town = T.town.on !== false;
+  const multi = !!o.seeds;
   for (const id of ids) {
     const p = PERSONAS[id];
     const days = o.quick ? 1 : o.days || p.days;
-    const res = simPersona(p, { days, seed: o.seed, until: ["B9", "L100"] });
+    const res = simPersona(p, { days, seed, until: ["B9", "L100"] });
+    // the town's baseline (docs/TOWN.md §6.3): the same seed without the town
+    const base = town ? simPersona(p, { days, seed, until: ["B9", "L100"], town: false }) : null;
     // the verdicts count in every output mode (--json too), so the exit code always tells
-    const t = table(id, res, ref);
-    bad += t.bad;
+    const t = table(id, res, ref, base);
+    const gates = base ? townGates(id, res, base) : null;
+    // with the town, a milestone off D§12.1 counts when it is off only with the town or further
+    // off than without it (a seed that already misses must not miss by more); the town's own
+    // gates (share, mean shift) add to it
+    bad += gates ? gates.bad : t.bad;
     out.personas[id] = {
-      events: res.events, days: res.days, ticks: res.ticks, ms: res.ms, final: res.final, bad: t.bad,
+      events: res.events, days: res.days, ticks: res.ticks, ms: res.ms, final: res.final, bad: gates ? gates.bad : t.bad,
       verdicts: t.rows.map((r) => ({ milestone: r[0], design: r[1], engine: r[3], dev: r[4], verdict: r[5] || null })),
     };
+    if (gates) Object.assign(out.personas[id], { town: res.town, gates, base: { events: base.events, days: base.days, ms: base.ms, final: base.final, offs: t.bad } });
+    if (gates && summary) summary.push({ id, seed, res, base, gates, offTown: t.rows.filter((r) => r[5] === "OFF").length });
     if (!o.json) {
+      const head = ["milestone", "design D§12.1", "pacing4.py", "real engine", "dev", ""];
+      if (base) head.push("no town", "dev");
       printTable(
-        `== ${p.name}: ${p.agents} agent(s) x ${p.hours} h/day, ${p.taskMin}-min tasks — ${res.days} day(s) simulated in ${(res.ms / 1000).toFixed(1)} s (${res.ticks} ticks)`,
-        ["milestone", "design D§12.1", "pacing4.py", "real engine", "dev", ""], t.rows,
+        `== ${p.name}: ${p.agents} agent(s) x ${p.hours} h/day, ${p.taskMin}-min tasks — ${res.days} day(s) simulated in ${(res.ms / 1000).toFixed(1)} s (${res.ticks} ticks)${multi ? ` · seed ${seed}` : ""}`,
+        head, t.rows,
       );
       console.log(`   final: Lv ${res.final.levels.join(", ")} · zone ${res.final.zone} · release ${res.final.rel} · working h/hero ${res.final.wh.join(", ")} · save ${res.final.saveBytes} B`);
+      if (gates) {
+        console.log(`   ${townLine(res.town)}`);
+        console.log(`   ${gateLine(gates)}${t.bad && !(gates.left.length + gates.worse.length) ? ` (${t.bad} off D§12.1 without the town too, no further off)` : ""} · without the town: save ${base.final.saveBytes} B, ${(base.ms / 1000).toFixed(1)} s`);
+      }
     }
   }
   if (o.persona === "all" || o.persona === "bot") {
     const want = o.quick ? [1] : o.long ? [1, 7, 30, 90] : [1, 7, 30];
-    const res = simBot(Math.max(...want), { seed: o.seed });
+    const res = simBot(Math.max(...want), { seed });
     const rows = want.map((d) => {
       const L = res.levels[d];
       const D = BOT_DESIGN[d];
@@ -627,11 +951,65 @@ async function main() {
     });
     out.bot = { levels: res.levels, ms: res.ms, verdicts: want.map((d, i) => ({ day: d, design: BOT_DESIGN[d], engine: res.levels[d], verdict: rows[i][4] })) };
     if (!o.json) {
-      printTable(`== Bot (D§12.2): always working, never seen — ${(res.ms / 1000).toFixed(1)} s`, ["when", "design", "pacing4.py", "real engine", ""], rows);
+      printTable(`== Bot (D§12.2): always working, never seen — ${(res.ms / 1000).toFixed(1)} s${multi ? ` · seed ${seed}` : ""}`, ["when", "design", "pacing4.py", "real engine", ""], rows);
     }
   }
   out.bad = bad;
-  if (o.json) console.log(JSON.stringify(out, null, 1));
+  return out;
+}
+
+// The town's summary over the seeds run (docs/BALANCE.md §14)
+function printSummary(summary) {
+  const rows = summary.map(({ id, seed, res, base, gates, offTown }) => {
+    const t = res.town;
+    // the worst of the milestones D§12.1 gives hours for (the bosses after day 1 compare by day, with
+    // a day of slack either way)
+    let worst = null;
+    for (const k of ORDER) {
+      const c = compare(k, DESIGN[id][k], res.events[k]);
+      if (c && c.unit === "h" && Number.isFinite(c.dev) && (!worst || Math.abs(c.dev) > Math.abs(worst.dev))) worst = { k, dev: c.dev, unit: c.unit, base: compare(k, DESIGN[id][k], base.events[k]) };
+    }
+    const offBase = ORDER.filter((k) => { const c = compare(k, DESIGN[id][k], base.events[k]); return c && !c.ok && !(c.missing && base.days < DESIGN[id][k][0]); }).length;
+    const dv = (c) => (c && Number.isFinite(c.dev) ? `${c.dev >= 0 ? "+" : ""}${(100 * c.dev).toFixed(1)}%${c.unit === "d" ? " d" : ""}` : "n/a");
+    return [
+      PERSONAS[id].name, seed, pct(t.share, 2), pct(t.coverage, 0), `${t.rd} (${fmtNum(t.rdGold)})`,
+      t.ranks.map((n, i) => (n && i ? `${TOWN_RANKS[i].slice(0, 4)} ${n}` : "")).filter(Boolean).join(" ") || "-", t.uptime,
+      gates.shift == null ? "n/a" : signPct(gates.shift),
+      worst ? `${worst.k} ${dv(worst)} (${dv(worst.base)})` : "",
+      `${offTown} (${offBase})`, gates.bad ? "OFF" : "ok",
+    ];
+  });
+  printTable("== Localhost over the seeds (docs/BALANCE.md §14): with the town against the same seed without it",
+    ["persona", "seed", "town share", "coverage", "Review Desk (gold)", "ranks", "uptime", "Lv 20-100 h", "worst hours milestone (no town)", "off (no town)", "gates"], rows);
+}
+
+async function main() {
+  const o = parseArgs(process.argv.slice(2));
+  // the build before the town (docs/TOWN.md §6.3): no duty, no buys, no bonuses
+  if (!o.town) T.town.on = false;
+  if (o.sweep) {
+    // every real map x class at on-level for a full hour, the D§5.2 reference kit and real
+    // autopilot gear (the typical persona's, harvestGear)
+    const rows = sweep({ kits: ["ref", "auto"], ticks: 3600, seed: o.seed });
+    if (o.json) console.log(JSON.stringify(rows, null, 1));
+    else printSweep(rows);
+    process.exitCode = sweepMisses(rows).length ? 1 : 0;
+    return;
+  }
+  if (o.persona === "big") return runOwner(o);
+  const ids = o.persona === "all" ? Object.keys(PERSONAS) : o.persona === "bot" ? [] : [o.persona];
+  for (const id of ids) if (!PERSONAS[id]) throw new Error(`unknown persona ${id}`);
+  const ref = o.ref ? referenceModel() : null;
+  if (o.ref && !ref && !o.json) console.log("(python3 not available: reference model column left empty)");
+  const seeds = o.seeds || [o.seed];
+  const summary = [];
+  const runs = seeds.map((seed) => ({ seed, out: runSeed(o, seed, ids, ref, summary) }));
+  const bad = runs.reduce((n, r) => n + r.out.bad, 0);
+  if (!o.json && o.seeds && summary.length) printSummary(summary);
+  if (o.json) {
+    const out = o.seeds ? { seeds, runs: runs.map((r) => Object.assign({ seed: r.seed }, r.out)), bad } : runs[0].out;
+    console.log(JSON.stringify(out, null, 1));
+  } else if (T.town.on !== false && ids.length) console.log(bad ? `\n${bad} milestone(s) or town gate(s) off.` : `\nAll milestones within ${TOL * 100}% of the design; the town's gates hold.`);
   else console.log(bad ? `\n${bad} milestone(s) more than ${TOL * 100}% off the design.` : `\nAll milestones within ${TOL * 100}% of the design.`);
   process.exitCode = bad ? 1 : 0;
 }

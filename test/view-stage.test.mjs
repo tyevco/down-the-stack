@@ -549,7 +549,10 @@ test("overflow: the camp chip's tooltip names at most 12 heroes, most relevant f
   assert.equal(vm.overflow.count, folded.length);
   assert.ok(folded.length > 20, `${folded.length} at camp`);
   assert.ok(folded.some((id) => kind.get(id) === 0), "some waiting heroes are at camp");
-  const lines = vm.overflow.tooltip.split("\n");
+  const all = vm.overflow.tooltip.split("\n");
+  // (the Localhost chip's lines follow the heroes': this herd's autopilot opened the Review Desk)
+  const at = all.findIndex((l) => l.startsWith("Localhost: "));
+  const lines = at < 0 ? all : all.slice(0, at);
   assert.equal(lines[0], `At camp (${folded.length}):`);
   assert.equal(lines.length, 1 + 12 + 1, vm.overflow.tooltip);
   // the twelve named: most relevant first
@@ -560,7 +563,8 @@ test("overflow: the camp chip's tooltip names at most 12 heroes, most relevant f
   assert.equal(ranks.filter((r) => r === 0).length, Math.min(12, waitingAtCamp), "every waiting hero at camp is named first");
   for (const l of lines.slice(1, 13)) {
     const r = kind.get(byName.get(l.split(" · ")[0]));
-    assert.match(l, r === 0 ? / · waiting for you$/ : r === 1 ? / · chest waiting$/ : r === 2 ? / · questing$/ : / · resting$/, l);
+    // (a resting hero on duty in Localhost says where after its own word: " · at the Review Desk")
+    assert.match(l, r === 0 ? / · waiting for you$/ : r === 1 ? / · chest waiting( · at the Review Desk)?$/ : r === 2 ? / · questing$/ : / · resting( · at the Review Desk)?$/, l);
   }
   // the rest, counted by kind
   const rest = folded.filter((id) => !lines.slice(1, 13).some((l) => byName.get(l.split(" · ")[0]) === id));
@@ -570,10 +574,11 @@ test("overflow: the camp chip's tooltip names at most 12 heroes, most relevant f
   // the dots follow the same order: a waiting hero's amber comes first (the chip draws ten)
   assert.equal(vm.overflow.dots.length, folded.length);
   assert.equal(vm.overflow.dots[0], "#F2A93B");
-  // a small camp lists everyone, and no "more" line
+  // a small camp lists everyone, and no "more" line (then the late herd's Localhost lines)
   const late = stageView(world("late"), { width: 1200, height: 200, nowMs: NOW });
   const ll = late.overflow.tooltip.split("\n");
-  assert.equal(ll.length, 1 + late.overflow.count);
+  const town = ll.findIndex((l) => l.startsWith("Localhost: "));
+  assert.equal(town, 1 + late.overflow.count);
   assert.ok(!ll.some((l) => l.startsWith("…and")));
 });
 
@@ -1546,4 +1551,177 @@ test("header note: the hires of one tick (the 04:00 game day turn) are one note,
   for (let k = 0; k < 40 || (w.rt.notes.length && k < 400); k++) step(w, ref);
   hireAll(heroes.slice(0, 3));
   assert.equal(stageView(w, { width: 1600, height: 200 }).headerNote.text, `Hired 3 contractors: ${first(heroes[0].name)}, ${first(heroes[1].name)} and ${first(heroes[2].name)}`);
+});
+
+// ---------------------------------------------------------------------------------------------
+// (6) Localhost, the town (docs/TOWN.md round 1: "The Review Desk opens")
+// ---------------------------------------------------------------------------------------------
+
+const TOWN = await import("../mods/down-the-stack/game/town.js");
+const { seedTown } = await import("./helpers/town.mjs");
+const { fmtNum } = await import("../mods/down-the-stack/game/formulas.js");
+
+/** The world's VM after a change the memo cannot see (rt.version moves it on). */
+const vmOf = (w, width = 1200, height = 200) => { w.rt.version++; return stageView(w, { width, height, nowMs: NOW }); };
+
+test("Localhost (TOWN.md §7.2): a resting hero on duty sits at the Review Desk in its campfire's spot; Interns, lapsed heroes and a closed town keep the campfire; the agent's own words stay", () => {
+  const w = fresh("idle");
+  const vm = vmOf(w);
+  const resting = vm.heroes.filter((h) => h.state === "resting");
+  assert.ok(resting.length >= 3, "the idle herd rests");
+  for (const h of resting) {
+    // the desk takes the campfire's place: no slot moves, the hero stays at 0.22w
+    assert.deepEqual(h.campfire, { x: Math.round((h.slot.x + 0.08 * h.slot.w) * 10) / 10, y: 160, station: "review_desk" }, h.key);
+    assert.equal(h.x, Math.round((h.slot.x + 0.22 * h.slot.w) * 10) / 10);
+    // its own status first: the face, the dusk room, "Resting 14m", the Fresh Eyes tag
+    assert.equal(h.face, "-_-");
+    assert.equal(h.tooltip.split("\n")[2].split(" ")[0], "Resting");
+    if (h.tag) assert.match(h.tag.text, /^Fresh Eyes /);
+    assert.match(h.tooltip, /\nAt the Review Desk · (Drive-by|Contributor|Committer|Maintainer|Core) reviewer/);
+    assert.ok(!/reviewing/i.test(h.tooltip), "never an agent-status word for the job");
+  }
+  // a shipped hero keeps its chest and no prop
+  for (const h of vm.heroes.filter((x) => x.state === "shipped")) assert.equal(h.campfire, null);
+  // rule 3 lapsed (no chest of its seen today or yesterday): the campfire, and the tooltip says why
+  const [a, b] = resting;
+  const ha = w.state.heroes.find((x) => x.id === a.heroId);
+  ha.st.tw[1] = w.state.herd.day - 2;
+  // an Intern (Lv 1-9) never holds a job
+  const hb = w.state.heroes.find((x) => x.id === b.heroId);
+  hb.L = 6;
+  const v2 = vmOf(w);
+  const a2 = v2.heroes.find((x) => x.heroId === a.heroId);
+  const b2 = v2.heroes.find((x) => x.heroId === b.heroId);
+  assert.equal(a2.campfire.station, "campfire");
+  assert.match(a2.tooltip, /\nBack on duty after you see its next chest/);
+  assert.equal(b2.campfire.station, "campfire");
+  assert.ok(!/Review Desk/.test(b2.tooltip), b2.tooltip);
+  // no Review Desk yet (a save from before the town, the town at zero): every hero as before
+  w.state.herd.town.rd = 0;
+  const v3 = vmOf(w);
+  for (const h of v3.heroes) {
+    if (h.campfire) assert.equal(h.campfire.station, "campfire");
+    assert.ok(!/Review Desk|LGTM|Localhost/.test(h.tooltip), h.tooltip);
+  }
+  assert.ok(!/Review Desk|LGTM/.test(JSON.stringify(v3)));
+});
+
+test("Localhost chip (TOWN.md §7.2): today's 'LGTM ×n', the label it folds into, the town's tooltip lines (vendor/ and the last approved title); a closed town keeps the camp chip", () => {
+  const w = fresh("late");
+  const vm = vmOf(w);
+  const o = vm.overflow;
+  assert.ok(o, "the late herd folds some heroes");
+  const today = w.state.herd.town.t[0];
+  assert.deepEqual(o.town, { text: `LGTM ×${fmtNum(today)}`, label: `+${o.count} · LGTM ×${fmtNum(today)}` });
+  const lines = o.tooltip.split("\n");
+  const at = lines.findIndex((l) => l.startsWith("Localhost: "));
+  assert.equal(at, 1 + o.count, "the heroes first, then the town");
+  assert.match(lines[at], /^Localhost: \d+ on duty \(Review Desk \d+\) · LGTM \d+\/70$/);
+  const last = TOWN.lastTitles(w)[0];
+  assert.equal(lines[at + 1], `Last LGTM: “${last.title}” (${last.name.split(" ")[0]}), by ${last.byName.split(" ")[0]} · ${fmtNum(today)} LGTMs today (${TOWN.townInfo(w).today.pct}% of chests) · 99% uptime`);
+  // a folded hero on duty says where after its own word; a working one never does
+  for (const l of lines.slice(1, 1 + o.count)) {
+    if (/ · (questing|supervising|rebooting|waiting for you)/.test(l)) assert.ok(!/Review Desk/.test(l), l);
+  }
+  assert.ok(lines.slice(1, 1 + o.count).some((l) => / · resting · at the Review Desk$/.test(l)));
+  // (Contractors waiting in vendor/: the next test's 40-agent herd)
+  // a closed town (level 0): the camp chip exactly as before
+  w.state.herd.town.rd = 0;
+  const v0 = vmOf(w);
+  assert.equal(v0.overflow.town, null);
+  assert.ok(!v0.overflow.tooltip.includes("Localhost"));
+  assert.ok(!/at the Review Desk/.test(v0.overflow.tooltip));
+});
+
+test("Localhost chip: Contractors waiting in vendor/ and when the next is hired (TOWN.md §2.4)", async () => {
+  const G = {
+    Demo: await import("../mods/down-the-stack/game/demo.js"), W: await import("../mods/down-the-stack/game/world.js"),
+    liveHeroes: (await import("../mods/down-the-stack/game/agents.js")).liveHeroes, ...(await import("../mods/down-the-stack/game/herd.js")),
+  };
+  const { world: w } = stressWorld(G, NOW, 40);
+  seedTown(w, { rd: 5, shelf: 12, today: 88, chests: 140, used: 700 });
+  const vm = vmOf(w, 1600);
+  const lines = vm.overflow.tooltip.split("\n");
+  const contractors = [...w.rt.live.keys()].filter((id) => id < 0).length + (w.state.herd.contractors || []).length;
+  assert.ok(contractors > 0, "the 40-agent herd has Contractors");
+  assert.match(lines.at(-1), new RegExp(`^vendor/: ${contractors} contractors · (next hired|the next joins)`));
+  assert.equal(vm.overflow.town.text, "LGTM ×88");
+});
+
+test("an LGTM'd chest's coin float reads '+N · LGTM' (one effect, rising from the chest); a chest with an empty shelf, a coin", () => {
+  for (const shelf of [12.5, 0]) {
+    const w = fresh("idle");
+    w.state.herd.town.s[0] = shelf;
+    stageView(w, { width: 1200, height: 200, nowMs: NOW });
+    const h = w.state.heroes.find((x) => x.pend && x.pend.length);
+    assert.ok(command(w, "claimChest", { heroId: h.id }, NOW + 10).ok);
+    const vm = stageView(w, { width: 1200, height: 200, nowMs: NOW + 10 });
+    const coins = vm.fx.filter((f) => f.kind === "coin");
+    assert.equal(coins.length, 1, "one coin effect for the opening");
+    const f = coins[0];
+    const chest = vm.chests.find((c) => c.heroId === h.id);
+    if (shelf > 0) {
+      assert.match(f.text, /^\+\d[\d.]*k? · LGTM$/);
+      assert.equal(f.color, "#C89B3C");
+      // its pill starts at the chest's left edge (clear of the hero's face) and rises
+      const hero = vm.heroes.find((x) => x.heroId === h.id);
+      assert.ok(f.x - (f.text.length * 6 + 8) / 2 >= hero.x + 20 - 0.5, `float at ${f.x}, hero ${hero.x}`);
+      assert.ok(chest && chest.open, "the chest shows its lid");
+      assert.deepEqual([f.dx, f.dy], [0, -24]);
+    } else {
+      assert.equal(f.text, "", "no LGTM: a coin that flies to its hero");
+    }
+  }
+});
+
+test("budget (Localhost): 30 and 60 heroes with desks in the resting slots and the chip's LGTM line hold ~400 elements and ~150 animated from 360 to 4000 px", async (t) => {
+  const G = {
+    Demo: await import("../mods/down-the-stack/game/demo.js"), W: await import("../mods/down-the-stack/game/world.js"),
+    liveHeroes: (await import("../mods/down-the-stack/game/agents.js")).liveHeroes, ...(await import("../mods/down-the-stack/game/herd.js")),
+  };
+  const { findHero } = await import("../mods/down-the-stack/game/combat.js");
+  const pend = () => [{ min: 30, fmin: 0, title: "Bump deps", at: NOW - 60000, sealFactor: 1 }, { min: 12, fmin: 0, title: "Fix it", at: NOW - 30000, sealFactor: 1 }];
+  // the owner's afternoon: a third of the herd rests at its desk, the rest works, waits or holds chests
+  const RECIPES = {
+    desks: (w, id, live, k) => { if (k % 3 === 0) live.state = "resting"; else if (k % 3 === 1) findHero(w, id).pend = pend(); },
+    "desks+blocked+chests": (w, id, live, k) => {
+      if (k % 2 === 0) live.state = "resting";
+      else { live.state = "waiting"; live.bubbleShown = true; live.blockedSince = w.rt.tick - 300; findHero(w, id).pend = pend(); }
+    },
+  };
+  let desks = 0, lines = 0, folds = 0;
+  for (const [n, boss] of [[30, false], [60, false], [60, true]]) {
+    for (const [name, recipe] of Object.entries(RECIPES)) {
+      const { world: w } = stressWorld(G, NOW, n, { boss });
+      seedTown(w, { rd: 10, shelf: 37.5, today: 212, chests: 340, used: 9000, jobXp: (h, i) => [0, 30, 120, 400, 1200][i % 5] });
+      const fighters = new Set(w.rt.fights.flatMap((f) => f.heroIds ?? []));
+      let k = 0;
+      for (const [id, live] of w.rt.live) if (!fighters.has(id)) recipe(w, id, live, k++);
+      w.rt.version++;
+      let worst = { el: 0, an: 0 };
+      for (const width of [360, 1600, 2400, ...WIDE]) {
+        for (const height of [200, 120]) {
+          const vm = stageView(w, { width, height, nowMs: NOW });
+          const where = `${n}${boss ? "+boss" : ""} ${name} @${width}×${height}`;
+          const { mod } = await mountStage(vm, { width, height });
+          assert.deepEqual(problems(mod), [], where);
+          const an = animatedIn(mod);
+          assert.ok(mod.stats.elements <= 400, `${where}: ${mod.stats.elements} elements`);
+          assert.ok(an <= 150, `${where}: ${an} animated`);
+          statusKept(mod, vm, where);
+          const d = mod.findAll((x) => x.src === "mods/down-the-stack/art/fx/desk.svg").length;
+          desks += d;
+          if (vm.overflow && vm.overflow.town) {
+            if (mod.node("overflow/lgtm")) lines++;
+            else { folds++; assert.ok(mod.text().includes(vm.overflow.town.label), `${where}: the folded label`); }
+          }
+          if (mod.stats.elements > worst.el) worst = { el: mod.stats.elements, an, at: `${width}×${height}` };
+        }
+      }
+      t.diagnostic(`${n}${boss ? " + boss" : ""} ${name}: max ${worst.el} elements (${worst.an} animated) at ${worst.at}`);
+    }
+  }
+  assert.ok(desks > 50, `${desks} desks drawn`);
+  assert.ok(lines > 0, "the chip's LGTM line drawn");
+  t.diagnostic(`desks drawn ${desks}, chip lines ${lines}, folded labels ${folds}`);
 });

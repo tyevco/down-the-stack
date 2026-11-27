@@ -1,5 +1,9 @@
 # Localhost, the town (issue #1): final design
 
+**Status: round 1 ("The Review Desk opens", section 12) is built** (2026-11-27; DESIGN D§10.8 is
+the rule as built, section 15 lists where the build differs from this design and why). Rounds 2
+and 3 are not built yet.
+
 Design version 1.0 (decisions in section 13 made) for GitHub issue #1 ("Localhost jobs: heroes not fighting work stations in
 town"). Start point: the **"glance"** design, which both judges ranked first (player lens 47,
 engineering lens 48, against 35–40 for the others). Grafted from **"agents"**: role words with a
@@ -617,7 +621,10 @@ The same size as the Map card (about 15 elements):
 - **The station is derived** (3.3): 0 bytes, no migration.
 - **The Review Desk's level is in `x.town`, not `bld`**: `bld` keeps 6 entries, `BUILDINGS` and
   `gen` are unchanged, and an older build keeps the whole town when it loads and saves (every new
-  field is an extras key, as the round-4b `look`). **SAVE_VERSION stays 1.**
+  field is an extras key, as the round-4b `look`). **SAVE_VERSION stays 1.** As built (§15), so that
+  an older build's saves on later days keep the town's meaning too, `x.town` also holds `d` (the day
+  it was written on, which the credits' `d` count back from) and `dg` (the Digest's baseline, in
+  place of `herd.digestSnap.tw`).
 - Every save in `test/fixtures/saves` loads with the town at zero (no duty, empty shelves, Review
   Desk 0, job XP 0); a new fixture `test/fixtures/saves/r6-town.json` holds a town mid-day.
 - **Runtime only** (`world.rt`, never saved): the station cache, the last approved titles, the town
@@ -694,7 +701,8 @@ Targeted test files while working (`node --test test/town.test.mjs test/save.tes
 test/view-stage.test.mjs`); the full `npm test`, `npm run check`, `npm run qjs`, `npm run pacing`
 (seeds 1–4) and `npm run pacing -- --sweep` once at integration.
 
-**Round 1: "The Review Desk opens"** (the smallest round that is fun on its own).
+**Round 1: "The Review Desk opens"** (the smallest round that is fun on its own). **Built**
+(2026-11-27): everything below, with the differences listed in section 15.
 
 - **Engine:** `game/town.js` with the on-duty rule (2.1), the Review Desk (levels, demand-gated
   autopilot, manual buy), LGTMs (shelf, pro rata output, `takeLgtm` at ×1.10), job XP and ranks,
@@ -840,6 +848,37 @@ tested on the real names and documented with its "why".
 | E8 stacking outside the herd cap | 6.1 item 5: one ×1.10 on one chest; no per-hero buff |
 | E12 purity, determinism, tick cost | 9 |
 | E13 Contractors | 2.4: no jobs; slim record unchanged |
+
+---
+
+## 15. As built: round 1
+
+Round 1 is built as section 12 describes (DESIGN D§10.8; ARCHITECTURE A§3.2, A§3.4; numbers in
+docs/BALANCE.md §14; the defaults the spec left open in docs/DECISIONS.md "Town round 1"). Where
+the build differs from this design, and why:
+
+| Here | As built | Why |
+|---|---|---|
+| 2.6, 5.2: Casual and Solo stop at Review Desk 2, Typical at 4 | Casual and Solo stop at 3 (7,000 gold), Typical at 5 (31,000); Heavy reaches 10 | the overlay counted one chest a hero a tick and read the demand flags in any order; the engine counts every chest and needs the shelf full before it runs dry. Every gate holds (BALANCE §14.1) |
+| 6.2: the town is 1.1–1.5% of the personas' XP, 1.65% of the owner model's ten days | 1.18–1.58% (seeds 1–4, none of the 272 milestones off ±15%); the owner model 1.46% over its 7 days (`--persona big`) | measured in the engine itself instead of the overlay; the +10% owner decision stands, no town number moved |
+| 6.5: each hero is on duty for `min(gap, time until its rule 3 lapses)`, the output shared pro rata | the same, counted from the credit each hero held **when the gap began**, and the shelf's room shared **as ticking the gap would have shared it** (the heroes on duty while it filled) | a chest seen as the app comes back (reconcile runs before the settle) made a lapsed hero's gap count in full; and a lump split by possible hours gave different shares than staying open |
+| 8: `t: [today's LGTMs, flags]`, flags 1 and 2 | `t: [today's LGTMs, flags, today's chests opened with full value]`; flag 4 marks a wanted level for the game day after the demand check | the tab's "today 206 of 340 (61%)" needs the chest count (≤ 4 bytes); the demand check runs at the 04:00 turn and the buy on autopilot's pass, never during an offline settle |
+| 8, 9: "a hot reload hands the town over in `world.state`" | the world crosses a hot reload as save text, which rounds job XP and the shelf; the handover's `town` field carries the exact values, the last approved titles and the runtime maps (`town.handoverTown` / `takeTown`) | so a hot reload changes no outcome (a restart still rounds down, at most 1 job XP a hero and 0.1 LGTM) |
+| 7.2: the chip's props are desk, shelf, campfire | desk, campfire, desk | round 1 has no shelf (the Docs Library is round 2) |
+| 7.2: " · LGTM" appended to the coin float | the coin of an LGTM'd chest is drawn as one text float in coin brass, "+1.2k · LGTM", rising above the chest | the coin is a 6 px sprite with no text; the float is the same one element, so the budget holds |
+| 7.2: the spare-width scenery; 7.6: the Stats tab's "Chest" and "LGTM" split | not built | not in section 12's round 1; `live.tally.lgtmXp` already holds the bonus for the split |
+| 7.2: a resting hero's tooltip "At the Review Desk · …" | a shipped hero on duty, drawn by its chest in the field, says "On duty for the Review Desk while its chest waits · …" | it stands by its chest, not at a desk (gold still means done) |
+| 7.4: secondary text "resting · at the Review Desk" | the chip's hero lines say it; the sheet's header line keeps "resting · “Fix flaky auth test”" (its own word and its own last task) and puts the job on the line's tooltip ("At the Review Desk · Committer reviewer · …"); a hero not on duty reads "resting at the campfire" as before | the sheet quotes the agent's last task right after the status, so "resting · at the Review Desk · “Fix flaky auth test”" read as an idle `pr-review-*` terminal reviewing that task (must-avoid P3; the final critic) |
+| 8: `tw: [jobXp, d]`, `d` the game days since the credit | `d` counts back from the day the town was written on, `herd.x.town.d` (the save's own `day`, ≈ 10 B; written whenever the town is, and alone when only a credit is), not from the save's top-level `day`; when `d` is older than the save's `day` the town's game-day turn runs on load (`town.loadDay`) | an older build keeps the town and every `tw` as they were but moves `day` on: 9cd00cd re-saving a town save 5 game days later put every such hero back on duty, making job XP and LGTMs from idle time (§2.2, P10) |
+| 8: `herd.digestSnap.tw` | the Digest's baseline is `herd.x.town.dg` (a town save from before reads `digestSnap.tw` into it) | an older build's Digest writes `digestSnap` anew without `tw`, and the next Localhost card counted every lifetime LGTM as new ("1,446 chests LGTM'd"); in the town it is kept like the rest |
+| 7.5: the Review Desk card last in the grid | first, across both columns, above the six buildings' 3 × 2 grid; the town lines fixed at the top, the grid scrolling below | its Buy stays in view, and its name stays whole at 608 px (the 760 px dialog at zoom 1.25) without adding height |
+| 2.4, 12: `vendor/` lines in round 2 | built in round 1: the chip's tooltip and the tab's header say "vendor/: 2 contractors · next hired 04:00" | cheap and useful at once for the owner's Contractors |
+| 4: the Hall of Fame card keeps the rank ("Core reviewer") | the rank is saved in the entry and `herd.hallOfFame` returns `rank` and `jobTitle`; the card does not draw it yet | not in section 12's round 1 |
+| 6.3.7: the sweep and the bot print the same bytes with and without the town | they do; the sweep's real autopilot gear is harvested without the town | with the town the same seed rolls its drops at other moments, and the auto-kit sweep built from that gear moves as another seed's does (BALANCE §14.4) |
+
+Tested end to end through `main.js` (`test/town-e2e.test.mjs`): an owner-like day of 32 agents in
+the 25 spaces of 3.3, herdr closed overnight and opened in the morning, a hot reload and a
+Contractor promoted mid-day.
 
 ---
 

@@ -33,6 +33,8 @@ mods/down-the-stack/            THE MOD (copied verbatim into ~/.config/herdr-ap
     combat.js                   rooms, lanes, spawns, rotation, skill effects, traits, coffee, crash, kill rewards, fx emission
     boss.js                     encounters (9 bosses + 2 reviews), mechanic primitives, win estimate, wounds, lessons, suspend
     herd.js                     account systems: buildings, release train, bug tracker, trophies, badges, journal, digest, backlog
+    town.js                     Localhost, the town (docs/TOWN.md; Town round 1): the duty rule, LGTMs, the Review
+                                Desk, job ranks, Uptime, the offline settle and the views' town data
     autopilot.js                map choice + convergence, auto-equip sweep, auto-learn, polish, buildings, boss/review challenge
     world.js                    createWorld / loadWorld / serialize / tick / command (D§2.11 pipeline)
     save.js                     compact encode/decode, CRC32, migrations
@@ -110,7 +112,9 @@ screen.
      `handover(fileText, {unreadable})`. That host answers with its world as save text plus what the
      new build needs to decide (`continues`, `lastText`/`lastGood`/`ownTexts`, `ioBlocked`, `origin`,
      the save cue and the collapse countdown; the text is `serialize(world)`, so the live
-     Contractors cross a reload as their slim records, round 5, §3.2), unless it is still loading, retired, checking or
+     Contractors cross a reload as their slim records, round 5, §3.2; Town round 1: `town`, from
+     `town.handoverTown`, the last approved titles and the town's exact values behind the save's
+     rounding, which the new build puts back with `town.takeTown`), unless it is still loading, retired, checking or
      read-only. The new build then decides (`load()`):
      - **the old world goes on** (`loadedFrom: "reload"`, no rollback to the save) when the file
        is the one it continues, when the file cannot be read (the read error is carried over and
@@ -272,10 +276,16 @@ Hero  = { id, seat, sid, ord, name, cls, prov, L, xp, sp:[7], spFree, autoLearn,
           rev:[0|1, 0|1], eq:[Item|null ×6], pinMap:null|"2-2", fe, shift:{day, min},
           cups, hpFrac, sig:{tm:[...≤20 task minutes], blocks, workMin, subTasks, n},
           pend:[{min, fmin, title, at, sealFactor}], cd:{unblockedUntil, unblockedCdUntil, boss:{}},
-          addr, lastPane, lastTab, seenAt, st:{kills, tasks, seals, wh, dodges, healed}, rng,
+          addr, lastPane, lastTab, seenAt, st:{kills, tasks, seals, wh, dodges, healed, tw?}, rng,
           look? }   // round 4b: a promoted Contractor's hoodie tint (index into
                     // PALETTE.termlingTint), saved in the hero's extras ("x": {"look": n}) so an
                     // older build keeps it; heroes.lookOf reads it, else (|id| - 1) mod 8
+                    // st.tw (Town round 1, docs/TOWN.md §8): [jobXp, creditDay?] in memory, job XP
+                    // with its fraction and the absolute herd.day of the hero's last chest opened
+                    // with full value (town.markSeen); saved in the st row's extras as [jobXp
+                    // rounded down, d = save day - creditDay] with d only while 0 or 1, nothing for
+                    // a hero with neither; a Contractor carries it too (agents.promote keeps the
+                    // credit, job XP to 0), its slim record does not
 
 Herd  = { name, gold, snip, bld:[6], zone, quota:{[mapId]:kills}, meter, bank, seals, rel,
           boss:[9], bossKills:[9], fight:null|SuspendedFight, wounds:{}, lessons:{},
@@ -286,7 +296,19 @@ Herd  = { name, gold, snip, bld:[6], zone, quota:{[mapId]:kills}, meter, bank, s
           collapse countdown started, saved as "idle" only while set*/, notify:{boss,lts,principal}},
           log:[[at, kind, heroId, text, value, name?]...≤60-120], unseenUnrev /*round 4*/,
           nextUid, nextHeroId, rng, day, lastMs, tick,
-          contractors /*round 5*/ }
+          contractors /*round 5*/, town? /*Town round 1*/ }
+          // town (Town round 1, docs/TOWN.md §8; town.townState): {s:[lgtm, runbooks], rd /*Review
+          // Desk level*/, u:[lgtmUsed, runbooksUsed] /*lifetime*/, t:[today's LGTMs, flags, today's
+          // full-value chests while the desk is open], ru:[[heroId, rank]...] /*rank-ups since the
+          // Digest was read*/, dg:[lgtmUsed, runbooksUsed] /*at the last "Mark as read"*/}; flags
+          // town.FULL 1, DRY 2, WANT 4. Saved in herd.x ("town", save.js townCodec: the shelf to a
+          // tenth rounded down, nothing at all for a town at zero), so an older build keeps it; the
+          // Review Desk is not in bld. The written town starts with d, the game day it was written
+          // on (also written, alone, when only a hero's credit is): each hero's credit (st extras
+          // tw [jobXp, d]) counts back from it, so a save an older build moved on by game days
+          // keeps its credits lapsed, and world.loadWorld runs the town's skipped game-day turn
+          // (town.loadDay, decodeState's townDay). A fame entry is [name, cls, L, at, rank?] (the
+          // job rank, only when > 0)
           // journal kinds: ship, unrev (chests opened Unreviewed: text the task, value the count),
           // level, promo, drop, boss, retire, hire, hired (round 4: "Hired: <name> (was a
           // contractor)", value its level), leave, class, map, deprecate, badge
@@ -324,7 +346,15 @@ world.rt = {                // rebuilt from snapshots; never saved
                             // at the loaded records' highest, so a new Contractor never takes one's
   recWait,                  // round 5: Set<seq> of the loaded records not claimed yet: they hold
                             // their hires while the reconnect window is open (agents.reconnectOpen)
-  _restored                 // round 5: Contractors brought back from a record in this reconcile
+  _restored,                // round 5: Contractors brought back from a record in this reconcile
+  town                      // Town round 1 (town.js rtTown): {jobs: Map<heroId, {key, job}> the job
+                            // station cache (refreshStations, the 60-tick pass), owed: Map<heroId, n>
+                            // LGTMs made that no chest has taken yet (who approved the next one),
+                            // titles: the last approved [{title, heroId, name, byId, byName, at}]
+                            // newest first (≤ 5), prior: Map<heroId, {was, at}> the credit day a hero
+                            // held before its newest one and when that changed (settleOffline counts
+                            // the credit held when an offline gap began)}; handed over on a hot
+                            // reload (handoverTown / takeTown), empty after a restart
 }                           // a Contractor (rt.contractors) also carries since: when it arrived, its
                             // place in the hiring line (promoteContractors: longest-running first);
                             // a record keeps it, so a Contractor back from one keeps its place
@@ -350,7 +380,9 @@ Room  = { id, mapId, zone, heroIds:[...], spaceId }     // recomputed when membe
 Fight = { kind:"boss"|"review", bossIdx|reviewId, heroIds, parts:[{key,label,hp,maxHp,...}],
           phase, t, timer, enraged, mech:{...}, startedTick, banner }
 Fx    = { key:"fx:<tick>:<n>", bornTick, kind, heroId?, mobUid?, roomId?, text, value, rar?,
-          x?, y? }              // kinds in section 6.3; engine emits, view.js positions
+          x?, y?, lgtm? }       // kinds in section 6.3; engine emits, view.js positions; lgtm (Town
+                                // round 1): on a chest opening's "coin", how many of its chests took
+                                // an LGTM (only when ≥ 1): the view draws "+1.2k · LGTM"
 ```
 
 **Contractor records (round 5, owner decision; D§3.4, D§13.2).** A Contractor is not a roster hero,
@@ -388,7 +420,8 @@ Fields added during the build (all saved ones have defaults on load in `save.js`
 `herd.born` (the herd's first local day; `herd.herdAgeDays`, the Campfire gate), `herd.inbox` (chest
 items waiting to be offered, one per tick), `herd.digestSnap` and `herd.drops` (the D§10.7 digest
 baseline), `Mob.hitCt` (combat clock of the first landed hit: the swing timer starts there),
-`live.tally` (per-hero counters incl. `chestXp`, `bossXp`, `reviewXp`) and `rt.tzOffsetMin` (the last
+`live.tally` (per-hero counters incl. `chestXp`, `bossXp`, `reviewXp`; Town round 1: `lgtmXp`, the
+LGTM bonus, while `chestXp` stays the chests' own XP) and `rt.tzOffsetMin` (the last
 snapshot's time zone, for the views' dates). Why each exists: `docs/BALANCE.md`. For the D§11.15
 settings and notifications: `herd.cfg.autopilot` / `glow` / `collapse` / `collapsed` (above),
 `herd.notified` (`[local day, raised that day, last sequence number]`: the daily cap survives
@@ -473,6 +506,10 @@ export function skillValue(hero, slot) -> {def, rank, coef, cd, ...}  // rank-re
 export function reconcile(world, snapshot, ev) -> void   // bind/unbind, seq-gated status, forklings, contractors, seen
 export function stepStatus(world, hero, live, ev) -> void // per tick: tasks, 8 s close, chests, unblocked, flap, shift
 export function openChests(world, hero, {reason}, ev) -> void  // reason "unreviewed": one "unrev" journal line
+                                                          // Town round 1: each chest opened with full value calls
+                                                          // town.takeLgtm (×1.10 XP and gold with an LGTM on the
+                                                          // shelf; live.tally.lgtmXp; out.lgtm the count; the coin fx
+                                                          // gets lgtm: n) and town.markSeen (the duty rule's credit)
 export function questName(raw, who) -> string              // a task's name: telling title, glyph stripped, cutText to 40
 export function whyOf(world, hero, live) -> Why           // the why line's numbers; why.gap is the level gap as
                                                           // combat.kill applies it (none below ×1 in the Backlog)
@@ -573,9 +610,48 @@ export function logDrop(world, hero, item, ev, {roomId, milestone}) // notable d
                                                           // milestone unless milestone:false (a herd-first Keepsake
                                                           // while the boss toast names it)
 export function checkBadges(world, ev) ; export function bugTrackerKill(state, zone, elite)
+export function digest(state, sinceMs) -> {..., town}     // Town round 1: town.digestTown's Localhost line or null,
+                                                          // never counted in `empty` (no Herd dot for the town)
+export function digestMark(state, nowMs)                  // also town.markDigest: herd.town.dg, ru cleared
+export function hallOfFame(state) -> [{name, clsId, clsName, level, at, rank?, jobTitle?}]   // rank and jobTitle
+                                                          // (Town round 1) only on an entry with a job rank
 
 // autopilot.js
-export function autopilot(world, ev) -> void              // every 60 ticks and on level/gear change
+export function autopilot(world, ev) -> void              // every 60 ticks and on level/gear change; the 60-tick
+                                                          // pass also runs town.autoDesk (behind "Buildings", after
+                                                          // autoBuild, outside autoBuyPick) and town.refreshStations
+
+// town.js (Town round 1, docs/TOWN.md; pure: no RNG, no Date.now, no host calls; TUNING.town read
+// at call time, so --no-town's T.town.on = false is the build before the town)
+export const FULL = 1, DRY = 2, WANT = 4                  // herd.town.t[1] flags
+export function townOn() -> boolean ; export function townState(state, create = true) -> Town|null
+export function deskLevel(state) ; shelfCap(state) ; shelfOf(state) ; deskCost(level) ; nextDeskCost(state)
+export function rankOf(jobXp) -> 0..4 ; rankFactor(rank) ; jobXpOf(hero) ; creditDayOf(hero) ; seenDays(state, hero)
+export function markSeen(world, hero)                     // a chest opened with full value: credit for today (d = 0)
+export function jobStation(world, hero) -> {id, name, noun, reason, word, from}   // round 1: the Review Desk;
+                                                          // round 2 adds the override, role words and class here
+export function stationOf(world, hero) -> {id, name, noun, reason}   // the Campfire ("off", "contractor", "intern",
+                                                          // "closed", "unseen") or jobStation's; ignores the agent
+export function onDuty(world, hero, live?) -> boolean     // TOWN.md §2.1 exactly
+export function refreshStations(world) ; renameHero(world, oldId, newId)   // the 60-tick pass; agents.promote
+export function stepTown(world) -> number                 // world.stepOnce after rest: production, pro rata
+export function settleOffline(world, dtMs) -> {made, heroes}   // world.applyOffline after reconcile
+export function dayTurn(world)                            // the 04:00 turn, before reconcile: WANT, today's counters
+export function loadDay(world, townDay)                   // world.loadWorld: dayTurn once when the save's town was
+                                                          // written on an earlier day than the save (an older build)
+export function dayStartMs(day, tzOffsetMin) -> ms
+export function takeLgtm(world, hero, title) -> 0 | 0.10  // one per chest opened with full value, in opening order
+export function lastTitles(world) ; handoverTown(world) -> data ; takeTown(world, data)   // hot reload (host.js)
+export function buyDesk(world, ev) -> {ok, cost?, level?, error?} ; autoDesk(world, ev) -> level|null
+export function servedOf(state) ; uptime(sOrState) -> {s, step, label, next, prev, frac, unlock}
+export function markDigest(state) ; digestTown(state) -> {lgtm, runbooks, ranks, uptime, was, text}|null   // herd.town.dg
+export function fameRank(hero) ; jobTitle(rank, noun?) ; titleText(entry, by?)
+export function heroTown(world, hero, live?) -> {station, stationName, job, jobName, reason, onDuty, state, seen,
+       jobXp, rank, rankName, title, nextAt, made, last, line, status, tip}   // state: duty | working | waiting |
+                                                          // intern | contractor | closed | unseen | off | paused
+export function townInfo(world) -> {on, open, level, max, cost, canBuy, want, shelf:{n, exact, cap},
+       today:{lgtm, chests, pct}, bonusPct, used, uptime, onDuty, staff, maintainer, ranks, titles, chip, tips, rows}
+                                                          // the views' town data; neither view function writes the world
 
 // world.js
 export function createWorld({nowMs, seed}) -> World
@@ -584,12 +660,16 @@ export function loadWorld(text, {nowMs}) -> {world, warning:null|string}   // re
                                                           // Contractor ids from the paused fight, review Wounds and
                                                           // Lessons (rv<i>.<negative>) and inbox finders (round 4b);
                                                           // records rt.loadedLastMs; round 5: rt.contractorSeq from
-                                                          // the records, rt.recWait (none on a read-only world)
+                                                          // the records, rt.recWait (none on a read-only world);
+                                                          // Town round 1: town.loadDay(world, decodeState's townDay)
 export function serialize(world) -> string                // JSON with crc; a held offline gap (rt.offlineHold) is
                                                           // written as not yet seen (lastMs − the held gap), so a
                                                           // restart or hot reload during the hold finds it again (§2.3);
                                                           // round 5: with agents.contractorRecords as herd.contractors
 export function tick(world, snapshot) -> {advanced:boolean, ticks:int}   // D§2.11; uses snapshot.nowMs
+                                                          // Town round 1: the game-day turn runs town.dayTurn before
+                                                          // reconcile; stepOnce runs town.stepTown after rest;
+                                                          // applyOffline runs town.settleOffline after reconcile
 export function command(world, name, args, nowMs, tzOffsetMin?) -> {ok:boolean, error?:string, msg?:string}
 export function raiseMilestone(world, kind, {title, body}) -> boolean   // D§11.15, via ev.milestone
 export function takeMilestones(world, nowMs) -> [{n, kind, at, title, body}]   // the host drains them
@@ -644,7 +724,7 @@ promoted to Principal; Junior, Senior and Staff raise nothing).
 | `rename` | `{heroId, name}` or `{herd:true, name}` | rename |
 | `retire` | `{heroId}` | Lv 30+ to Hall of Fame; its pending chests open at full value (a click), and it leaves a paused boss fight (`boss.leaveSavedFight`); the freed slot promotes a waiting Contractor at once (round 4, `promoteContractors`) |
 | `rebind` | `{heroId, address}` | move a live agent onto a benched hero (its machine, `live.machine`, goes with it) |
-| `buy` | `{building}` | buy a building level |
+| `buy` | `{building}` | buy a building level; Town round 1: `{building: "review_desk"}` buys a Review Desk level (`town.buyDesk`, its level in `herd.town`), "Review Desk 1 (-1.0k gold)" |
 | `setting` | `{key, value}` | herd.cfg.*: calm, nums, stageH, glow (a rarity id or 0..5), collapse, auto (the master switch: `cfg.autopilot`; the systems keep their own values), auto.*, notify.*; and collapsed (the host's note that it hid the stage) |
 | `digestSeen` | `{}` | clears the Herd button's "since you last looked" dot (D§10.7) and the unseen-loss count (`herd.unseenUnrev = 0`) |
 | `lossesSeen` | `{}` | round 4: the unseen-loss count to 0 (the Herd panel runs it from its timer while the Digest tab is shown), the Digest's lines kept |
@@ -921,13 +1001,13 @@ StageVM = {
             working:boolean, dusk:boolean, review:boolean, dividerLeft:boolean,
             props:[{key, sprite, x, y, w, h}] }],
   heroes: [HeroVM], mobs: [MobVM], chests: [ChestVM], boss: null|BossVM, fx: [FxVM],
-  overflow: null | { key, x, w, count, dots:[hex], tooltip }
+  overflow: null | { key, x, w, count, dots:[hex], tooltip, town:null|{text, label} }
 }
 HeroVM = { key, heroId, address, x, y /*feet*/, scale, name, level, careerTitle, clsId, face,
            state, focused, pinned, attacking, opacity, hpFrac, xpFrac, feFrac,
            colors:{hoodie, titleBar, screen, faceInk}, programIcon:null|{path, tint, color},
            weapon:{clsId, color}, hat:null|{tier, color}, accessory: clsId,
-           bubble:null|{label}, zzz:boolean, campfire:null|{x,y}, crate:boolean,
+           bubble:null|{label}, zzz:boolean, campfire:null|{x,y,station}, crate:boolean,
            tag:null|{text, color}, forklings:[{key, address, x, y, face, status, bubble:boolean}],
            forklingExtra:int, tooltip, nameplate:{x, y, w, text, hpFrac} }
 MobVM  = { key, mobId, name, x, y /*feet*/, size, px, sprite, glyph:null|string, glyphColor,
@@ -1136,6 +1216,26 @@ SheetVM / HerdVM typedefs in `ui/sheet.js` / `ui/herdpanel.js` are the full list
   `line: [before the space, the space, after it]`, which join to the tooltip; the part after the
   space gives way first). It splits the view's string for layout only; the text shown is the
   view's.
+- Town round 1 (Localhost, D§10.8, docs/TOWN.md §7): `HeroVM.campfire` is `{x, y, station}` for a
+  resting hero, `station` its station while it is on duty (`"review_desk"`), else `"campfire"`;
+  the renderer draws the desk only for `"review_desk"`, so a save with the town at zero renders as
+  before. `OverflowVM.town: null | {text: "LGTM ×206", label: "+25 · LGTM ×206"}` once the Review
+  Desk is open (the chip's props, line and fold), its tooltip with the town's lines. The `coin`
+  FxVM of a chest opening that took an LGTM carries `text` "+1.2k · LGTM" (drawn as a text float in
+  coin brass, ranked with the status floats); every other coin has no text. `HerdVM.tabs[0].label`
+  is "Localhost" while the town is on (its id stays `upgrades`). `UpgradesVM.town: null | {header,
+  headerTip, shelf: {label, frac, text, tooltip}, titles: null | {text, tooltip}, desk: BuildingVM
+  (id "review_desk", icon `fx/desk.svg`, its Buy an ActionVM for `buy {building: "review_desk"}`),
+  hint}`; `buildings` stays the six D§10.2 buildings. `CareerVM.job: null | {title, line, frac,
+  status, onDuty, tooltip}`; `RosterRowVM.job` (the row tooltip's town line, or null); the Digest's
+  section `town` ("Localhost", icon `ui/desk.svg`, lines `tw:made` and `tw:ranks`), not counted in
+  the tab badge. Chrome helpers (`view/chrome.js`): `townLine(world, hero, live)` (town.heroTown
+  only for a Lv 10+ roster hero that is resting, shipped or off duty while the desk is open, so the
+  list surfaces stay cheap), `townTip`, `dutyNote` (" · at the Review Desk", for the chip's hero
+  lines) and `vendorLine` ("vendor/: 2 contractors · next hired 04:00"). The agent-status fields
+  (`RowVM.status`, the plate chip, the Roster status, the HUD counts) are never given a town word.
+  The sheet's header line (`sub`, then the quoted task) keeps the agent's own word ("resting"); its
+  job is `header.subTip`, the line's tooltip, never placed before the agent's task.
 
 `sheetView`/`herdView` shapes are owned jointly by the engine-world author and the sheet/herd
 UI author; their exact fields are defined in `game/view.js` JSDoc, which is the source of truth.
@@ -1166,6 +1266,14 @@ compare deltas) is produced in `view.js`, not in `ui/`.
   tiles (fixed aspect) across the room, `.opacity(0.5)`; while the room is working, a slow loop
   on `left` (±16 px, period ≈ 20 s) gives the parallax drift; still otherwise.
 - Ground: solid ground colour band from y=160 to bottom, 2 px accent top line, tiled ground SVG.
+- Localhost (Town round 1, D§10.8): `restProp` draws a resting hero's prop in the campfire's spot:
+  the campfire, or for `campfire.station === "review_desk"` the desk sprite (`fx/desk.svg`) and a
+  warm lamp glow on a slow 2.6 s opacity loop (2 elements and 1 loop; the sprite alone at the bare
+  levels: the campfire's cost). The Localhost chip draws desk, campfire, desk as its props (the
+  tents' count) and "LGTM ×n" in XP cyan in the ground band (+1 element); at the three coarsest
+  levels the line folds into the "+N" label (`chipFold`, which `sceneCost` counts too, so the chip
+  costs what the camp chip did there). The LGTM coin (`FxVM.text`) is drawn as a text float instead
+  of the 6 px coin sprite, the same one element.
 
 ### 6.2 Motion recipes (all native)
 `x`, `y` and amplitudes are script px (zoom 1). Loop `from`/`to` are written as raw px (gpui-shell
@@ -1339,6 +1447,35 @@ review, not pixel-exact. `flex_grow(n)` and `flex_shrink(n)` keep their number (
   (name, level, XP, class, hoodie), four are hired at their levels, longest-running first, and the
   newcomer takes none of their hires; and herdr listing every terminal at once with the newcomer
   last: the four hires still go to the Contractors at their levels.
+- Localhost (Town round 1, docs/TOWN.md §12): `test/town.test.mjs` (the duty rule state by state,
+  Lv 10, Contractors, rule 3 across the 04:00 turn and an offline gap, a chest seen as the app comes
+  back reaching no further back than the gap, pro rata sharing as ticking would, shelf caps,
+  +10% XP and gold and never Seals or items, demand-gated and manual buys behind the Buildings
+  switch, ranks, Uptime, the Digest line, the Hall of Fame rank, read-only and `--no-town`,
+  determinism, and a hot reload that hands over the exact shelf and job XP);
+  `test/save.test.mjs` (every fixture loads with the town at zero and writes back byte for byte;
+  `r6-town.json` round-trips; an older build's round trip keeps the extras, `_compat.olderBuild`,
+  and 9cd00cd's own `game/` (from git) opening a town save 5 game days later puts nobody on duty;
+  a town save without `d` reads `digestSnap.tw` into `dg`; rounding; the 30-hero worst case with the town at its largest ≤ 30 KB); the view and UI tests
+  (the desk in the campfire's spot, the chip's line and fold at equal cost, the LGTM coin float,
+  the Localhost tab and its layout at 608–1000 px in Chromium, the Job card, the status surfaces
+  keeping the agent's words, the Digest card, budgets at 30 and 60 heroes 360–4000 px);
+  `test/pacing.test.mjs` (`--no-town` equals 9cd00cd's numbers, the town's share and gates, day 1
+  identical, sweep and bot identical with and without the town). `test/helpers/town.mjs`
+  `seedTown(world, opts)` gives a test world a town.
+- Localhost end to end (`test/town-e2e.test.mjs`, Town round 1): main.js and host.js in the mock,
+  the stage and party on one graph, an owner-like day of 32 agents in the owner's 25 spaces (30
+  saved heroes, one an Intern, two agents playing Contractors), the world pumped by `host.pump`
+  over herdr's live data between checks: the Review Desk opens by autopilot within its 60-tick
+  pass of the first seen chest of a Lv 10+ hero, with one header note; an Intern keeps the
+  campfire; a Contractor promoted mid-day keeps the credit of the chest it shipped as a Contractor
+  and goes on duty when it rests; a hero at its desk in its slot is back in the field the tick its
+  agent works (party row and plate keep the agent's words); lunch fills the shelf and the next
+  seen chest pays "+n · LGTM"; the chip's "LGTM ×n" by 18:00; no level bought on a day with gold to
+  spare; herdr closed at 21:30 and opened at 08:40: the gap fills exactly the shelf's room,
+  nothing is spent, noted or notified, autopilot buys one level (the day before filled and ran
+  dry), one Localhost card in the Digest; a hot reload keeps the shelf, counters, job XP, credit
+  days and titles exactly, and no second level comes that game day.
 - contractor records (`test/contractors.test.mjs`, round 5): a restart across 04:00 promotes the
   Contractor at its level with its name, class and look; a hot reload keeps its place in line and an
   Intern's signature; two Contractors in one seat; a saved hero of the seat first; a newcomer listed
@@ -1358,7 +1495,11 @@ review, not pixel-exact. `flex_grow(n)` and `flex_shrink(n)` keep their number (
   each at min(wall, CPU), and time their perf checks as the best of several batches. Run `PERF=1
   npm test` on an idle machine for the strict numbers.
 `tools/pacing-sim.mjs` reproduces D§12.1 milestones for the four personas within ±15% and the
-bot plateau (D§12.2); it is run in CI-like `npm run pacing`. Its exit code is 1 when a milestone or
+bot plateau (D§12.2); it is run in CI-like `npm run pacing`. Town round 1: the town runs by
+default and every persona also runs a `--no-town` baseline on the same seed; each prints a
+`Localhost:` line and a `town gates:` line (docs/BALANCE.md §14); `--no-town` alone prints what the
+build before the town printed; `--seeds 1-4` ends with the summary table; `--persona big` is the
+owner model (32 agents, 7 days, its own gates: town share ≤ 4%, the town's own save bytes ≤ 0.8 KB). Its exit code is 1 when a milestone or
 the bot is off, in `--json` mode too (the JSON carries each verdict and `bad`), and 2 on an unknown
 argument. `test/pacing.test.mjs` simulates its whole games in `before()` hooks.
 
@@ -1370,7 +1511,10 @@ problem (a throw, an error chip, a render/view/task/host/shim error, a fuzz fail
 mismatch, a failed reload or load, a save round trip that is not identical, an unmapped role, a
 failed phase) or a time past one of herdr's budgets (render 50 ms, callbacks 500 ms, module
 evaluation 500 ms). Half a budget and the tick p95 over the ~5 ms target are warnings (exit 0 unless
-`--strict`). The reload phase allows each copy main.js's one timer, plus the Herd panel's own
+`--strict`). The stress30 world has a town phase (Town round 1: Review Desk 10, the shelf at 37.5 / 100,
+every hero credited today with job XP across all five ranks, three rank-ups waiting), plain data
+with no imports; its tick p95 is measured against the build before the town (docs/BALANCE.md
+§14.3). The reload phase allows each copy main.js's one timer, plus the Herd panel's own
 (`ROLE_TIMERS = {herd: 1}`: its Digest `lossesSeen` timer), and `runTimer` fires every repeating
 timer of a copy. The shim's `exec` exists for parity; the mod never calls it. Exit 2 on a usage error: an unknown argument or phase, a missing value, a
 non-positive `--ticks` / `--seconds` / `--long`.
@@ -1389,7 +1533,8 @@ size) so herdr's raster stays sharp. GPUI rasterises an SVG drawn with `image()`
 drawn/viewBox ratio:
 - k = 2 for `mob/*` (elite × full grower = 2.0), `gear/acc-*` (sheet portrait) and `fx/campfire`;
 - k = 2 for `fx/stamp-fixed` (it slams in from 160×56 and shrinks to 80×28 while it fades in);
-- k = 3 for `fx/mug` (the Herd panel's building icon draws it at 26 from 12).
+- k = 3 for `fx/mug` (the Herd panel's building icon draws it at 26 from 12);
+- k = 2 for `fx/desk` (Town round 1: the Localhost tab's Review Desk card draws it at 26 from 24×20).
 
 A size that a visible `width`/`height` transition passes through counts as a draw. Everything
 else, including bosses, backgrounds and `fx/banner`, is drawn at or below its viewBox and keeps
@@ -1420,6 +1565,8 @@ zoom above 1).
 | `art/fx/chest-duck.svg`, `chest-duck-open.svg` | 28×28 | Duck Chest (D§11.4) |
 | `art/gear/weapon-<clsId>-edge.svg` | 16×16 | MASK of the weapon rim; stacked in cyan over tier-5 weapons so the dark metal stays visible |
 | `art/bg/backlog-*` | as zones | The Backlog's far/prop/ground set |
+| `art/fx/desk.svg` | 24×20 | Town round 1: the Review Desk prop (a desk with a green lamp, a lit desktop and a paper stack), k = 2; drawn in a resting hero's campfire spot, in the Localhost chip and on the tab's card |
+| `art/ui/desk.svg` | 16×16 | Town round 1: MASK of the desk, the Localhost tab's icon and the Digest card's |
 
 Notes from the art build: every mob sprite already draws its code joke, so `MobVM.glyph` is
 normally `null` (tooltip text only). Mobs and bosses are bottom-anchored (`top = feetY − h`);
@@ -1470,3 +1617,7 @@ Palette per zone from D§9.2; rarity colours D§8.2; reserved colours D§11.1.
     for `save.unsaved`) after the first incident's `save.broken`, the oldest giving way (§4
     `keepAside`). herdr's mod API cannot list or delete files without `exec`, and the mod runs no
     program, so the bound comes from fixed names.
+14. docs/TOWN.md §9 "a hot reload hands the town over in `world.state`" → the world crosses a hot
+    reload as save text (§2.3), which rounds job XP and the shelf as a save does, so the handover's
+    `town` field carries the exact values, the last approved titles and the town's runtime maps
+    (`town.handoverTown` / `takeTown`, §3.4); a restart still rounds down (D§13.2).

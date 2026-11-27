@@ -33,6 +33,7 @@ import { grantXP, recordTask, autoLearn, setClass, winReview } from "./heroes.js
 import { rollItem, rollKeepsake, equipItem, stashPut } from "./items.js";
 import { awardBadge, addGold, addSnippets, noteFirstClear, logMax } from "./herd.js";
 import { liveHeroes } from "./agents.js";
+import { townState, takeTown } from "./town.js";
 
 const SEC = 1000;
 const DAY_MS = 86400000;
@@ -395,6 +396,27 @@ function boundHeroes(world) {
   return liveHeroes(world).map((p) => p[0]);
 }
 
+// Localhost (docs/TOWN.md round 1) in a demo world: the Review Desk at `rd`, the shelf, today's and
+// the lifetime counters, every hero of Lv 10+ with seen work today and job XP over the ranks (by
+// roster order), and the last approved titles (runtime: a hot reload's handover, town.takeTown).
+// Plain data in the engine's own shape; the scripted run that follows (finish) plays on with it.
+function seedTown(world, { rd, shelf, today, chests, used, xp }) {
+  const town = townState(world.state);
+  town.rd = rd;
+  town.s[0] = shelf;
+  town.u[0] = used;
+  town.t = [today, 1, chests];
+  const heroes = world.state.heroes;
+  heroes.forEach((h, i) => { if (h.L >= T.town.minLevel) h.st.tw = [xp[i % xp.length], world.state.herd.day]; });
+  const titles = [];
+  for (let k = 0; k < Math.min(5, heroes.length); k++) {
+    const h = heroes[(k * 2) % heroes.length];
+    const by = heroes[(k * 2 + 1) % heroes.length];
+    titles.push({ title: TITLES[(k * 5 + 3) % TITLES.length], heroId: h.id, name: h.name, byId: by.id, byName: by.name, at: world.state.herd.lastMs });
+  }
+  takeTown(world, { titles });
+}
+
 // Runs the cast, remembers it for demoSnapshot(), returns {world, snapshot}.
 function finish(world, cast, nowMs, { lead = 0 } = {}) {
   runCast(world, cast, nowMs - lead);
@@ -556,6 +578,7 @@ const KINDS = {
     addSnippets(world.state, 26000);
     seedReleases(world, 2900);
     for (let k = 0; k < BADGES.length; k++) if (k % 4 !== 3) awardBadge(world, BADGES[k].id, null);
+    seedTown(world, { rd: 7, shelf: 40.2, today: 206, chests: 340, used: 1118, xp: [1120, 412, 160, 104, 61, 30, 12] });
     return finish(world, cast, nowMs);
   },
 
@@ -566,6 +589,7 @@ const KINDS = {
     const world = start(nowMs, 30 * 60 * SEC, cast);
     clearZones(world, 1);
     boundHeroes(world).forEach((h, i) => grow(world, h, { L: 16 + i, cls: ["shellmancer", "hotfixer", "refactorer", "rubberducker"][i], rar: 1, pol: 1 }));
+    seedTown(world, { rd: 2, shelf: 12.5, today: 9, chests: 12, used: 140, xp: [112, 30, 8, 0] });
     return finish(world, cast, nowMs);
   },
 

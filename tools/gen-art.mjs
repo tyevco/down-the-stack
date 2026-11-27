@@ -1859,6 +1859,33 @@ const FX_ART = {
     g.shade(c, dk(c, 0.2), 1, 0, 2);
     g.outline(OUT, { r: 1 });
   }],
+  // Localhost's Review Desk (docs/TOWN.md §7.2): a small desk with a lamp and a paper stack, the
+  // prop a resting hero on duty sits at instead of its campfire (ui/stage.js desk(); its glow is
+  // the lamp's, a div under the sprite like the campfire's). Also the Localhost tab's desk card.
+  "desk.svg": [24, 20, (g) => {
+    const wood = "#a8743f", leg = "#6e4426", paper = "#f3ead2";
+    g.layer((l) => {
+      l.rect(1, 10, 22, 2, wood);                          // the top
+      l.rect(3, 12, 2, 8, leg); l.rect(19, 12, 2, 8, leg);  // legs
+      l.rect(12, 12, 9, 4, dk(wood, 0.18));                 // a drawer
+      l.fine(() => { l.rect(15, 13, 3, 1, "#e0c27a"); });   // its handle
+    }, OUT, 1);
+    g.layer((l) => {
+      l.fine(() => {
+        l.rect(14, 6, 7, 4, paper); l.rect(15, 5, 6, 1, paper);   // the paper stack
+        for (const y of [6, 8]) l.rect(15, y, 5, 1, "#c8bea6");
+      });
+    }, OUT, 1);
+    g.layer((l) => {
+      l.fine(() => {
+        l.rect(3, 9, 4, 1, "#5c616b");                          // the lamp: base, arm, shade
+        l.line(4, 8, 6, 3, "#8a8f98", 1);
+        l.poly([[5, 5], [7, 1], [10, 1], [12, 5]], "#3f8f6a");
+        l.rect(7, 5, 4, 1, "#fff1b8");                          // its bulb
+      });
+    }, OUT, 1);
+    g.fine(() => { g.rect(7, 9, 5, 1, "#fff1b8"); });           // lamplight on the top
+  }],
   // No lanyard: onboarding (D§3.4 "new hire lanyard") is a "New hire" chip on the sheet, and the
   // Intern's own accessory (gear/acc-intern) is a lanyard. test/art.test.mjs requires every
   // effect sprite here to be drawn by the mod.
@@ -1994,6 +2021,15 @@ const UI_ART = {
   career: (g) => { g.rect(2, 0, 2, 16, K); g.rect(12, 0, 2, 16, K); for (const y of [2, 6, 10, 14]) g.rect(4, y, 8, 2, K); },
   journal: (g) => { g.rect(2, 1, 12, 14, K); g.rect(4, 3, 8, 3, null); g.rect(5, 4, 6, 1, K); g.rect(10, 0, 2, 8, null); g.rect(10, 0, 2, 7, K); g.rect(10, 6, 1, 1, null); g.rect(2, 13, 1, 2, null); g.rect(4, 13, 10, 1, null); },
   lock: (g) => { g.ring(3, 0, 10, 12, 2, K); g.rect(1, 6, 14, 10, K); g.rect(7, 9, 2, 4, null); g.rect(6, 9, 4, 2, null); },
+  // Localhost (docs/TOWN.md §7.5): a desk with its lamp, the Localhost tab's and the Digest card's icon
+  desk: (g) => {
+    g.rect(0, 9, 16, 2, K);                                     // the top
+    g.rect(1, 11, 2, 5, K); g.rect(13, 11, 2, 5, K);             // legs
+    g.rect(8, 11, 5, 3, K); g.rect(10, 12, 1, 1, null);          // a drawer and its handle
+    g.rect(2, 8, 3, 1, K); g.line(3, 7, 4, 3, K, 1.4);           // the lamp: base and arm
+    g.poly([[3, 4.5], [5, 1], [7.5, 1], [9.5, 4.5]], K);         // its shade
+    g.rect(11, 5, 4, 4, K); g.rect(12, 6, 2, 1, null);           // a paper stack
+  },
 };
 
 function fxAssets(out) {
@@ -2167,6 +2203,7 @@ export function isMaskPath(rel) {
 //   mob/*         elite ELITE.scale 1.25 × a full grower (1 + TRAITS.grower.cap 0.6) = 2.0 → 2
 //   gear/acc-*    the sheet portrait draws them at 25.2 of 16 = 1.58                   → 2
 //   fx/campfire   the Herd panel building icon, 26 of 24                               → 2
+//   fx/desk       the Localhost tab's Review Desk card icon, 26 of 24                  → 2
 //   fx/mug        the Herd panel building icon, 26 of 12 = 2.17                        → 3
 //   fx/stamp-fixed  the FIXED stamp starts at 160×56 (2 × 80×28, ui/stage.js) and shrinks
 //                 to its size over 300 ms while it fades in over 150 ms                → 2
@@ -2181,6 +2218,7 @@ const INTRINSIC_SCALE = [
   [/^art\/mob\//, 2],
   [/^art\/gear\/acc-/, 2],
   [/^art\/fx\/campfire\.svg$/, 2],
+  [/^art\/fx\/desk\.svg$/, 2],
   [/^art\/fx\/stamp-fixed\.svg$/, 2],
 ];
 

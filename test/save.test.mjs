@@ -3,13 +3,19 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import zlib from "node:zlib";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import * as D from "../mods/down-the-stack/game/data.js";
 import * as F from "../mods/down-the-stack/game/formulas.js";
 import * as H from "../mods/down-the-stack/game/heroes.js";
 import * as I from "../mods/down-the-stack/game/items.js";
 import * as W from "../mods/down-the-stack/game/world.js";
-import { encodeState, decodeState, crc32, newState, saveSize, migrations, SAVE_VERSION } from "../mods/down-the-stack/game/save.js";
+import { encodeState, decodeState, crc32, newState, saveSize, migrations, SAVE_VERSION, _compat } from "../mods/down-the-stack/game/save.js";
 import * as V from "../mods/down-the-stack/game/view.js";
+import * as TW from "../mods/down-the-stack/game/town.js";
+import * as Hd from "../mods/down-the-stack/game/herd.js";
 
 // Re-sign a parsed save object after editing it (the CRC covers the text with crc = "").
 function resign(obj) {
@@ -322,14 +328,26 @@ describe("size budget (D§13.3)", () => {
       h.spFree = 1;
       for (const it of h.eq) assert.ok(it.aff.length >= 3);
     }
+    const before = saveSize(encodeState(s)).bytes;
+    // Localhost at its largest (docs/TOWN.md §8): the Review Desk maxed, both shelves and every
+    // counter in use, every hero with four-figure job XP and yesterday's seen work, a rank-up
+    // waiting for each, the Digest's baseline and the Hall of Fame entry's rank
+    s.herd.town = { s: [99.9, 3], rd: 10, u: [62500, 999], t: [420, 7, 450], ru: s.heroes.map((h) => [h.id, 4]) };
+    for (const h of s.heroes) h.st.tw = [1234.56, s.herd.day - 1];
+    s.herd.town.dg = [61000, 980];
+    s.herd.digestSnap = { at: 1794990000000, lv: {}, bk: [], seals: 0, drops: 0, badges: [] };
+    for (const h of s.heroes) s.herd.digestSnap.lv[h.id] = h.L;
+    s.herd.fame[0].push(4);
     const text = encodeState(s);
     const size = saveSize(text);
     assert.ok(size.ok, `save is ${size.bytes} bytes`);
     assert.ok(size.bytes <= 30 * 1024);
+    const town = size.bytes - before - saveSize(JSON.stringify({ digestSnap: { at: 0, lv: s.herd.digestSnap.lv, bk: [], seals: 0, drops: 0, badges: [] } })).bytes;
+    assert.ok(town <= 0.8 * 1024, `the town's own bytes ${town}`);
     // a typical herd of 6 heroes is well under 10 KB
     const typical = saveSize(encodeState(populated(6, { stash: 40, log: 30 })));
     assert.ok(typical.bytes < 10 * 1024, `typical ${typical.bytes}`);
-    t.diagnostic(`worst case ${size.bytes} B; typical 6-hero herd ${typical.bytes} B`);
+    t.diagnostic(`worst case ${size.bytes} B (${before} B before the town's fields, about ${town} B of them the town's); typical 6-hero herd ${typical.bytes} B`);
     assert.equal(encodeState(decodeState(text).state), text);
   });
 
@@ -462,13 +480,14 @@ describe("every save this branch has written loads (SAVE_VERSION stays 1)", () =
   // pending-chest titles and journal strings; a4ea9ab the D§11.15 settings, the build the owner ran
   // in herdr; c041909 round 3: the collapse countdown, "unrev" journal lines; d1ffb4f round 4: the
   // journal's name column, Contractors promoted at the 04:00 turn; r5 round 5's slim Contractor
-  // records, written by this branch's engine before that round was committed), demo worlds of the
-  // time, one with shared titles.
+  // records, written by this branch's engine before that round was committed; r6 town round 1's
+  // Localhost mid-day, test/fixtures/saves/r6-town.json), demo worlds of the time, one with shared
+  // titles.
   const DIR = new URL("./fixtures/saves/", import.meta.url);
   const files = fs.readdirSync(DIR).filter((f) => f.endsWith(".json")).sort();
 
   test("the fixtures cover every format", () => {
-    assert.deepEqual(files.map((f) => f.split("-")[0]).filter((c, i, a) => a.indexOf(c) === i), ["2d2583c", "4082db1", "4f9a1a0", "990aa93", "a4ea9ab", "c041909", "d1ffb4f", "r5"]);
+    assert.deepEqual(files.map((f) => f.split("-")[0]).filter((c, i, a) => a.indexOf(c) === i), ["2d2583c", "4082db1", "4f9a1a0", "990aa93", "a4ea9ab", "c041909", "d1ffb4f", "r5", "r6"]);
   });
 
   for (const f of files) {
@@ -498,4 +517,249 @@ describe("every save this branch has written loads (SAVE_VERSION stays 1)", () =
       if (f.includes("pend")) assert.ok(saveSize(t2).bytes < saveSize(text).bytes - 1000, "shared titles are written once now");
     });
   }
+});
+
+// The build before the town (9cd00cd): its game/ from git into a temp directory, {game: the file URL
+// of its game/, dir: the directory to remove}, or null (the test skips) where this clone does not
+// have that commit.
+const BEFORE_TOWN = "9cd00cd";
+function olderGame(t) {
+  const repo = new URL("..", import.meta.url);
+  const git = (args, opts = {}) => spawnSync("git", ["-C", repo.pathname, ...args], { maxBuffer: 64 << 20, ...opts });
+  const has = git(["cat-file", "-e", `${BEFORE_TOWN}^{commit}`]);
+  if (has.error || has.status !== 0) {
+    t.skip(`commit ${BEFORE_TOWN} is not in this clone`);
+    return null;
+  }
+  const tar = git(["archive", "--format=tar", BEFORE_TOWN, "mods/down-the-stack/game"]);
+  assert.equal(tar.status, 0, String(tar.stderr));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dts-before-town-"));
+  fs.writeFileSync(path.join(dir, "package.json"), '{"type":"module"}\n');
+  const x = spawnSync("tar", ["-x", "-C", dir], { input: tar.stdout });
+  assert.equal(x.status, 0, String(x.stderr));
+  return { game: pathToFileURL(path.join(dir, "mods", "down-the-stack", "game") + "/"), dir };
+}
+
+describe("Localhost in the save (docs/TOWN.md §8; SAVE_VERSION stays 1)", () => {
+  const DIR = new URL("./fixtures/saves/", import.meta.url);
+  const files = fs.readdirSync(DIR).filter((f) => f.endsWith(".json") && !f.startsWith("r6")).sort();
+  const snap = (nowMs) => ({ nowMs, tzOffsetMin: 0, weekday: 2, windowActive: true, focusedTerminal: null, agents: [], subagents: [], tabs: {}, spaces: [] });
+
+  for (const f of files) {
+    test(`${f}: loads with the town at zero and writes nothing of it`, () => {
+      const text = fs.readFileSync(new URL(f, DIR), "utf8");
+      const { state } = decodeState(text);
+      assert.equal(state.herd.town, undefined, "no town");
+      assert.equal(TW.deskLevel(state), 0);
+      assert.equal(TW.shelfOf(state), 0);
+      for (const h of state.heroes) {
+        assert.equal(TW.jobXpOf(h), 0);
+        assert.equal(TW.creditDayOf(h), null);
+      }
+      const { world } = W.loadWorld(text, { nowMs: state.herd.lastMs });
+      for (const h of world.state.heroes) assert.equal(TW.onDuty(world, h), false, "nobody on duty without a Review Desk");
+      for (let k = 1; k <= 5; k++) W.tick(world, snap(state.herd.lastMs + k * 1000));
+      const out = W.serialize(world);
+      assert.ok(!/"town"|"tw"/.test(out), "a save with the town at zero has none of its keys");
+      assert.equal(TW.townInfo(world).open, false);
+      // the town's codecs off (a build before the town) write the very same text
+      const mine = encodeState(decodeState(text).state);
+      _compat.olderBuild = true;
+      try { assert.equal(encodeState(decodeState(text).state), mine, "byte for byte as before the town"); } finally { _compat.olderBuild = false; }
+    });
+  }
+
+  test("r6-town.json: a town mid-day round-trips byte for byte and reads back as the engine wrote it", () => {
+    const text = fs.readFileSync(new URL("r6-town.json", DIR), "utf8");
+    const raw = JSON.parse(text);
+    assert.equal(raw.v, 1);
+    assert.ok(raw.herd.x && raw.herd.x.town, "herd extras: town");
+    const { state, warning } = decodeState(text);
+    assert.equal(warning, null);
+    assert.equal(encodeState(state), text);
+    const town = state.herd.town;
+    assert.equal(TW.deskLevel(state), 6);
+    assert.equal(TW.shelfCap(state), 60);
+    assert.ok(town.s[0] > 0 && town.s[0] <= 60);
+    assert.ok(town.u[0] > 0 && town.t[2] >= town.t[0]);
+    assert.ok(town.ru.length > 0, "rank-ups waiting for the Digest");
+    assert.ok(town.dg[0] > 0 && town.dg[0] <= town.u[0], "the Digest's baseline, in the town");
+    assert.equal("tw" in state.herd.digestSnap, false);
+    assert.equal(raw.herd.x.town.d, raw.day, "the day the credits count from: the save's own");
+    assert.ok(state.herd.fame.some((e) => e.length === 5 && e[4] > 0), "a Hall of Fame entry with its job rank");
+    const days = state.heroes.map((h) => TW.seenDays(state, h));
+    assert.ok(days.includes(0) && days.includes(1), `seen work today and yesterday: ${days}`);
+    // st extras: [whole job XP, d]; the memory form is [jobXp, creditDay]
+    raw.heroes.forEach((h, i) => {
+      const tw = h.st && h.st[6] && h.st[6].tw;
+      if (!tw) return assert.equal(state.heroes[i].st.tw, undefined);
+      assert.equal(state.heroes[i].st.tw[0], tw[0]);
+      if (tw.length > 1) assert.equal(state.heroes[i].st.tw[1], raw.herd.x.town.d - tw[1]);
+    });
+    // and the world runs on it
+    const { world } = W.loadWorld(text, { nowMs: raw.lastMs });
+    for (let k = 1; k <= 5; k++) W.tick(world, snap(raw.lastMs + k * 1000));
+    assert.deepEqual(world.rt.errors, []);
+    assert.equal(TW.deskLevel(world.state), 6);
+    assert.ok(world.state.heroes.some((h) => TW.onDuty(world, h)), "off-duty heroes with seen work are on duty");
+  });
+
+  test("an older build keeps the whole town when it loads and saves (every field an extras key)", () => {
+    const text = fs.readFileSync(new URL("r6-town.json", DIR), "utf8");
+    _compat.olderBuild = true;
+    let older;
+    let oldTown;
+    try {
+      const { state } = decodeState(text);
+      oldTown = state.herd.town;
+      older = encodeState(state);
+    } finally { _compat.olderBuild = false; }
+    assert.equal(older, text, "written back as it was read");
+    assert.deepEqual(Object.keys(oldTown).sort(), ["d", "dg", "rd", "ru", "s", "t", "u"].filter((k) => k in JSON.parse(text).herd.x.town).sort());
+    assert.deepEqual(decodeState(older).state.herd.town, decodeState(text).state.herd.town);
+  });
+
+  // An older build keeps herd.x.town and every hero's st extras as it read them, but its saves move
+  // the top-level day on. The credits' d counts back from the town's own d, so a credit it carried
+  // for days reads as days old, never as today's or yesterday's (rule 3, docs/TOWN.md §2.2).
+  test("an older build that saves a town save on later game days: the credits it carried stay lapsed, today's counters start afresh, the Digest keeps its baseline", () => {
+    const text = fs.readFileSync(new URL("r6-town.json", DIR), "utf8");
+    const raw = JSON.parse(text);
+    const credits = decodeState(text).state.heroes.map((h) => TW.creditDayOf(h));
+    assert.ok(credits.includes(raw.day) && credits.includes(raw.day - 1), `${credits}`);
+    let moved;
+    _compat.olderBuild = true;
+    try {
+      const { state } = decodeState(text);
+      state.herd.day += 3; // three game days on in the older build
+      state.herd.lastMs += 3 * 86400000;
+      state.herd.digestSnap = { at: state.herd.lastMs, lv: {}, bk: [], seals: 0, drops: 0, badges: [] }; // its digestMark
+      moved = encodeState(state);
+    } finally { _compat.olderBuild = false; }
+    assert.equal(JSON.parse(moved).herd.x.town.d, raw.day, "the older build keeps the town's day as it was");
+    const { state, townDay } = decodeState(moved);
+    assert.equal(townDay, raw.day);
+    assert.deepEqual(state.heroes.map((h) => TW.creditDayOf(h)), credits, "the credits keep their own days");
+    for (const h of state.heroes) assert.equal(TW.seenDays(state, h), null, "3 days old: lapsed");
+    const { world } = W.loadWorld(moved, { nowMs: JSON.parse(moved).lastMs });
+    for (const h of world.state.heroes) assert.equal(TW.onDuty(world, h, null), false, `${h.name} is not on duty`);
+    assert.deepEqual(world.state.herd.town.t, [0, 0, 0], "the game-day turn the older build skipped ran at the load");
+    const town = world.state.herd.town;
+    assert.equal(Hd.digest(world.state).town.lgtm, town.u[0] - town.dg[0], "the LGTMs since the town's own baseline, not every one");
+    // the town build's own save: d is the save's day again, the lapsed credits left out
+    const back = JSON.parse(W.serialize(world));
+    assert.equal(back.herd.x.town.d, back.day);
+    assert.ok(back.heroes.every((h) => !(h.st && h.st[6] && h.st[6].tw && h.st[6].tw.length > 1)), "no credit written");
+    // the same day (or a save without the town's d): credits count from the save's day, as before
+    const same = decodeState(text).state;
+    assert.deepEqual(same.heroes.map((h) => TW.seenDays(same, h)), raw.heroes.map((h) => (h.st && h.st[6] && h.st[6].tw && h.st[6].tw.length > 1 ? h.st[6].tw[1] : null)));
+  });
+
+  test("the town's d is written with a credit even while the town is at zero, and nothing without one", () => {
+    const s = newState({ nowMs: 1795000000000, seed: 3 });
+    s.herd.day = 20800;
+    s.heroes.push(H.newHero(s, { seat: "a/claude", ord: 0, nowMs: 1795000000000 }));
+    s.heroes[0].st.tw = [0, 20800];
+    const o = JSON.parse(encodeState(s));
+    assert.deepEqual(o.herd.x.town, { d: 20800 });
+    assert.deepEqual(o.heroes[0].st[6].tw, [0, 0]);
+    assert.equal(s.herd.town, undefined, "the state is not touched");
+    s.heroes[0].st.tw = [0, 20797];
+    assert.ok(!/"town"|"tw"/.test(encodeState(s)), "a lapsed credit: nothing");
+  });
+
+  test("a town save from before the town wrote its day (no d, the Digest's baseline in digestSnap.tw): the baseline moves into the town, the credits count from the save's day", () => {
+    const raw = JSON.parse(fs.readFileSync(new URL("r6-town.json", DIR), "utf8"));
+    const town = raw.herd.x.town;
+    const dg = town.dg;
+    assert.ok(dg[0] > 0, "the fixture has a baseline");
+    delete town.d;
+    delete town.dg;
+    raw.herd.x.digestSnap.tw = [dg[0], 0];
+    const { state, townDay } = decodeState(resign(raw));
+    assert.equal(townDay, null);
+    assert.deepEqual(state.herd.town.dg, [dg[0], 0], "digestSnap.tw read into the town");
+    assert.equal("tw" in state.herd.digestSnap, false);
+    assert.equal(Hd.digest(state).town.lgtm, state.herd.town.u[0] - dg[0], "the Digest counts from it");
+    raw.heroes.forEach((h, i) => {
+      const tw = h.st && h.st[6] && h.st[6].tw;
+      if (tw && tw.length > 1) assert.equal(TW.creditDayOf(state.heroes[i]), raw.day - tw[1], "from the save's own day");
+    });
+    const back = JSON.parse(encodeState(state));
+    assert.deepEqual([back.herd.x.town.d, back.herd.x.town.dg], [raw.day, [dg[0]]], "written the new way");
+    assert.equal("tw" in back.herd.x.digestSnap, false);
+    // a baseline already in the town wins over a stale digestSnap.tw
+    const both = JSON.parse(fs.readFileSync(new URL("r6-town.json", DIR), "utf8"));
+    both.herd.x.digestSnap.tw = [3, 0];
+    assert.deepEqual(decodeState(resign(both)).state.herd.town.dg, [dg[0], 0]);
+  });
+
+  test("a real older build (9cd00cd, the last commit before the town) saves a town save 5 game days later: nobody goes on duty, no job XP from idle time, the Digest counts from the town's baseline", async (t) => {
+    const old = olderGame(t);
+    if (!old) return;
+    try {
+      const Wo = await import(new URL("world.js", old.game).href);
+      const Ho = await import(new URL("herd.js", old.game).href);
+      const text = fs.readFileSync(new URL("r6-town.json", DIR), "utf8");
+      const raw = JSON.parse(text);
+      const later = raw.lastMs + 5 * 86400000;
+      const o = Wo.loadWorld(text, { nowMs: later }).world;
+      // saved while it still holds the 5-day gap for the first agent listing (its first 10 s): the
+      // save keeps the gap's start, so the town build settles the gap as if it had been closed,
+      // from the credits the heroes held when it began: at most the shelf's room, never a burst
+      Wo.tick(o, snap(later + 1000));
+      const held = W.loadWorld(Wo.serialize(o), { nowMs: later + 1000 }).world;
+      const xp0 = held.state.heroes.reduce((a, h) => a + TW.jobXpOf(h), 0);
+      const room = TW.shelfCap(held.state) - TW.shelfOf(held.state);
+      for (let k = 1; k <= 20; k++) W.tick(held, snap(later + 1000 + k * 1000));
+      assert.ok(held.state.heroes.reduce((a, h) => a + TW.jobXpOf(h), 0) - xp0 <= room + 1e-6, "the gap makes at most the shelf's room");
+      for (const h of held.state.heroes) assert.equal(TW.onDuty(held, h, null), false, `${h.name} is not on duty after the gap`);
+      // and once it ran past the hold (the gap settled its own way, without the town)
+      for (let k = 2; k <= 15; k++) Wo.tick(o, snap(later + k * 1000));
+      Ho.digestMark(o.state, later + 15000); // the person reads the Digest there
+      const moved = Wo.serialize(o);
+      assert.equal(JSON.parse(moved).day, raw.day + 5, "the older build moved the day on");
+      assert.ok(JSON.parse(moved).lastMs >= later, "and its time");
+      assert.ok(!("tw" in JSON.parse(moved).herd.x.digestSnap));
+      const { world } = W.loadWorld(moved, { nowMs: later + 16000 });
+      for (const h of world.state.heroes) {
+        assert.equal(TW.seenDays(world.state, h), null, `${h.name}: seen work 5 days ago`);
+        assert.equal(TW.onDuty(world, h, null), false, `${h.name} is not on duty`);
+      }
+      const jobXp = world.state.heroes.map((h) => TW.jobXpOf(h));
+      const shelf = TW.shelfOf(world.state);
+      for (let k = 1; k <= 120; k++) W.tick(world, snap(later + 16000 + k * 1000));
+      assert.deepEqual(world.rt.errors, []);
+      assert.deepEqual(world.state.heroes.map((h) => TW.jobXpOf(h)), jobXp, "no job XP from idle time");
+      assert.equal(TW.shelfOf(world.state), shelf, "no LGTMs made");
+      const town = world.state.herd.town;
+      assert.deepEqual(town.t, [0, 0, 0], "today's counters start afresh");
+      const g = Hd.digest(world.state);
+      assert.equal(g.town.lgtm, town.u[0] - town.dg[0], `the LGTMs since the town's baseline (${town.dg[0]}), not all ${town.u[0]}`);
+    } finally {
+      fs.rmSync(old.dir, { recursive: true, force: true });
+    }
+  });
+
+  test("job XP is written whole (rounded down), the shelf to a tenth; a credit lapsed for 2 game days is left out; the town at zero writes nothing", () => {
+    const s = newState({ nowMs: 1795000000000, seed: 3 });
+    s.herd.day = 20800;
+    for (let k = 0; k < 4; k++) s.heroes.push(H.newHero(s, { seat: "a/claude", ord: k, nowMs: 1795000000000 }));
+    const [a, b, c, d] = s.heroes;
+    a.st.tw = [24.999, 20800];
+    b.st.tw = [0, 20799];
+    c.st.tw = [7.5, 20798];
+    d.st.tw = [0, 20790];
+    s.herd.town = { s: [39.96, 0], rd: 4, u: [0, 0], t: [0, 0, 0], ru: [] };
+    const o = JSON.parse(encodeState(s));
+    assert.deepEqual(o.heroes.map((h) => h.st && h.st[6] && h.st[6].tw), [[24, 0], [0, 1], [7], undefined]);
+    assert.deepEqual(o.herd.x.town, { d: 20800, s: [39.9], rd: 4 }, "the day the credits count from first");
+    const back = decodeState(encodeState(s)).state;
+    assert.deepEqual(back.heroes.map((h) => h.st.tw), [[24, 20800], [0, 20799], [7], undefined]);
+    assert.equal(TW.rankOf(TW.jobXpOf(back.heroes[0])), 0, "a reload never lifts a rank");
+    s.herd.town = { s: [0, 0], rd: 0, u: [0, 0], t: [0, 0, 0], ru: [] };
+    for (const h of s.heroes) h.st.tw = [0];
+    const zero = encodeState(s);
+    assert.ok(!/"town"|"tw"/.test(zero), zero);
+  });
 });

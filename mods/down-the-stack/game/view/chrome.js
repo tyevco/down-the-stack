@@ -43,6 +43,8 @@ import * as Herd from "../herd.js";
 import { releaseInfo, sprintTarget, digestDot, freshEyesCapMin } from "../herd.js";
 import { heroCtx } from "../combat.js";
 import { fnv1a32 } from "../rng.js";
+// Localhost (docs/TOWN.md): read through the namespace, as agents.hireOutlook is
+import * as TW from "../town.js";
 
 /** More live rows than this and the party switches to slim rows. */
 export const SLIM_AT = 12;
@@ -491,6 +493,8 @@ function heroFacts(world, idx, hero, live) {
     // agents.stepStatus refreshes live.why every 5 ticks, heroes taking turns by id (null only
     // until a new hero's first tick)
     why: live ? live.why || null : null,
+    // Localhost (TOWN.md §7.4): only tooltips and secondary text read it
+    town: townLine(world, hero, live || null),
   };
 }
 
@@ -552,7 +556,8 @@ function questLine(world, hero, live, f, opts = {}) {
       // program or shell name too
       if (f.chest) return `Shipped: ${tellingTitle(f.chest.title, live) || title || "Commit"} · ${f.chest.seals.toFixed(1)} Seals · ${f.chest.tier} chest`;
       return `Shipped${title ? `: ${title}` : ""}`;
-    case "resting": return "Resting at the campfire";
+    // on duty in town (TOWN.md §7.4): its own word stays first, the job is the tooltip's next line
+    case "resting": return f.town && f.town.onDuty ? "Resting" : "Resting at the campfire";
     default:
       if (task && title) return `Quest: ${title} (${fmtDuration(num(task.workSec))})`;
       return `Questing in ${mapLabelOf(world, live) || "the Stack"}`;
@@ -594,6 +599,91 @@ export function hireLine(world, hero) {
   if (!hero || !hero.contractor || typeof Agents.hireOutlook !== "function") return "";
   const o = Agents.hireOutlook(world, hero);
   return o && typeof o.text === "string" ? o.text : "";
+}
+
+// ---------------------------------------------------------------------------------------------
+// Localhost (docs/TOWN.md §7.2, §7.4): the town's words go only into tooltips and secondary text.
+// The status surfaces (the pane header chip, the party row, the Roster's status column, the HUD)
+// keep the agent's own words ("resting", "shipped · chest ready", "! waiting"), so an idle
+// pr-review-* terminal never reads as reviewing.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * A hero's town data (town.heroTown: station, job, rank, title, duty state, tooltip), or null when
+ * the town is off. `live` null: no terminal (off duty); undefined: the hero's own Live.
+ */
+export function townOf(world, hero, live) {
+  if (!world || !hero || typeof TW.heroTown !== "function" || !TW.townOn()) return null;
+  return TW.heroTown(world, hero, live);
+}
+
+// a hero in one of these states fights or waits: never on duty, no town line in its tooltips
+const BUSY = { questing: 1, crashed: 1, supervising: 1, waiting: 1 };
+
+/**
+ * townOf for the status surfaces' tooltips and secondary text, on every row and slot of a render:
+ * null at once (no heroTown call) for a hero that can be neither on duty nor told why it is not
+ * (an Intern, a Contractor, one that fights or waits) and before the Review Desk opens, where
+ * heroTown's line would be empty anyway. 30 heroes a render stay cheap in QuickJS.
+ */
+export function townLine(world, hero, live) {
+  if (!world || !hero || hero.contractor || !(hero.id > 0) || !(hero.L >= T.town.minLevel)) return null;
+  const l = live === undefined ? (world.rt && world.rt.live ? world.rt.live.get(hero.id) : null) : live;
+  if (l && BUSY[l.state]) return null;
+  if (typeof TW.deskLevel !== "function" || !(TW.deskLevel(world.state) >= 1)) return null;
+  return townOf(world, hero, l || null);
+}
+
+/**
+ * The town's tooltip line for a hero (TOWN.md §7.2), or "": on duty "At the Review Desk ·
+ * Committer reviewer · last LGTM “Bump deps” (Fizz)" (off duty: "Off duty · at the Review Desk
+ * (Committer reviewer)"), a Lv 10+ hero whose seen work lapsed "Back on duty after you see its next
+ * chest"; nothing while it works, waits, is an Intern or a Contractor, or before the desk opens.
+ */
+export function townTip(t) {
+  return t && typeof t.tip === "string" ? t.tip : "";
+}
+
+/** " · at the Review Desk": secondary text after a hero's own status word while it is on duty, else "". */
+export function dutyNote(t) {
+  return t && t.onDuty && t.stationName ? ` · at the ${t.stationName}` : "";
+}
+
+/** When the next Contractor is hired, short ("next hired 04:00"), from agents.hireOutlook. */
+function nextHire(o, nowMs) {
+  switch (o.when) {
+    case "soon": return "the next joins now";
+    case "day": return o.days > 1 ? `next hired in ${o.days} game days (04:00)` : "next hired 04:00";
+    case "grace": return Number.isFinite(o.atMs) ? `next hired in about ${Math.max(1, Math.ceil((o.atMs - num(nowMs)) / 60000))} min` : "next hired when a roster slot frees";
+    case "reconnect": return Number.isFinite(o.atMs) ? `next hired in about ${Math.max(1, Math.ceil((o.atMs - num(nowMs)) / 1000))} s` : "next hired in a moment";
+    case "never": return "none hired: this save is read-only";
+    default: return "next hired when a roster slot frees";
+  }
+}
+
+/**
+ * Localhost's `vendor/` lobby (TOWN.md §2.4, the chip's tooltip and the Localhost tab):
+ * "vendor/: 2 contractors · next hired 04:00", counting live Contractors and those whose agent is
+ * away (round 5 records); null with none. Contractors hold no job, so they only wait here.
+ */
+export function vendorLine(world) {
+  if (!world || !world.state || !world.rt) return null;
+  const live = [];
+  for (const [h] of liveHeroes(world)) if (h.contractor) live.push(h);
+  const away = Array.isArray(world.state.herd.contractors) ? world.state.herd.contractors.length : 0;
+  const n = live.length + away;
+  if (!n) return null;
+  let next = "";
+  if (live.length && typeof Agents.hireOutlook === "function") {
+    let best = null;
+    for (const c of live) {
+      const o = Agents.hireOutlook(world, c);
+      if (o && (!best || o.position < best.position)) best = o;
+      if (o && o.position === 0) break;
+    }
+    if (best) next = nextHire(best, world.rt.nowMs);
+  } else if (!live.length) next = "their agents are away";
+  return `vendor/: ${n} ${plural(n, "contractor")}${next ? ` · ${next}` : ""}`;
 }
 
 function headLine(hero, f, live) {
@@ -661,6 +751,8 @@ function liveChips(world, idx, hero, live, f) {
 
 function rowTooltip(world, idx, hero, live, f) {
   const lines = [headLine(hero, f, live), questLine(world, hero, live, f, { row: true })];
+  const job = townTip(f.town);
+  if (job) lines.push(job);
   const hold = holdLine(f);
   if (hold) lines.push(hold);
   const xp = hero.L >= T.levelCap ? "XP MAX" : `XP ${Math.floor(f.xpFrac * 100)}%`;
@@ -759,6 +851,9 @@ function offDutyRow(world, idx, hero, nowMs, slim) {
     `Off duty${since ? ` for ${since}` : ""}${hero.fe >= 1 ? ` · Fresh Eyes ${fmtMin(hero.fe)}` : ""}`,
     `${xp} · ${offDutyFreshEyes(world, hero)}`,
   ];
+  // Localhost (TOWN.md §7.2): "Off duty · at the Review Desk (Committer reviewer)"
+  const job = townTip(f.town);
+  if (job) lines.splice(2, 0, job);
   const chips = [];
   if (f.chest) {
     lines.push(`${f.chest.n} ${plural(f.chest.n, "chest")} waiting (${f.chest.seals.toFixed(1)} Seals): click the chest to open`);
@@ -921,6 +1016,8 @@ function plateTooltip(world, hero, live, f) {
   const gear = Math.round(num(st.pl, hero.L)) - hero.L;
   lines.push(`Power Level ${hero.L + gear} = Lv ${hero.L} ${gear < 0 ? "−" : "+"} gear ${Math.abs(gear)}`);
   lines.push(questLine(world, hero, live, f));
+  const job = townTip(f.town);
+  if (job) lines.push(job);
   const hold = holdLine(f);
   if (hold) lines.push(hold);
   if (f.why) {

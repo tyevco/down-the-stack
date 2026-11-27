@@ -1119,3 +1119,29 @@ test("save trouble is never silent (D§13.1): the party and the HUD carry it as 
   assert.equal(Chrome.saveCue(null), null);
   assert.equal(Chrome.saveCue({ message: "" }), null);
 });
+
+// Localhost, the town (docs/TOWN.md round 1, §7.4 and §14 must-avoid P3/P4): the agent-status
+// surfaces keep the agent's words; the town lights no Herd dot.
+test("Localhost: the party row, pane header and HUD keep the agent's words; the job only in tooltips; the town alone lights no Herd dot", () => {
+  const w = D.demoWorld("idle", NOW).world;
+  const rows = V.partyView(w, { width: 300, nowMs: NOW }).groups.flatMap((g) => g.rows);
+  const onDuty = rows.filter((r) => /\nAt the Review Desk · /.test(r.tooltip));
+  assert.ok(onDuty.length >= 2, "resting heroes on duty say where in their tooltip");
+  for (const r of onDuty) {
+    assert.ok(["idle", "done"].includes(r.status), `${r.name}: ${r.status}`);
+    assert.ok(!/review|LGTM|desk/i.test(`${r.status} ${r.mapLabel} ${r.chips.map((c) => c.text).join(" ")}`), r.name);
+    const plate = V.nameplateView(w, { terminal: r.address });
+    assert.ok(["resting", "shipped", "shipped · chest ready"].includes(plate.chip.text), plate.chip.text);
+    assert.match(plate.tooltip, /\nAt the Review Desk · /);
+  }
+  // the HUD counts the agents' states only
+  const hud = V.hudView(w, { nowMs: NOW });
+  assert.ok(!/review|LGTM|desk/i.test(JSON.stringify(hud)), "no town words in the HUD");
+  // read the digest, then only the town has news: no Herd dot
+  assert.ok(W.command(w, "digestSeen", {}, NOW).ok);
+  w.state.herd.town.u[0] += 12;
+  w.rt.version++;
+  const party = V.partyView(w, { width: 300, nowMs: NOW + 1000 });
+  assert.equal(V.hudView(w, { nowMs: NOW + 1000 }).digestDot, false);
+  assert.ok(!JSON.stringify(party.footer ?? {}).includes("Localhost"));
+});

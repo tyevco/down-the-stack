@@ -48,6 +48,13 @@ const NOTIFY_KEYS = ["boss", "lts", "principal"];
 const NUMS = ["off", "crits", "all"];
 const SIZE_BUDGET = 30 * 1024;
 
+/**
+ * Test seam (test/save.test.mjs): olderBuild true reads and writes the town's fields (docs/TOWN.md
+ * §8: herd extras "town", st extras "tw") as plain extras, exactly as a build before the town did,
+ * so the tests can show such a build keeps them through a load and a save.
+ */
+export const _compat = { olderBuild: false };
+
 // ---------------------------------------------------------------------------------------------
 // CRC32 (IEEE, over UTF-8 bytes) and base64
 // ---------------------------------------------------------------------------------------------
@@ -259,7 +266,9 @@ function encodedDefault(codec, ctx) {
   return defaultJson.get(codec);
 }
 
-function encFields(src, fields, ctx, extrasKey = "x") {
+// xCodecs (optional Map readableKey -> {enc, dec}): extras keys with an encoding of their own
+// (herd.town, docs/TOWN.md §8); enc returning undefined leaves the key out (a town at zero)
+function encFields(src, fields, ctx, extrasKey = "x", xCodecs = null) {
   const out = {};
   const known = new Set();
   for (const [rk, ck, codec] of fields) {
@@ -272,18 +281,27 @@ function encFields(src, fields, ctx, extrasKey = "x") {
   let any = false;
   for (const k of Object.keys(src)) {
     if (known.has(k) || k[0] === "_" || src[k] === undefined || typeof src[k] === "function") continue;
-    x[k] = qDeep(src[k]);
+    const xc = xCodecs && !_compat.olderBuild ? xCodecs.get(k) : null;
+    const c = xc ? xc.enc(src[k], ctx) : qDeep(src[k]);
+    if (c === undefined) continue;
+    x[k] = c;
     any = true;
   }
   if (any) out[extrasKey] = x;
   return out;
 }
 
-function decFields(obj, fields, ctx, extrasKey = "x") {
+function decFields(obj, fields, ctx, extrasKey = "x", xCodecs = null) {
   const out = {};
   const o = isObj(obj) ? obj : {};
   for (const [rk, ck, codec] of fields) out[rk] = o[ck] === undefined ? codec.def() : codec.dec(o[ck], ctx);
-  if (isObj(o[extrasKey])) for (const k of Object.keys(o[extrasKey])) if (!(k in out)) out[k] = o[extrasKey][k];
+  if (isObj(o[extrasKey])) {
+    for (const k of Object.keys(o[extrasKey])) {
+      if (k in out) continue;
+      const xc = xCodecs && !_compat.olderBuild ? xCodecs.get(k) : null;
+      out[k] = xc ? xc.dec(o[extrasKey][k], ctx) : o[extrasKey][k];
+    }
+  }
   return out;
 }
 
@@ -645,6 +663,57 @@ const contractorsCodec = {
   def: () => [],
 };
 
+// Localhost, the town (docs/TOWN.md §8): herd.town is an extras key ("x": {"town": ...}), so an
+// older build keeps it as it is when it loads and saves (SAVE_VERSION stays 1). Readable and compact
+// share one shape, {s: [lgtm, runbooks], rd, u: [lgtmUsed, runbooksUsed], t: [today, flags,
+// chestsToday], ru: [[heroId, rank], ...], dg: [lgtmUsed, runbooksUsed] when the Digest was last
+// read}; written with the shelf to one decimal (rounded down, so a reload never lifts it), every
+// other number whole, trailing zeros and empty fields left out, and nothing at all for a town at
+// zero (a save without one is byte-identical to before). Keys this file does not know are kept.
+// The written town starts with d: the game day it was written on (herd.day), also written when the
+// town is at zero but a hero's credit is (ctx.twStamp). Heroes' credits (st extras tw) count from it
+// and so do today's counters: an older build keeps d as it was while its saves move the top-level
+// day on, so a credit it carried for days reads as lapsed, not as today's (decTw), and the town's
+// game-day turn it skipped runs when the save is loaded (world.loadWorld). d is not kept in memory
+// (decodeState returns it as townDay); a save without it counts from its own day.
+const TOWN_KEYS = ["d", "s", "rd", "u", "t", "ru", "dg"];
+const tenth = (x) => Math.floor(numOr(x, 0) * 10 + 1e-6) / 10;
+const whole = (x) => Math.max(0, Math.round(numOr(x, 0)));
+const townCodec = {
+  enc(v, ctx) {
+    if (!isObj(v)) return v === undefined ? undefined : qDeep(v);
+    const out = {};
+    const s = trimZeros([tenth(Array.isArray(v.s) ? v.s[0] : 0), tenth(Array.isArray(v.s) ? v.s[1] : 0)].map(q));
+    if (s.length) out.s = s;
+    const rd = whole(v.rd);
+    if (rd) out.rd = rd;
+    const u = trimZeros([whole(Array.isArray(v.u) ? v.u[0] : 0), whole(Array.isArray(v.u) ? v.u[1] : 0)]);
+    if (u.length) out.u = u;
+    const t = trimZeros([0, 1, 2].map((i) => whole(Array.isArray(v.t) ? v.t[i] : 0)));
+    if (t.length) out.t = t;
+    const ru = (Array.isArray(v.ru) ? v.ru : []).filter((e) => Array.isArray(e) && Number.isFinite(e[0])).map((e) => [q(e[0]), whole(e[1])]);
+    if (ru.length) out.ru = ru;
+    const dg = trimZeros([whole(Array.isArray(v.dg) ? v.dg[0] : 0), whole(Array.isArray(v.dg) ? v.dg[1] : 0)]);
+    if (dg.length) out.dg = dg;
+    for (const k of Object.keys(v)) if (!TOWN_KEYS.includes(k) && k[0] !== "_" && v[k] !== undefined) out[k] = qDeep(v[k]);
+    if (!Object.keys(out).length && !(ctx && ctx.twStamp)) return undefined;
+    return Object.assign({ d: q((ctx && ctx.day) || 0) }, out);
+  },
+  dec(c, ctx) {
+    if (!isObj(c)) return c;
+    const list = (a, n) => { const o = zeros(n); if (Array.isArray(a)) for (let i = 0; i < n; i++) o[i] = numOr(a[i], 0); return o; };
+    const out = {
+      s: list(c.s, 2), rd: numOr(c.rd, 0), u: list(c.u, 2), t: list(c.t, 3),
+      ru: (Array.isArray(c.ru) ? c.ru : []).filter((e) => Array.isArray(e) && Number.isFinite(e[0])).map((e) => [e[0], numOr(e[1], 0)]),
+      dg: list(c.dg, 2),
+    };
+    if (ctx && typeof c.d === "number" && Number.isFinite(c.d)) ctx.townDay = c.d;
+    for (const k of Object.keys(c)) if (!(k in out) && k !== "d") out[k] = c[k];
+    return out;
+  },
+};
+const HERD_X = new Map([["town", townCodec]]);
+
 const HERD_FIELDS = [
   ["name", "name", C.str("The Herd")],
   ["gold", "gold", C.num(0)],
@@ -820,22 +889,61 @@ const pendCodec = {
   def: () => [],
 };
 
+// Localhost (docs/TOWN.md §8): st.tw = [jobXp, creditDay?] in memory (job XP with its fraction;
+// the game day of the hero's last chest opened with full value) is written in the st row's extras as
+// [jobXp, d]: job XP in whole units (rounded down, so a reload never lifts a rank), d = the save's
+// day - creditDay while the duty rule still counts it (0 or 1), left out at 2 or more; nothing for a
+// hero with neither. An older build keeps the extras as they are, and the town's d (townCodec) as it
+// was: d counts back from that day when the save has it (ctx.townDay), else from the save's day.
+function twDays(v, day) {
+  const c = Array.isArray(v) && v.length > 1 && typeof v[1] === "number" && Number.isFinite(v[1]) ? v[1] : null;
+  return c == null ? null : Math.max(0, Math.round(day - c));
+}
+function encTw(v, ctx) {
+  if (!Array.isArray(v)) return v === undefined ? null : qDeep(v);
+  const jx = Math.max(0, Math.floor(numOr(v[0], 0) + 1e-9));
+  const d = twDays(v, (ctx && ctx.day) || 0);
+  const out = [jx];
+  const rest = v.slice(2).map((x) => qDeep(x));
+  if (d != null && d <= T.town.gateDays) out.push(d);
+  else if (rest.length) out.push(null);
+  if (rest.length) out.push(...rest);
+  return out.length > 1 || jx > 0 ? out : null;
+}
+function decTw(c, ctx) {
+  if (!Array.isArray(c)) return c;
+  const out = [Math.max(0, numOr(c[0], 0))];
+  const day = ctx && typeof ctx.townDay === "number" ? ctx.townDay : (ctx && ctx.day) || 0;
+  if (typeof c[1] === "number" && Number.isFinite(c[1])) out.push(day - c[1]);
+  else if (c.length > 2) out.push(null);
+  for (let i = 2; i < c.length; i++) out.push(c[i]);
+  return out;
+}
+
 // Lifetime counters {kills, tasks, seals, wh, dodges, healed, ...} -> [6 numbers, extras?]
 const STAT_KEYS = ["kills", "tasks", "seals", "wh", "dodges", "healed"];
 const statCodec = {
-  enc(v) {
+  enc(v, ctx) {
     const s = isObj(v) ? v : {};
     const row = STAT_KEYS.map((k) => q(numOr(s[k], 0)));
     const x = {};
-    for (const k of Object.keys(s)) if (!STAT_KEYS.includes(k) && k[0] !== "_" && s[k] !== undefined) x[k] = qDeep(s[k]);
+    for (const k of Object.keys(s)) {
+      if (STAT_KEYS.includes(k) || k[0] === "_" || s[k] === undefined) continue;
+      if (k === "tw" && !_compat.olderBuild) {
+        const tw = encTw(s.tw, ctx);
+        if (tw != null) x.tw = tw;
+        continue;
+      }
+      x[k] = qDeep(s[k]);
+    }
     if (Object.keys(x).length) row.push(x);
     return row;
   },
-  dec(c) {
+  dec(c, ctx) {
     const r = Array.isArray(c) ? c : [];
     const out = {};
     STAT_KEYS.forEach((k, i) => { out[k] = numOr(r[i], 0); });
-    if (isObj(r[6])) for (const k of Object.keys(r[6])) if (!(k in out)) out[k] = r[6][k];
+    if (isObj(r[6])) for (const k of Object.keys(r[6])) if (!(k in out)) out[k] = k === "tw" && !_compat.olderBuild ? decTw(r[6][k], ctx) : r[6][k];
     return out;
   },
   def: () => ({ kills: 0, tasks: 0, seals: 0, wh: 0, dodges: 0, healed: 0 }),
@@ -932,7 +1040,7 @@ function decHero(o, ctx) {
   const cls = numOr(isObj(o) ? o.c : 0, 0);
   const sub = {
     fallbacks: 0, level: L, weaponType: (CLASSES[cls] || CLASSES[L >= 10 ? 3 : 0]).weapon, table: ctx.table, base: ctx.base,
-    workSec: heroWorkSec(statCodec.dec(isObj(o) ? o.st : null)),
+    workSec: heroWorkSec(statCodec.dec(isObj(o) ? o.st : null, ctx)), day: ctx.day, townDay: ctx.townDay,
   };
   const h = decFields(o, HERO_FIELDS, sub);
   ctx.fallbacks += sub.fallbacks;
@@ -976,8 +1084,15 @@ export function encodeState(state) {
   const table = [];
   const strIdx = new Map();
   for (const [str, n] of counts) if (n > 1) { strIdx.set(str, table.length); table.push(str); }
-  const ctx = { strIdx, base: top.lastMs, day: top.day };
-  top.herd = encFields(herdSrc, HERD_FIELDS, ctx);
+  // Localhost (docs/TOWN.md §8): the town carries the day its heroes' credits count from, written
+  // even with the town at zero when a credit is (townCodec)
+  const twStamp = !_compat.olderBuild && heroes.some((h) => {
+    const d = isObj(h) && isObj(h.st) ? twDays(h.st.tw, top.day) : null;
+    return d != null && d <= T.town.gateDays;
+  });
+  if (twStamp && herdSrc.town == null) herdSrc.town = {};
+  const ctx = { strIdx, base: top.lastMs, day: top.day, twStamp };
+  top.herd = encFields(herdSrc, HERD_FIELDS, ctx, "x", HERD_X);
   if (inbox) top.herd.ib = inbox;
   top.heroes = heroes.map((h) => encFields(h, HERO_FIELDS, Object.assign({}, ctx, { workSec: heroWorkSec(h.st) })));
   if (table.length) top.str = table;
@@ -1003,7 +1118,8 @@ function saveError(code, message) {
  * Parses a save text back into world.state.
  * @param {string} text
  * @param {{ignoreCrc?:boolean}} [opts]
- * @returns {{state:object, warning:null|string, readOnly:boolean}}
+ * @returns {{state:object, warning:null|string, readOnly:boolean, townDay:null|number}} townDay: the
+ *   game day the save's town was written on (herd.x.town.d, docs/TOWN.md §8), null without one
  * @throws Error with .code "parse" (not JSON), "shape" (not a save) or "crc" (checksum mismatch)
  */
 export function decodeState(text, opts = {}) {
@@ -1040,8 +1156,16 @@ export function decodeState(text, opts = {}) {
   if (numOr(obj.gen, GEN) > GEN) warnings.push(`Save uses newer content (gen ${obj.gen}); unknown ids were replaced`);
 
   const ctx = { fallbacks: 0, table: Array.isArray(obj.str) ? obj.str : [], base: numOr(obj.lastMs, 0), day: numOr(obj.day, 0) };
-  const herd = decFields(obj.herd, HERD_FIELDS, ctx);
+  const herd = decFields(obj.herd, HERD_FIELDS, ctx, "x", HERD_X);
   delete herd.ib; // (an extras key only if a save put "ib" under herd.x)
+  // Localhost: the town's Digest baseline lives in herd.town.dg, which an older build keeps (its
+  // digestMark writes digestSnap anew); a town save from before that kept it in digestSnap.tw
+  if (!_compat.olderBuild && isObj(herd.town) && isObj(herd.digestSnap) && "tw" in herd.digestSnap) {
+    const tw = herd.digestSnap.tw;
+    const dg = Array.isArray(herd.town.dg) ? herd.town.dg : [];
+    if (Array.isArray(tw) && !(dg[0] || dg[1])) herd.town.dg = [0, 1].map((i) => Math.max(0, numOr(tw[i], 0)));
+    delete herd.digestSnap.tw;
+  }
   const inbox = expandInbox(obj.herd.ib, ctx);
   if (inbox && inbox.length) herd.inbox = inbox;
   herd.lastMs = numOr(obj.lastMs, 0);
@@ -1052,7 +1176,7 @@ export function decodeState(text, opts = {}) {
   const state = { v: SAVE_VERSION, gen: GEN, herd, heroes };
   if (isObj(obj.x)) for (const k of Object.keys(obj.x)) if (!(k in state)) state[k] = obj.x[k];
   if (ctx.fallbacks) warnings.push(`${ctx.fallbacks} unknown id(s) replaced with fallbacks`);
-  return { state, warning: warnings.length ? warnings.join("; ") : null, readOnly };
+  return { state, warning: warnings.length ? warnings.join("; ") : null, readOnly, townDay: typeof ctx.townDay === "number" ? ctx.townDay : null };
 }
 
 /** Byte length of a save text in UTF-8 and whether it fits the D§13.3 budget (30 KB). */
